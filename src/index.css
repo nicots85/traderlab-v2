@@ -22,6 +22,17 @@ body {
   min-height: 100vh;
 }
 
+.ambient-grid {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgb(54 40 27 / 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(54 40 27 / 0.05) 1px, transparent 1px);
+  background-size: 36px 36px;
+  mask-image: radial-gradient(circle at center, black 35%, transparent 100%);
+}
+
 .bg-shell {
   background: transparent;
 }
@@ -120,6 +131,63 @@ body {
 .cta {
   background: linear-gradient(135deg, #d77a3f, #b7521e);
   color: #fff;
+}
+
+.pressable {
+  transition:
+    transform 160ms ease,
+    box-shadow 180ms ease,
+    filter 150ms ease;
+}
+
+.pressable:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 9px 18px rgb(43 23 10 / 0.16);
+}
+
+.pressable:active {
+  transform: translateY(1px) scale(0.98);
+  filter: saturate(1.12);
+}
+
+.scan-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border-radius: 999px;
+  border: 1px solid rgb(31 31 46 / 0.22);
+  padding: 0.35rem 0.65rem;
+  background: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+}
+
+.scan-toggle-on {
+  border-color: rgb(20 130 72 / 0.5);
+  background: rgb(224 248 236);
+}
+
+.scan-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  background: #d4473e;
+}
+
+.scan-toggle-on .scan-dot {
+  background: #1b965a;
+  animation: pulse-dot 1.1s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(27 150 90 / 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgb(27 150 90 / 0);
+  }
 }
 
 .cta-secondary {

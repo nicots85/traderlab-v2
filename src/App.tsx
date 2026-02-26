@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type Asset = "BTCUSD" | "ETHUSD" | "XAGUSD" | "XAUUSD";
 type Mode = "scalping" | "intradia";
@@ -89,10 +89,6 @@ const initialLearning: LearningModel = {
   hourEdge: {},
 };
 
-function rand(min: number, max: number) {
-  return Math.random() * (max - min) + min;
-}
-
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
@@ -132,7 +128,7 @@ function calcAtr(values: number[], lookback: number) {
 
 function getSpreadPct(asset: Asset, volumeShock: number) {
   const base = asset === "BTCUSD" ? 0.04 : asset === "ETHUSD" ? 0.05 : 0.03;
-  return base * (1 + volumeShock * 1.4);
+  return base * (1 + volumeShock * 1.35);
 }
 
 function calcDrawdown(trades: ClosedTrade[]) {
@@ -151,27 +147,101 @@ function calcDrawdown(trades: ClosedTrade[]) {
   return maxDrawdown;
 }
 
+function parseMetalsSpot(payload: unknown) {
+  const result: Partial<Record<"gold" | "silver", number>> = {};
+  if (!Array.isArray(payload)) return result;
+  payload.forEach((row) => {
+    if (row && typeof row === "object") {
+      const entries = Object.entries(row as Record<string, unknown>);
+      entries.forEach(([key, value]) => {
+        const low = key.toLowerCase();
+        if (typeof value === "number") {
+          if (low.includes("gold") || low.includes("xau")) result.gold = value;
+          if (low.includes("silver") || low.includes("xag")) result.silver = value;
+        }
+      });
+    }
+  });
+  return result;
+}
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return (await response.json()) as T;
+}
+
+async function fetchRealMarketSnapshot() {
+  const [btcTicker, ethTicker, btcKline, ethKline, metals] = await Promise.all([
+    fetchJson<{ price: string }>("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
+    fetchJson<{ price: string }>("https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT"),
+    fetchJson<Array<[number, string, string, string, string]>>(
+      "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=120",
+    ),
+    fetchJson<Array<[number, string, string, string, string]>>(
+      "https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=1m&limit=120",
+    ),
+    fetchJson<unknown>("https://api.metals.live/v1/spot"),
+  ]);
+
+  const metalSpot = parseMetalsSpot(metals);
+  const btcSeries = btcKline.map((bar) => Number(bar[4]));
+  const ethSeries = ethKline.map((bar) => Number(bar[4]));
+  const btcAbsRet = avg(
+    btcSeries.slice(1).map((value, index) => Math.abs((value - btcSeries[index]) / Math.max(btcSeries[index], 1e-9))),
+  );
+  const ethAbsRet = avg(
+    ethSeries.slice(1).map((value, index) => Math.abs((value - ethSeries[index]) / Math.max(ethSeries[index], 1e-9))),
+  );
+  const shock = clamp(((btcAbsRet + ethAbsRet) / 2) * 220, 0.08, 1.25);
+
+  return {
+    prices: {
+      BTCUSD: Number(btcTicker.price),
+      ETHUSD: Number(ethTicker.price),
+      XAUUSD: metalSpot.gold ?? initialPrices.XAUUSD,
+      XAGUSD: metalSpot.silver ?? initialPrices.XAGUSD,
+    } as Record<Asset, number>,
+    series: {
+      BTCUSD: btcSeries,
+      ETHUSD: ethSeries,
+    },
+    shock,
+  };
+}
+
 export function App() {
   const [tab, setTab] = useState<Mode>("scalping");
   const [asset, setAsset] = useState<Asset>("BTCUSD");
   const [prices, setPrices] = useState(initialPrices);
   const [series, setSeries] = useState<Record<Asset, number[]>>({
-    BTCUSD: Array.from({ length: 120 }, (_, i) => initialPrices.BTCUSD + Math.sin(i / 6) * 260 + rand(-90, 90)),
-    ETHUSD: Array.from({ length: 120 }, (_, i) => initialPrices.ETHUSD + Math.sin(i / 8) * 28 + rand(-11, 11)),
-    XAGUSD: Array.from({ length: 120 }, (_, i) => initialPrices.XAGUSD + Math.sin(i / 5) * 0.45 + rand(-0.11, 0.11)),
-    XAUUSD: Array.from({ length: 120 }, (_, i) => initialPrices.XAUUSD + Math.sin(i / 6) * 9 + rand(-3.2, 3.2)),
+    BTCUSD: Array.from({ length: 120 }, () => initialPrices.BTCUSD),
+    ETHUSD: Array.from({ length: 120 }, () => initialPrices.ETHUSD),
+    XAGUSD: Array.from({ length: 120 }, () => initialPrices.XAGUSD),
+    XAUUSD: Array.from({ length: 120 }, () => initialPrices.XAUUSD),
   });
   const [balance, setBalance] = useState(100);
   const [openPositions, setOpenPositions] = useState<Position[]>([]);
   const [closedTrades, setClosedTrades] = useState<ClosedTrade[]>([]);
   const [lastSignal, setLastSignal] = useState<Signal | null>(null);
-  const [volumeShock, setVolumeShock] = useState(0.3);
+  const [volumeShock, setVolumeShock] = useState(0.28);
   const [learning, setLearning] = useState<LearningModel>(initialLearning);
   const [apiKey, setApiKey] = useState("");
   const [usingGroq, setUsingGroq] = useState(false);
   const [riskPct, setRiskPct] = useState(1.2);
   const [backtestSize, setBacktestSize] = useState(40);
   const [lastBacktest, setLastBacktest] = useState<BacktestReport | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [autoScan, setAutoScan] = useState(false);
+  const [scanEverySec, setScanEverySec] = useState(20);
+  const [alerts, setAlerts] = useState<string[]>([]);
+  const [feedStatus, setFeedStatus] = useState("Waiting live feed...");
+  const [liveReady, setLiveReady] = useState(false);
+
+  useEffect(() => {
+    const envKey = import.meta.env.VITE_GROQ_API_KEY as string | undefined;
+    if (envKey && !apiKey) setApiKey(envKey);
+  }, [apiKey]);
 
   const spreadByAsset = useMemo(() => {
     const spreadMap = {} as Record<Asset, number>;
@@ -238,6 +308,10 @@ export function App() {
       .join(" ");
   }, [asset, series]);
 
+  function pushAlert(msg: string) {
+    setAlerts((prev) => [`${new Date().toLocaleTimeString()} - ${msg}`, ...prev].slice(0, 8));
+  }
+
   function refreshLearning(trades: ClosedTrade[]) {
     if (!trades.length) {
       setLearning(initialLearning);
@@ -290,7 +364,7 @@ export function App() {
     const spread = (spreadPct / 100) * price;
     const mtf = getMtfScore(currentAsset);
 
-    const momentum = mtf.exec + rand(-0.35, 0.35);
+    const momentum = mtf.exec;
     const direction: Direction =
       currentMode === "intradia"
         ? mtf.htf > 0 && mtf.ltf > 0 && momentum > 0
@@ -335,8 +409,8 @@ export function App() {
       mtf,
       rationale:
         currentMode === "intradia"
-          ? "Confluencia HTF + LTF + 1m. TP por momentum y cierre por reversion de media rapida."
-          : "Scalping con entrada rapida, SL corto y trailing ATR para cortar perdidas temprano.",
+          ? "MTF confluence HTF + LTF + 1m. TP ATR y cierre por cruce de medias rapidas."
+          : "Scalping rapido con SL corto y trailing ATR para proteger capital.",
     };
   }
 
@@ -360,7 +434,7 @@ export function App() {
             {
               role: "system",
               content:
-                "Eres un execution bot de trading simulado. Responde solo OPEN o SKIP sin texto extra.",
+                "You are a trading execution gate for a simulated account. Reply with exactly OPEN or SKIP.",
             },
             {
               role: "user",
@@ -377,18 +451,28 @@ export function App() {
     }
   }
 
-  async function createSignalAndExecute() {
-    const signal = generateSignal(tab, asset);
+  async function createSignalAndExecute(mode: Mode, targetAsset: Asset, autoLabel = false) {
+    if (!liveReady) {
+      pushAlert("Live feed not ready yet. Sync real data first.");
+      return;
+    }
+    const signal = generateSignal(mode, targetAsset);
     setLastSignal(signal);
     const decision = await aiDecision(signal);
-    if (decision !== "OPEN") return;
+    if (decision !== "OPEN") {
+      if (autoLabel) pushAlert(`Auto-scan: ${targetAsset} SKIP (conf ${signal.confidence.toFixed(1)}%)`);
+      return;
+    }
 
     const riskUsd = Math.max(0.5, equity * (riskPct / 100) * learning.riskScale);
     const stopDistance = Math.max(Math.abs(signal.entry - signal.stopLoss), signal.entry * 0.0003);
     const size = riskUsd / stopDistance;
     const marginUsed = (size * signal.entry) / leverageByAsset[signal.asset];
 
-    if (marginUsed > equity * 0.65) return;
+    if (marginUsed > equity * 0.65) {
+      if (autoLabel) pushAlert(`Auto-scan: ${targetAsset} blocked by margin control`);
+      return;
+    }
 
     const now = new Date().toISOString();
     const id = Date.now();
@@ -404,6 +488,7 @@ export function App() {
       },
       ...prev,
     ]);
+    if (autoLabel) pushAlert(`Auto-scan: OPEN ${signal.direction} ${signal.asset} conf ${signal.confidence.toFixed(1)}%`);
   }
 
   function closePosition(position: Position, exit: number, result: ExitReason) {
@@ -436,27 +521,11 @@ export function App() {
     });
   }
 
-  function runMarketStep() {
-    const nextShock = rand(0.1, 1.1);
-    setVolumeShock(nextShock);
-
-    const nextPrices = { ...prices };
-    assets.forEach((item) => {
-      const vol = item === "BTCUSD" ? 0.0068 : item === "ETHUSD" ? 0.0078 : 0.0022;
-      const drift = rand(-vol, vol) + rand(-0.0007, 0.0007);
-      nextPrices[item] = Math.max(0.1, prices[item] * (1 + drift));
-    });
-
-    setPrices(nextPrices);
-    setSeries((prev) => {
-      const next = { ...prev };
-      assets.forEach((item) => {
-        next[item] = [...prev[item], nextPrices[item]].slice(-140);
-      });
-      return next;
-    });
-
-    const values = series;
+  function evaluateOpenPositions(
+    nextPrices: Record<Asset, number>,
+    nextShock: number,
+    values: Record<Asset, number[]>,
+  ) {
     openPositions.forEach((position) => {
       const px = nextPrices[position.signal.asset];
       const spread = (getSpreadPct(position.signal.asset, nextShock) / 100) * px;
@@ -525,33 +594,123 @@ export function App() {
     });
   }
 
+  async function syncRealData() {
+    setIsSyncing(true);
+    try {
+      const payload = await fetchRealMarketSnapshot();
+      setPrices(payload.prices);
+      setSeries((prev) => {
+        const nextSeries = {
+          BTCUSD: payload.series.BTCUSD.length ? payload.series.BTCUSD : prev.BTCUSD,
+          ETHUSD: payload.series.ETHUSD.length ? payload.series.ETHUSD : prev.ETHUSD,
+          XAGUSD: [...prev.XAGUSD.slice(-159), payload.prices.XAGUSD],
+          XAUUSD: [...prev.XAUUSD.slice(-159), payload.prices.XAUUSD],
+        };
+        evaluateOpenPositions(payload.prices, payload.shock, nextSeries);
+        return nextSeries;
+      });
+      setVolumeShock(payload.shock);
+      setFeedStatus("Live feed synced");
+      setLiveReady(true);
+    } catch {
+      setFeedStatus("Live feed unavailable. No simulated fallback is enabled.");
+      setLiveReady(false);
+    } finally {
+      setIsSyncing(false);
+    }
+  }
+
+  async function runAutoScan() {
+    for (const item of assets) {
+      await createSignalAndExecute("intradia", item, true);
+    }
+  }
+
+  useEffect(() => {
+    void syncRealData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!autoScan) return;
+    const ms = Math.max(8, scanEverySec) * 1000;
+    const id = window.setInterval(() => {
+      void syncRealData();
+      void runAutoScan();
+    }, ms);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoScan, scanEverySec]);
+
   function runBacktest() {
+    if (!liveReady) {
+      pushAlert("Backtest needs live history first.");
+      return;
+    }
     const simulated: ClosedTrade[] = [];
     const returns: number[] = [];
 
     for (let i = 0; i < backtestSize; i += 1) {
-      const sampleAsset = assets[Math.floor(rand(0, assets.length))];
-      const mode: Mode = Math.random() > 0.5 ? "scalping" : "intradia";
-      const direction: Direction = Math.random() > 0.5 ? "LONG" : "SHORT";
-      const edge = (learning.hourEdge[(8 + i) % 24] ?? 0) * 0.08;
-      const winProb = clamp(0.47 + edge + (mode === "intradia" ? 0.03 : 0), 0.34, 0.7);
-      const isWin = Math.random() < winProb;
-      const pnl = isWin ? rand(0.3, 4.1) : -rand(0.25, 2.8);
+      const sampleAsset = assets[i % assets.length];
+      const mode: Mode = i % 2 === 0 ? "scalping" : "intradia";
+      const values = series[sampleAsset];
+      const start = Math.max(25, values.length - (backtestSize + 25));
+      const idx = start + i;
+      if (idx >= values.length - 2) break;
+
+      const history = values.slice(0, idx + 1);
+      const entry = values[idx];
+      const maFast = avg(history.slice(-5));
+      const maSlow = avg(history.slice(-13));
+      const direction: Direction = maFast >= maSlow ? "LONG" : "SHORT";
+      const atr = Math.max(calcAtr(history, 20), entry * 0.0004);
+      const stopDist = atr * (mode === "scalping" ? 1.05 : 1.65);
+      const tpDist = atr * (mode === "scalping" ? learning.scalpingTpAtr : learning.intradayTpAtr);
+      const stop = direction === "LONG" ? entry - stopDist : entry + stopDist;
+      const tp = direction === "LONG" ? entry + tpDist : entry - tpDist;
+      const horizon = mode === "scalping" ? 6 : 22;
+      let exit = values[Math.min(idx + horizon, values.length - 1)];
+      let result: ExitReason = "REVERSAL";
+
+      for (let j = idx + 1; j <= Math.min(idx + horizon, values.length - 1); j += 1) {
+        const px = values[j];
+        const hitTp = direction === "LONG" ? px >= tp : px <= tp;
+        const hitSl = direction === "LONG" ? px <= stop : px >= stop;
+        if (hitTp) {
+          exit = px;
+          result = "TP";
+          break;
+        }
+        if (hitSl) {
+          exit = px;
+          result = "SL";
+          break;
+        }
+      }
+
+      const riskUsd = Math.max(0.5, equity * (riskPct / 100));
+      const size = riskUsd / Math.max(stopDist, entry * 0.0003);
+      const pnl = direction === "LONG" ? (exit - entry) * size : (entry - exit) * size;
 
       simulated.push({
         id: Date.now() + i,
         asset: sampleAsset,
         mode,
         direction,
-        entry: prices[sampleAsset],
-        exit: prices[sampleAsset] * (1 + rand(-0.004, 0.004)),
+        entry,
+        exit,
         pnl,
-        pnlPct: pnl * 9,
-        result: isWin ? "TP" : "SL",
+        pnlPct: (pnl / Math.max((size * entry) / leverageByAsset[sampleAsset], 0.01)) * 100,
+        result,
         openedAt: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
         closedAt: new Date().toISOString(),
       });
       returns.push(pnl);
+    }
+
+    if (!simulated.length) {
+      pushAlert("Not enough real candles to run backtest yet.");
+      return;
     }
 
     const wins = simulated.filter((trade) => trade.pnl > 0);
@@ -577,13 +736,14 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-shell px-4 py-6 text-ink md:px-8">
+      <div className="ambient-grid" />
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-5">
         <header className="hero-card">
-          <p className="kicker">TraderLab v2 - simulador profesional</p>
+          <p className="kicker">TraderLab v3 - realistic paper trading desk</p>
           <h1 className="text-3xl font-semibold md:text-4xl">
-            Senales IA para BTC, ETH, plata y oro
+            AI signals for BTC, ETH, silver and gold with live snapshot + simulation engine
           </h1>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             <div className="metric-card">
               <span>Balance</span>
               <strong>{money(balance)}</strong>
@@ -593,7 +753,7 @@ export function App() {
               <strong className={unrealized >= 0 ? "text-emerald-600" : "text-rose-600"}>{money(unrealized)}</strong>
             </div>
             <div className="metric-card">
-              <span>Equity cruzada</span>
+              <span>Cross equity</span>
               <strong>{money(equity)}</strong>
             </div>
             <div className="metric-card">
@@ -604,31 +764,35 @@ export function App() {
               <span>Profit factor</span>
               <strong>{stats.profitFactor.toFixed(2)}</strong>
             </div>
+            <div className="metric-card">
+              <span>Feed status</span>
+              <strong className="text-sm">{feedStatus}</strong>
+            </div>
           </div>
         </header>
 
         <div className="grid gap-5 xl:grid-cols-[1.18fr_1.9fr_1.2fr]">
           <section className="panel">
             <div className="mb-4 flex gap-2">
-              <button className={`tab-btn ${tab === "scalping" ? "tab-btn-active" : ""}`} onClick={() => setTab("scalping")}>
+              <button className={`tab-btn pressable ${tab === "scalping" ? "tab-btn-active" : ""}`} onClick={() => setTab("scalping")}>
                 Scalping
               </button>
-              <button className={`tab-btn ${tab === "intradia" ? "tab-btn-active" : ""}`} onClick={() => setTab("intradia")}>
-                Intradia MTF
+              <button className={`tab-btn pressable ${tab === "intradia" ? "tab-btn-active" : ""}`} onClick={() => setTab("intradia")}>
+                Intraday MTF
               </button>
             </div>
 
-            <label className="label">Activo</label>
+            <label className="label">Asset</label>
             <select className="select-field" value={asset} onChange={(event) => setAsset(event.target.value as Asset)}>
               <option value="BTCUSD">BTCUSD (500x)</option>
               <option value="ETHUSD">ETHUSD (500x)</option>
-              <option value="XAGUSD">XAGUSD Plata (1000x)</option>
-              <option value="XAUUSD">XAUUSD Oro (1000x)</option>
+              <option value="XAGUSD">XAGUSD Silver (1000x)</option>
+              <option value="XAUUSD">XAUUSD Gold (1000x)</option>
             </select>
 
             <div className="mt-4 grid grid-cols-2 gap-2">
               <div>
-                <label className="label">Riesgo base %</label>
+                <label className="label">Risk base %</label>
                 <input
                   className="input-field"
                   type="number"
@@ -653,7 +817,7 @@ export function App() {
               </div>
             </div>
 
-            <label className="label mt-4">Groq API key (opcional)</label>
+            <label className="label mt-4">Groq API key (optional)</label>
             <input
               className="input-field"
               value={apiKey}
@@ -661,28 +825,58 @@ export function App() {
               placeholder="gsk_..."
             />
             <button
-              className={`mt-3 w-full rounded-xl px-3 py-2 text-sm font-semibold ${usingGroq ? "bg-amber-500 text-white" : "bg-ink text-white"}`}
+              className={`mt-3 w-full rounded-xl px-3 py-2 text-sm font-semibold pressable ${usingGroq ? "bg-amber-500 text-white" : "bg-ink text-white"}`}
               onClick={() => setUsingGroq((prev) => !prev)}
             >
-              {usingGroq ? "IA ejecucion: Groq" : "IA ejecucion: motor local"}
+              {usingGroq ? "Execution AI: Groq" : "Execution AI: local engine"}
             </button>
 
             <div className="mt-4 grid grid-cols-2 gap-2">
-              <button className="cta" onClick={createSignalAndExecute}>
-                Generar + ejecutar
+              <button className="cta pressable" onClick={() => createSignalAndExecute(tab, asset)}>
+                Generate + execute
               </button>
-              <button className="cta-secondary" onClick={runMarketStep}>
-                Avanzar 1 vela
+              <button className="cta-secondary pressable" onClick={() => void syncRealData()}>
+                {isSyncing ? "Syncing..." : "Sync real data"}
               </button>
-              <button className="cta-secondary col-span-2" onClick={runBacktest}>
-                Backtesting adaptativo
+              <button className="cta-secondary pressable" onClick={() => void runAutoScan()}>
+                Scan now
               </button>
+              <button className="cta-secondary pressable" onClick={runBacktest}>
+                Adaptive backtest
+              </button>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-ink/10 bg-white p-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold">Auto-scan intraday</p>
+                <button
+                  className={`scan-toggle ${autoScan ? "scan-toggle-on" : ""}`}
+                  onClick={() => setAutoScan((prev) => !prev)}
+                >
+                  <span className="scan-dot" />
+                  {autoScan ? "ON" : "OFF"}
+                </button>
+              </div>
+              <div className="mt-2 flex items-end gap-2">
+                <div className="w-full">
+                  <label className="label">scan each (sec)</label>
+                  <input
+                    className="input-field"
+                    type="number"
+                    min={8}
+                    max={90}
+                    step={1}
+                    value={scanEverySec}
+                    onChange={(event) => setScanEverySec(Number(event.target.value))}
+                  />
+                </div>
+              </div>
             </div>
 
             {lastSignal && (
               <article className="mt-4 rounded-2xl border border-ink/10 bg-white p-3 text-sm">
                 <p className="font-semibold">
-                  Ultima senal: {lastSignal.direction} {lastSignal.asset}
+                  Last signal: {lastSignal.direction} {lastSignal.asset}
                 </p>
                 <p>
                   Conf: {lastSignal.confidence.toFixed(1)}% | Spread: {lastSignal.spreadPct.toFixed(3)}%
@@ -700,9 +894,9 @@ export function App() {
           <section className="panel">
             <div className="flex items-end justify-between gap-3">
               <div>
-                <p className="kicker">Flujo de precio simulado</p>
+                <p className="kicker">Paper trading market stream</p>
                 <h2 className="text-2xl font-semibold">
-                  {asset} - {tab === "intradia" ? "Confluencia multi timeframe" : "Ejecucion de scalping"}
+                  {asset} - {tab === "intradia" ? "Multi timeframe confluence" : "Scalping execution"}
                 </h2>
               </div>
               <div className="badge-soft">
@@ -728,30 +922,30 @@ export function App() {
 
             <div className="mt-4 grid gap-3 md:grid-cols-2">
               <div className="soft-card text-sm">
-                <p className="font-semibold">Condiciones CFD</p>
-                <p>Capital: 100 USD | Margen cruzado</p>
-                <p>Sin comision | Spread bid/ask dinamico</p>
-                <p>Leverage activo: {leverageByAsset[asset]}x</p>
+                <p className="font-semibold">CFD simulation conditions</p>
+                <p>Capital: 100 USD | Cross margin | no commissions</p>
+                <p>Dynamic bid/ask spread in high activity windows</p>
+                <p>Leverage by asset: {leverageByAsset[asset]}x</p>
               </div>
               <div className="soft-card text-sm">
-                <p className="font-semibold">Reglas salida v2</p>
+                <p className="font-semibold">Exit logic v3</p>
                 <p>Trailing stop: {learning.atrTrailMult.toFixed(2)} ATR</p>
                 <p>TP scalping: {learning.scalpingTpAtr.toFixed(2)} ATR</p>
-                <p>TP intradia: {learning.intradayTpAtr.toFixed(2)} ATR + cruce MA5/MA13</p>
+                <p>TP intraday: {learning.intradayTpAtr.toFixed(2)} ATR + MA5/MA13 reversal</p>
               </div>
             </div>
 
             <div className="mt-4 overflow-x-auto rounded-2xl border border-ink/10 bg-white p-3">
-              <p className="mb-2 text-sm font-semibold">Posiciones abiertas ({openPositions.length})</p>
+              <p className="mb-2 text-sm font-semibold">Open positions ({openPositions.length})</p>
               <table className="w-full min-w-[560px] text-left text-xs">
                 <thead className="text-ink/60">
                   <tr>
-                    <th className="py-1">Activo</th>
-                    <th className="py-1">Lado</th>
+                    <th className="py-1">Asset</th>
+                    <th className="py-1">Side</th>
                     <th className="py-1">Entry</th>
                     <th className="py-1">SL</th>
                     <th className="py-1">TP</th>
-                    <th className="py-1">Margen</th>
+                    <th className="py-1">Margin</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -771,9 +965,9 @@ export function App() {
           </section>
 
           <section className="panel">
-            <h3 className="text-lg font-semibold">Bot IA propio - aprendizaje</h3>
+            <h3 className="text-lg font-semibold">AI learning engine</h3>
             <p className="text-sm text-ink/70">
-              Aprende de trades cerrados y backtests para ajustar confianza minima, trailing y objetivo ATR.
+              Learns from closed trades plus backtesting samples to tune confidence, risk and ATR exits.
             </p>
 
             <div className="mt-4 space-y-2 text-sm">
@@ -786,7 +980,7 @@ export function App() {
               </div>
             </div>
 
-            <h4 className="mt-4 text-sm font-semibold uppercase tracking-[0.12em] text-ink/65">Horas con mejor edge</h4>
+            <h4 className="mt-4 text-sm font-semibold uppercase tracking-[0.12em] text-ink/65">Best hour edge</h4>
             <div className="mt-2 space-y-2">
               {bestHours.length ? (
                 bestHours.map((item) => (
@@ -796,13 +990,13 @@ export function App() {
                   </div>
                 ))
               ) : (
-                <p className="text-sm text-ink/55">Aun sin datos suficientes.</p>
+                <p className="text-sm text-ink/55">No enough data yet.</p>
               )}
             </div>
 
             {lastBacktest && (
               <div className="mt-4 soft-card text-sm">
-                <p className="font-semibold">Ultimo backtest</p>
+                <p className="font-semibold">Last backtest</p>
                 <p>Trades: {lastBacktest.total}</p>
                 <p>Win rate: {lastBacktest.winRate.toFixed(1)}%</p>
                 <p>Expectancy: {money(lastBacktest.expectancy)}</p>
@@ -810,23 +1004,38 @@ export function App() {
                 <p>Sharpe: {lastBacktest.sharpe.toFixed(2)}</p>
               </div>
             )}
+
+            <div className="mt-4 rounded-2xl border border-ink/10 bg-white p-3">
+              <p className="mb-2 text-sm font-semibold">Auto-scan alerts</p>
+              <div className="space-y-2 text-xs">
+                {alerts.length ? (
+                  alerts.map((item) => (
+                    <p key={item} className="rounded-lg border border-ink/10 bg-white/90 p-2">
+                      {item}
+                    </p>
+                  ))
+                ) : (
+                  <p className="text-ink/50">No alerts yet.</p>
+                )}
+              </div>
+            </div>
           </section>
         </div>
 
         <section className="panel overflow-hidden">
-          <h3 className="text-lg font-semibold">Historial de trades cerrados</h3>
+          <h3 className="text-lg font-semibold">Closed trades history</h3>
           <div className="mt-3 overflow-x-auto">
             <table className="w-full min-w-[820px] text-left text-sm">
               <thead className="text-xs uppercase tracking-[0.14em] text-ink/60">
                 <tr>
-                  <th className="py-2">Activo</th>
-                  <th className="py-2">Modo</th>
-                  <th className="py-2">Lado</th>
-                  <th className="py-2">Entrada</th>
-                  <th className="py-2">Salida</th>
+                  <th className="py-2">Asset</th>
+                  <th className="py-2">Mode</th>
+                  <th className="py-2">Side</th>
+                  <th className="py-2">Entry</th>
+                  <th className="py-2">Exit</th>
                   <th className="py-2">P/L</th>
                   <th className="py-2">P/L %</th>
-                  <th className="py-2">Motivo</th>
+                  <th className="py-2">Reason</th>
                 </tr>
               </thead>
               <tbody>
