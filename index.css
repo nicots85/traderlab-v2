@@ -1,0 +1,190 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
+@import "tailwindcss";
+
+/* ─── Design tokens ─────────────────────────────────────────────────────────── */
+:root {
+  --bg:      #0a0b12;
+  --surface: #0f1020;
+  --card:    #13152a;
+  --border:  rgba(255,255,255,0.07);
+  --text:    #e8eaf0;
+  --muted:   rgba(232,234,240,0.42);
+  --accent:  #6366f1;
+  --green:   #10b981;
+  --red:     #ef4444;
+  --yellow:  #f59e0b;
+}
+
+/* ─── Reset ─────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: "DM Sans", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+#root { min-height: 100vh; }
+
+/* ─── Noise overlay ─────────────────────────────────────────────────────────── */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 200px;
+}
+
+/* ─── Card ───────────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+}
+
+/* ─── Metric ─────────────────────────────────────────────────────────────────── */
+.metric {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.metric strong {
+  display: block;
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin-top: 2px;
+  font-family: "JetBrains Mono", monospace;
+}
+
+/* ─── Label ──────────────────────────────────────────────────────────────────── */
+.label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* ─── Tabs ───────────────────────────────────────────────────────────────────── */
+.tab {
+  padding: 7px 12px;
+  border-radius: 9px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.tab:hover { background: rgba(255,255,255,0.05); color: var(--text); }
+.tab-active {
+  padding: 7px 12px;
+  border-radius: 9px;
+  border: 1px solid rgba(99,102,241,0.4);
+  background: rgba(99,102,241,0.15);
+  color: #a5b4fc;
+  font-weight: 700;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+/* ─── Buttons ────────────────────────────────────────────────────────────────── */
+.btn-primary {
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: none;
+  background: linear-gradient(135deg, #6366f1, #4f46e5);
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.86rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  box-shadow: 0 4px 14px rgba(99,102,241,0.3);
+}
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(99,102,241,0.4); }
+.btn-primary:active { transform: translateY(0); }
+.btn-primary:disabled { opacity: 0.45; cursor: default; transform: none; }
+
+.btn-secondary {
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.05);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.86rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-secondary:hover { background: rgba(255,255,255,0.09); }
+.btn-secondary:disabled { opacity: 0.45; cursor: default; }
+
+/* ─── Select ─────────────────────────────────────────────────────────────────── */
+.sel {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text);
+  font-family: "DM Sans", sans-serif;
+  font-size: 0.84rem;
+}
+.sel:focus { outline: none; border-color: rgba(99,102,241,0.5); }
+
+/* ─── Input ──────────────────────────────────────────────────────────────────── */
+.inp {
+  width: 100%;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.9rem;
+}
+.inp:focus { outline: none; border-color: rgba(99,102,241,0.5); background: rgba(99,102,241,0.05); }
+.inp::placeholder { color: var(--muted); }
+
+/* ─── Live position card ─────────────────────────────────────────────────────── */
+.live-card {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 12px;
+  padding: 12px 14px;
+  transition: background 0.3s;
+}
+.live-card:hover { background: rgba(255,255,255,0.05); }
+.live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  animation: pulse 1.5s infinite;
+}
+
+/* ─── Animations ─────────────────────────────────────────────────────────────── */
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.88); }
+}
+@keyframes slideIn {
+  from { transform: translateX(20px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* ─── Scrollbar ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
+
+/* ─── Responsive adjustments ─────────────────────────────────────────────────── */
+@media (max-width: 1100px) {
+  main > div[style*="grid-template-columns"] {
+    grid-template-columns: 1fr !important;
+  }
+}
