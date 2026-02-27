@@ -31,6 +31,8 @@ type WyckoffAnalysis = {
 type Indicators = {
   rsi: number;
   rsiDivergence: "bullish" | "bearish" | "none";
+  stochK: number; stochD: number;
+  ma5: number; ma10: number; ma20: number; ma50: number;
   vwap: number;
   vwapUpperBand1: number; vwapLowerBand1: number;
   vwapUpperBand2: number; vwapLowerBand2: number;
@@ -85,15 +87,9 @@ type AiStatus = "idle" | "testing" | "ok" | "error" | "disabled";
 // ─── Constants ────────────────────────────────────────────────────────────────
 const assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"];
 
-// BTC/ETH → Bybit. Metales → Binance directamente
-const bybitSymbol: Record<Asset, string> = {
-  BTCUSD: "BTCUSDT", ETHUSD: "ETHUSDT", XAGUSD: "", XAUUSD: "",
-};
+// Binance para todo — simple y estable
 const binanceSymbol: Record<Asset, string> = {
   BTCUSD: "BTCUSDT", ETHUSD: "ETHUSDT", XAUUSD: "XAUUSDT", XAGUSD: "XAGUSDT",
-};
-const useBybit: Record<Asset, boolean> = {
-  BTCUSD: true, ETHUSD: true, XAGUSD: false, XAUUSD: false,
 };
 
 const assetLabel: Record<Asset, string> = {
@@ -195,6 +191,27 @@ function calcRSI(closes: number[], period = 14): number[] {
   return rsiArr;
 }
 
+function calcStochastic(candles: Candle[], kPeriod = 14, dPeriod = 3): { k: number; d: number } {
+  if (candles.length < kPeriod) return { k: 50, d: 50 };
+  const kArr: number[] = [];
+  for (let i = kPeriod - 1; i < candles.length; i++) {
+    const slice = candles.slice(i - kPeriod + 1, i + 1);
+    const high = Math.max(...slice.map(c => c.h));
+    const low  = Math.min(...slice.map(c => c.l));
+    const range = Math.max(high - low, 1e-9);
+    kArr.push(((candles[i].c - low) / range) * 100);
+  }
+  const dArr: number[] = [];
+  for (let i = dPeriod - 1; i < kArr.length; i++) dArr.push(avg(kArr.slice(i - dPeriod + 1, i + 1)));
+  return { k: kArr[kArr.length - 1], d: dArr.length > 0 ? dArr[dArr.length - 1] : kArr[kArr.length - 1] };
+}
+function calcMAs(closes: number[]): { ma10: number; ma20: number; ma50: number } {
+  return {
+    ma10: closes.length >= 10 ? avg(closes.slice(-10)) : closes[closes.length - 1],
+    ma20: closes.length >= 20 ? avg(closes.slice(-20)) : closes[closes.length - 1],
+    ma50: closes.length >= 50 ? avg(closes.slice(-50)) : avg(closes),
+  };
+}
 function detectRsiDivergence(closes: number[], rsi: number[], lookback = 20): "bullish" | "bearish" | "none" {
   if (closes.length < lookback) return "none";
   const priceSlice = closes.slice(-lookback);
@@ -284,7 +301,7 @@ function computeIndicators(candles: Candle[]): Indicators {
   if (candles.length < 25) {
     const p = candles[candles.length - 1]?.c ?? 0;
     return {
-      rsi: 50, rsiDivergence: "none", vwap: p,
+      rsi: 50, rsiDivergence: "none", stochK: 50, stochD: 50, ma5: p, ma10: p, ma20: p, ma50: p, vwap: p,
       vwapUpperBand1: p, vwapLowerBand1: p, vwapUpperBand2: p, vwapLowerBand2: p,
       bbUpper: p, bbMiddle: p, bbLower: p, bbSqueeze: false,
       volumeDelta: 0, volumeDeltaPct: 0, imbalances: [],
@@ -295,6 +312,9 @@ function computeIndicators(candles: Candle[]): Indicators {
   const rsiArr = calcRSI(closes);
   const rsi = rsiArr[rsiArr.length - 1];
   const rsiDivergence = detectRsiDivergence(closes, rsiArr);
+  const { k: stochK, d: stochD } = calcStochastic(candles, 14, 3);
+  const mas = calcMAs(closes);
+  const ma5 = closes.length >= 5 ? avg(closes.slice(-5)) : p;
   const vwapData = calcVWAP(candles);
   const bb = calcBollinger(closes);
   const keltner = calcKeltner(candles);
@@ -303,7 +323,8 @@ function computeIndicators(candles: Candle[]): Indicators {
   const imbalances = detectImbalances(candles);
   const atr = calcAtr(candles, 14);
   return {
-    rsi, rsiDivergence,
+    rsi, rsiDivergence, stochK, stochD,
+    ma5, ma10: mas.ma10, ma20: mas.ma20, ma50: mas.ma50,
     vwap: vwapData.vwap, vwapUpperBand1: vwapData.upper1, vwapLowerBand1: vwapData.lower1,
     vwapUpperBand2: vwapData.upper2, vwapLowerBand2: vwapData.lower2,
     bbUpper: bb.upper, bbMiddle: bb.middle, bbLower: bb.lower, bbSqueeze,
@@ -314,7 +335,25 @@ function computeIndicators(candles: Candle[]): Indicators {
 
 // ─── Wyckoff Engine ───────────────────────────────────────────────────────────
 
-function analyzeWyckoff(candles: Candle[]): WyckoffAnalysis {
+// Construye velas sintéticas agregando N velas de 1m → 1 vela de N minutos
+function buildSyntheticTF(candles: Candle[], factor: number): Candle[] {
+  const out: Candle[] = [];
+  for (let i = 0; i + factor <= candles.length; i += factor) {
+    const slice = candles.slice(i, i + factor);
+    out.push({
+      t: slice[0].t,
+      o: slice[0].o,
+      h: Math.max(...slice.map(c => c.h)),
+      l: Math.min(...slice.map(c => c.l)),
+      c: slice[slice.length - 1].c,
+      v: slice.reduce((a, c) => a + c.v, 0),
+    });
+  }
+  return out;
+}
+
+// Wyckoff en un solo TF (lógica extraída para reusar en MTF)
+function analyzeWyckoffSingle(candles: Candle[]): WyckoffAnalysis {
   const empty: WyckoffAnalysis = {
     phase: "unknown", bias: "neutral", events: [],
     supportZone: null, resistanceZone: null,
@@ -457,6 +496,53 @@ function analyzeWyckoff(candles: Candle[]): WyckoffAnalysis {
   };
 }
 
+// Wyckoff multi-timeframe: analiza 1m, 5m sintético y 15m sintético
+// Devuelve el análisis del TF más alto con señal definida, más un wyckoffMultiplier
+function analyzeWyckoff(candles: Candle[]): WyckoffAnalysis & { wyckoffLotMult: number } {
+  // Construir TFs sintéticos
+  const tf5  = buildSyntheticTF(candles, 5);   // ~5m
+  const tf15 = buildSyntheticTF(candles, 15);  // ~15m
+
+  const w1  = analyzeWyckoffSingle(candles.slice(-80));
+  const w5  = tf5.length  >= 20 ? analyzeWyckoffSingle(tf5.slice(-60))  : null;
+  const w15 = tf15.length >= 10 ? analyzeWyckoffSingle(tf15.slice(-40)) : null;
+
+  // Calcular confluencia: cuántos TFs coinciden en bias
+  const biases = [w1.bias, w5?.bias, w15?.bias].filter(Boolean);
+  const bullBiases = biases.filter(b => b === "accumulation").length;
+  const bearBiases = biases.filter(b => b === "distribution").length;
+  const totalTFs = biases.length;
+
+  // TF dominante: usar el más alto con señal definida
+  const dominant = (w15?.phase !== "unknown" ? w15 : w5?.phase !== "unknown" ? w5 : w1) ?? w1;
+
+  // Multiplicador de lote basado en confluencia Wyckoff MTF
+  // Solo activo en intradía cuando 2+ TFs coinciden en fase avanzada (C, D, E)
+  const advancedPhases = new Set<WyckoffPhase>(["C", "D", "E"]);
+  const confluenceScore = bullBiases >= 2 ? bullBiases : bearBiases >= 2 ? bearBiases : 0;
+  const isAdvanced = advancedPhases.has(dominant.phase);
+  const hasSpringOrUtad = dominant.events.some(e => ["Spring", "UTAD", "SOS", "SOW"].includes(e.label));
+
+  let wyckoffLotMult = 1.0;
+  if (confluenceScore >= 2 && isAdvanced && hasSpringOrUtad) {
+    // Confluencia fuerte en fase avanzada con evento clave: hasta 1.5×
+    wyckoffLotMult = confluenceScore === 3 ? 1.5 : 1.3;
+  } else if (confluenceScore >= 2) {
+    wyckoffLotMult = 1.15;
+  }
+
+  // Construir narrative enriquecida con info MTF
+  const tfLabel = (w: WyckoffAnalysis | null, name: string) =>
+    w ? `${name}: ${w.bias === "neutral" ? "neutral" : w.bias === "accumulation" ? "acum" : "dist"} F${w.phase}` : "";
+  const mtfNarrative = [tfLabel(w15, "15m"), tfLabel(w5, "5m"), tfLabel(w1, "1m")].filter(Boolean).join(" | ");
+
+  return {
+    ...dominant,
+    narrative: `${dominant.narrative} [${mtfNarrative}] Mult lote: ${wyckoffLotMult.toFixed(2)}×`,
+    wyckoffLotMult,
+  };
+}
+
 // ─── API ──────────────────────────────────────────────────────────────────────
 async function fetchJson<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -511,24 +597,12 @@ async function fetchBinanceTicker(symbol: string): Promise<number> {
 async function fetchRealMarketSnapshot(prevPrices: Record<Asset, number>) {
   const results = await Promise.allSettled(
     assets.map(async (asset) => {
-      let price: number; let candles: Candle[]; let source: string;
-      if (useBybit[asset]) {
-        const sym = bybitSymbol[asset];
-        try {
-          [price, candles] = await Promise.all([fetchBybitTicker(sym), fetchBybitKlines(sym, 160)]);
-          source = "Bybit";
-        } catch {
-          const bsym = binanceSymbol[asset];
-          [price, candles] = await Promise.all([fetchBinanceTicker(bsym), fetchBinanceKlines(bsym, 160)]);
-          source = "Binance (fb)";
-        }
-      } else {
-        // Metales: Binance directo
-        const sym = binanceSymbol[asset];
-        [price, candles] = await Promise.all([fetchBinanceTicker(sym), fetchBinanceKlines(sym, 160)]);
-        source = "Binance";
-      }
-      return { asset, price, candles, source };
+      const sym = binanceSymbol[asset];
+      const [price, candles] = await Promise.all([
+        fetchBinanceTicker(sym),
+        fetchBinanceKlines(sym, 160),
+      ]);
+      return { asset, price, candles };
     })
   );
 
@@ -553,10 +627,7 @@ async function fetchRealMarketSnapshot(prevPrices: Record<Asset, number>) {
     shock = clamp(absRet * 220, 0.08, 1.25);
   }
 
-  const sourceNote = failedAssets.length > 0
-    ? `⚠ fallo: ${failedAssets.join(", ")}`
-    : "Bybit (BTC/ETH) + Binance (Au/Ag)";
-
+  const sourceNote = failedAssets.length > 0 ? `⚠ fallo: ${failedAssets.join(", ")}` : "Binance";
   return { prices, candleMap, seriesMap, shock, sourceNote };
 }
 
@@ -711,46 +782,102 @@ function CandlestickChart({ candles, indicators, wyckoff, showIndicators }: {
 }
 
 // ─── Indicator Panel ──────────────────────────────────────────────────────────
-function IndicatorPanel({ ind }: { ind: Indicators }) {
+function IndicatorPanel({ ind, mode }: { ind: Indicators; mode: Mode }) {
+  const d = (v: number) => v > 100 ? 1 : v > 1 ? 3 : 4;
+  const rsiColor = ind.rsi > 70 ? "#ef4444" : ind.rsi < 30 ? "#10b981" : "#f59e0b";
+  const stochColor = ind.stochK > 80 ? "#ef4444" : ind.stochK < 20 ? "#10b981" : "var(--text)";
+  const divColor = ind.rsiDivergence === "bullish" ? "#10b981" : ind.rsiDivergence === "bearish" ? "#ef4444" : "var(--muted)";
+  const deltaColor = ind.volumeDeltaPct > 10 ? "#10b981" : ind.volumeDeltaPct < -10 ? "#ef4444" : "var(--muted)";
+  const maAligned = ind.ma10 > ind.ma20 && ind.ma20 > ind.ma50;
+  const maAlignedShort = ind.ma10 < ind.ma20 && ind.ma20 < ind.ma50;
+  const maAlignColor = maAligned ? "#10b981" : maAlignedShort ? "#ef4444" : "var(--muted)";
   const rsiColor = ind.rsi > 70 ? "#ef4444" : ind.rsi < 30 ? "#10b981" : "#f59e0b";
   const divColor = ind.rsiDivergence === "bullish" ? "#10b981" : ind.rsiDivergence === "bearish" ? "#ef4444" : "var(--muted)";
   const deltaColor = ind.volumeDeltaPct > 10 ? "#10b981" : ind.volumeDeltaPct < -10 ? "#ef4444" : "var(--muted)";
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-      {/* RSI */}
-      <div className="metric">
-        <span className="label">RSI 14</span>
-        <strong style={{ color: rsiColor }}>{ind.rsi.toFixed(1)}</strong>
-        <span style={{ fontSize: 10, color: divColor, marginTop: 2, display: "block" }}>
-          {ind.rsiDivergence === "bullish" ? "↗ Div. alcista" : ind.rsiDivergence === "bearish" ? "↘ Div. bajista" : "Sin divergencia"}
-        </span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+        {mode === "scalping" ? (
+          <div className="metric">
+            <span className="label">Estocástico %K/%D</span>
+            <strong style={{ color: stochColor }}>{ind.stochK.toFixed(1)} / {ind.stochD.toFixed(1)}</strong>
+            <span style={{ fontSize: 10, color: stochColor, marginTop: 2, display: "block" }}>
+              {ind.stochK < 20 ? "⬇ Sobreventa (<20)" : ind.stochK > 80 ? "⬆ Sobrecompra (>80)" : ind.stochK > ind.stochD ? "K>D alcista" : "K<D bajista"}
+            </span>
+          </div>
+        ) : (
+          <div className="metric">
+            <span className="label">RSI 14 (OS&lt;20 / OB&gt;80)</span>
+            <strong style={{ color: rsiColor }}>{ind.rsi.toFixed(1)}</strong>
+            <span style={{ fontSize: 10, color: divColor, marginTop: 2, display: "block" }}>
+              {ind.rsi < 20 ? "Sobreventa extrema" : ind.rsi > 80 ? "Sobrecompra extrema" : ind.rsiDivergence !== "none" ? (ind.rsiDivergence === "bullish" ? "↗ Div. alcista" : "↘ Div. bajista") : "Neutral"}
+            </span>
+          </div>
+        )}
+        {mode === "scalping" ? (
+          <div className="metric">
+            <span className="label">MA5 / MA10</span>
+            <strong style={{ color: ind.ma5 > ind.ma10 ? "#10b981" : "#ef4444", fontSize: 12 }}>
+              {ind.ma5 > ind.ma10 ? "MA5 > MA10 ↑" : "MA5 < MA10 ↓"}
+            </strong>
+            <span style={{ fontSize: 9.5, color: "var(--muted)", marginTop: 2, display: "block" }}>
+              {ind.ma5.toFixed(d(ind.ma5))} / {ind.ma10.toFixed(d(ind.ma10))}
+            </span>
+          </div>
+        ) : (
+          <div className="metric">
+            <span className="label">MA10 / MA20 / MA50</span>
+            <strong style={{ color: maAlignColor, fontSize: 11 }}>
+              {maAligned ? "Alcista ↑" : maAlignedShort ? "Bajista ↓" : "Sin alineación"}
+            </strong>
+            <span style={{ fontSize: 9.5, color: "var(--muted)", marginTop: 2, display: "block" }}>
+              {ind.ma10.toFixed(d(ind.ma10))} / {ind.ma20.toFixed(d(ind.ma20))} / {ind.ma50.toFixed(d(ind.ma50))}
+            </span>
+          </div>
+        )}
+        <div className="metric">
+          <span className="label">VWAP</span>
+          <strong style={{ fontSize: 12 }}>{ind.vwap.toFixed(d(ind.vwap))}</strong>
+          <span style={{ fontSize: 10, color: "var(--muted)", marginTop: 2, display: "block" }}>
+            ±1σ {ind.vwapUpperBand1.toFixed(d(ind.vwap))} / {ind.vwapLowerBand1.toFixed(d(ind.vwap))}
+          </span>
+        </div>
+        <div className="metric">
+          <span className="label">BB {ind.bbSqueeze ? "🔴 Squeeze" : ""}</span>
+          <strong style={{ color: ind.bbSqueeze ? "#f59e0b" : "var(--text)", fontSize: 12 }}>
+            {ind.bbSqueeze ? "Expansión próxima" : `W ${(ind.bbUpper - ind.bbLower).toFixed(d(ind.bbUpper))}`}
+          </strong>
+          <span style={{ fontSize: 9.5, color: "var(--muted)", marginTop: 2, display: "block" }}>
+            {ind.bbUpper.toFixed(d(ind.bbUpper))} / {ind.bbLower.toFixed(d(ind.bbLower))}
+          </span>
+        </div>
       </div>
-      {/* VWAP */}
-      <div className="metric">
-        <span className="label">VWAP</span>
-        <strong style={{ fontSize: 13 }}>{ind.vwap.toFixed(ind.vwap > 100 ? 1 : 3)}</strong>
-        <span style={{ fontSize: 10, color: "var(--muted)", marginTop: 2, display: "block" }}>
-          ±1σ: {ind.vwapUpperBand1.toFixed(ind.vwap > 100 ? 1 : 3)} / {ind.vwapLowerBand1.toFixed(ind.vwap > 100 ? 1 : 3)}
-        </span>
-      </div>
-      {/* Bollinger */}
-      <div className="metric">
-        <span className="label">Bollinger {ind.bbSqueeze ? "🔴 Squeeze" : ""}</span>
-        <strong style={{ color: ind.bbSqueeze ? "#f59e0b" : "var(--text)", fontSize: 13 }}>
-          {ind.bbSqueeze ? "Expansión inminente" : `W: ${(ind.bbUpper - ind.bbLower).toFixed(ind.bbUpper > 100 ? 1 : 3)}`}
-        </strong>
-        <span style={{ fontSize: 10, color: "var(--muted)", marginTop: 2, display: "block" }}>
-          {ind.bbUpper.toFixed(ind.bbUpper > 100 ? 1 : 3)} / {ind.bbLower.toFixed(ind.bbLower > 100 ? 1 : 3)}
-        </span>
-      </div>
-      {/* Volume Delta */}
-      <div className="metric">
-        <span className="label">Vol. Delta</span>
-        <strong style={{ color: deltaColor }}>{ind.volumeDeltaPct > 0 ? "+" : ""}{ind.volumeDeltaPct.toFixed(1)}%</strong>
-        <span style={{ fontSize: 10, color: deltaColor, marginTop: 2, display: "block" }}>
-          {ind.volumeDeltaPct > 15 ? "Presión compradora fuerte" : ind.volumeDeltaPct < -15 ? "Presión vendedora fuerte" : ind.volumeDeltaPct > 5 ? "Leve sesgo comprador" : ind.volumeDeltaPct < -5 ? "Leve sesgo vendedor" : "Equilibrado"}
-        </span>
+      <div style={{ display: "grid", gridTemplateColumns: mode === "scalping" ? "1fr 1fr" : "1fr 1fr 1fr", gap: 8 }}>
+        <div className="metric">
+          <span className="label">Vol. Delta</span>
+          <strong style={{ color: deltaColor }}>{ind.volumeDeltaPct > 0 ? "+" : ""}{ind.volumeDeltaPct.toFixed(1)}%</strong>
+          <span style={{ fontSize: 10, color: deltaColor, marginTop: 2, display: "block" }}>
+            {ind.volumeDeltaPct > 15 ? "Compradores fuertes" : ind.volumeDeltaPct < -15 ? "Vendedores fuertes" : ind.volumeDeltaPct > 5 ? "Sesgo comprador" : ind.volumeDeltaPct < -5 ? "Sesgo vendedor" : "Equilibrado"}
+          </span>
+        </div>
+        {mode === "scalping" ? (
+          <div className="metric">
+            <span className="label">RSI (referencia)</span>
+            <strong style={{ color: rsiColor }}>{ind.rsi.toFixed(1)}</strong>
+            <span style={{ fontSize: 10, color: "var(--muted)", marginTop: 2, display: "block" }}>OS &lt;20 / OB &gt;80</span>
+          </div>
+        ) : (<>
+          <div className="metric">
+            <span className="label">Estocástico</span>
+            <strong style={{ color: stochColor }}>{ind.stochK.toFixed(1)} / {ind.stochD.toFixed(1)}</strong>
+            <span style={{ fontSize: 10, color: "var(--muted)", marginTop: 2, display: "block" }}>K / D</span>
+          </div>
+          <div className="metric">
+            <span className="label">RSI div.</span>
+            <strong style={{ fontSize: 12, color: divColor }}>{ind.rsiDivergence === "bullish" ? "↗ Alcista" : ind.rsiDivergence === "bearish" ? "↘ Bajista" : "Ninguna"}</strong>
+          </div>
+        </>)}
       </div>
     </div>
   );
@@ -1164,45 +1291,149 @@ export function App() {
     });
   }
 
-  function getMtfScore(a: Asset) {
+  function getMtfScore(a: Asset, mode: Mode = "intradia") {
     const vals = series[a];
     const atr = Math.max(calcAtrFromSeries(vals, 20), prices[a] * 0.0005);
-    const h = vals.slice(-70); const l = vals.slice(-32); const e = vals.slice(-8);
-    return { htf: (ema(h, 21) - ema(h, 55)) / atr, ltf: (ema(l, 8) - ema(l, 21)) / atr, exec: ((e[e.length - 1] ?? 0) - (e[0] ?? 0)) / atr, atr };
+    if (mode === "scalping") {
+      const ma5s  = avg(vals.slice(-5));
+      const ma10s = avg(vals.slice(-10));
+      const exec5 = ((vals[vals.length - 1] ?? 0) - (vals[vals.length - 4] ?? 0)) / atr;
+      return { htf: (ma5s - ma10s) / atr, ltf: (ma5s - ma10s) / atr * 1.2, exec: exec5, atr };
+    }
+    const ma10 = avg(vals.slice(-10));
+    const ma20 = avg(vals.slice(-20));
+    const ma50 = vals.length >= 50 ? avg(vals.slice(-50)) : avg(vals);
+    const execSlice = vals.slice(-8);
+    return {
+      htf: (ma20 - ma50) / atr,
+      ltf: (ma10 - ma20) / atr,
+      exec: ((execSlice[execSlice.length - 1] ?? 0) - (execSlice[0] ?? 0)) / atr,
+      atr,
+    };
   }
 
   function generateSignal(currentMode: Mode, currentAsset: Asset): Signal {
     const price = prices[currentAsset];
     const spreadPct = getSpreadPct(currentAsset, volumeShock);
     const spread = (spreadPct / 100) * price;
-    const mtf = getMtfScore(currentAsset);
+    const mtf = getMtfScore(currentAsset, currentMode);
     const ind = indicatorsMap[currentAsset] ?? computeIndicators(candles[currentAsset]);
     const wyckoff = wyckoffMap[currentAsset] ?? analyzeWyckoff(candles[currentAsset]);
     const lrn = learningRef.current;
 
-    // Direction con múltiples factores
-    const mtfBull = mtf.htf > 0 && mtf.ltf > 0 && mtf.exec > 0;
-    const mtfBear = mtf.htf < 0 && mtf.ltf < 0 && mtf.exec < 0;
-    const rsiBull = ind.rsi < 55 && ind.rsi > 30;
-    const rsiBear = ind.rsi > 45 && ind.rsi < 70;
-    const wyckoffBull = wyckoff.bias === "accumulation";
-    const wyckoffBear = wyckoff.bias === "distribution";
-    const vwapBull = price > ind.vwap;
-    const vwapBear = price < ind.vwap;
-    const deltaBull = ind.volumeDeltaPct > 5;
-    const deltaBear = ind.volumeDeltaPct < -5;
+    // ── Paso 1: Dirección primaria por MTF (obligatorio) ──────────────────────
+    // HTF = EMA21/55 en últimas 70 velas (contexto)
+    // LTF = EMA8/21 en últimas 32 velas (estructura)
+    // Exec = momentum puro en últimas 8 velas (timing)
+    const mtfDir: Direction = (mtf.htf + mtf.ltf + mtf.exec) >= 0 ? "LONG" : "SHORT";
+    const mtfStrength = Math.abs(mtf.htf + mtf.ltf + mtf.exec);  // magnitud de confluencia
 
-    let bullScore = 0; let bearScore = 0;
-    if (mtfBull) bullScore += 3; if (mtfBear) bearScore += 3;
-    if (rsiBull) bullScore += 1; if (rsiBear) bearScore += 1;
-    if (wyckoffBull) bullScore += 2; if (wyckoffBear) bearScore += 2;
-    if (vwapBull) bullScore += 1; if (vwapBear) bearScore += 1;
-    if (deltaBull) bullScore += 1; if (deltaBear) bearScore += 1;
-    if (ind.rsiDivergence === "bullish") bullScore += 2;
-    if (ind.rsiDivergence === "bearish") bearScore += 2;
+    // ── Paso 2: Indicador de confirmación (el más fuerte disponible) ──────────
+    // Elige el indicador con mayor convicción en la dirección MTF
+    type ConfirmIndicator = { name: string; confirms: boolean; strength: number };
 
-    const direction: Direction = bullScore >= bearScore ? "LONG" : "SHORT";
-    const scoreConf = Math.abs(bullScore - bearScore) / 10; // 0..1
+    const confirmCandidates: ConfirmIndicator[] = currentMode === "scalping"
+      ? [
+          // SCALPING — Estocástico primario (umbrales crypto OS<20/OB>80)
+          {
+            name: "Stoch",
+            confirms: mtfDir === "LONG"
+              ? (ind.stochK < 50 && ind.stochK > ind.stochD)
+              : (ind.stochK > 50 && ind.stochK < ind.stochD),
+            strength: mtfDir === "LONG"
+              ? clamp((50 - ind.stochK) / 30, 0, 1)
+              : clamp((ind.stochK - 50) / 30, 0, 1),
+          },
+          {
+            name: "Stoch-Extreme",
+            confirms: mtfDir === "LONG" ? ind.stochK < 20 : ind.stochK > 80,
+            strength: mtfDir === "LONG"
+              ? clamp((20 - ind.stochK) / 20 + 0.5, 0.5, 1)
+              : clamp((ind.stochK - 80) / 20 + 0.5, 0.5, 1),
+          },
+          {
+            name: "MA5/10",
+            confirms: mtfDir === "LONG" ? ind.ma5 > ind.ma10 : ind.ma5 < ind.ma10,
+            strength: Math.min(Math.abs(ind.ma5 - ind.ma10) / (price * 0.001), 1),
+          },
+          {
+            name: "VolDelta",
+            confirms: mtfDir === "LONG" ? ind.volumeDeltaPct > 8 : ind.volumeDeltaPct < -8,
+            strength: Math.min(Math.abs(ind.volumeDeltaPct) / 40, 1),
+          },
+          { name: "BB-Squeeze", confirms: ind.bbSqueeze, strength: ind.bbSqueeze ? 0.72 : 0 },
+        ]
+      : [
+          // INTRADÍA — RSI primario (umbrales crypto OS<20/OB>80), MAs tendenciales
+          {
+            name: "RSI",
+            confirms: mtfDir === "LONG" ? (ind.rsi > 30 && ind.rsi < 65) : (ind.rsi > 35 && ind.rsi < 70),
+            strength: mtfDir === "LONG"
+              ? clamp((ind.rsi - 30) / 35, 0, 1)
+              : clamp((70 - ind.rsi) / 35, 0, 1),
+          },
+          {
+            name: "RSI-Extreme",
+            confirms: mtfDir === "LONG" ? ind.rsi < 30 : ind.rsi > 70,
+            strength: mtfDir === "LONG"
+              ? clamp((30 - ind.rsi) / 30 + 0.6, 0.6, 1)
+              : clamp((ind.rsi - 70) / 30 + 0.6, 0.6, 1),
+          },
+          {
+            name: "RSI-Div",
+            confirms: (mtfDir === "LONG" && ind.rsiDivergence === "bullish") ||
+                      (mtfDir === "SHORT" && ind.rsiDivergence === "bearish"),
+            strength: ind.rsiDivergence !== "none" ? 0.92 : 0,
+          },
+          {
+            name: "MA10/20/50",
+            confirms: mtfDir === "LONG"
+              ? (ind.ma10 > ind.ma20 && ind.ma20 > ind.ma50)
+              : (ind.ma10 < ind.ma20 && ind.ma20 < ind.ma50),
+            strength: clamp((Math.abs(ind.ma10 - ind.ma20) / (price * 0.003) + Math.abs(ind.ma20 - ind.ma50) / (price * 0.005)) / 2, 0, 1),
+          },
+          {
+            name: "MA10/20",
+            confirms: mtfDir === "LONG" ? ind.ma10 > ind.ma20 : ind.ma10 < ind.ma20,
+            strength: Math.min(Math.abs(ind.ma10 - ind.ma20) / (price * 0.002), 1),
+          },
+          {
+            name: "VWAP",
+            confirms: mtfDir === "LONG" ? price > ind.vwap : price < ind.vwap,
+            strength: Math.min(Math.abs(price - ind.vwap) / (ind.vwap * 0.005), 1),
+          },
+          {
+            name: "VolDelta",
+            confirms: mtfDir === "LONG" ? ind.volumeDeltaPct > 8 : ind.volumeDeltaPct < -8,
+            strength: Math.min(Math.abs(ind.volumeDeltaPct) / 40, 1),
+          },
+          { name: "BB-Squeeze", confirms: ind.bbSqueeze, strength: ind.bbSqueeze ? 0.75 : 0 },
+        ];
+
+        // Selecciona el confirmador con mayor strength que confirma
+    const bestConfirm = confirmCandidates
+      .filter(c => c.confirms && c.strength > 0)
+      .sort((a, b) => b.strength - a.strength)[0] ?? null;
+
+    const confirmed = bestConfirm !== null;
+    const confirmStrength = bestConfirm?.strength ?? 0;
+
+    // ── Paso 3: Dirección final ───────────────────────────────────────────────
+    // MTF dicta la dirección. Si hay confirmación, refuerza. Sin confirmación, sigue igual.
+    const direction = mtfDir;
+
+    // ── Paso 4: Calcular confianza ────────────────────────────────────────────
+    const confidence = clamp(
+      50
+      + mtfStrength * 8                    // cuánto de acuerdo están los 3 TF de MTF
+      + (confirmed ? confirmStrength * 18 : -5)  // indicador confirmador: bono o penalidad leve
+      + (ind.rsiDivergence !== "none" ? 5 : 0)   // divergencia siempre suma
+      - spreadPct * 35,
+      50, 96
+    );
+
+    // ── Paso 5: Sizing — Wyckoff como multiplicador solo en intradía ──────────
+    const wyckoffMult = currentMode === "intradia" ? (wyckoff as WyckoffAnalysis & { wyckoffLotMult?: number }).wyckoffLotMult ?? 1.0 : 1.0;
 
     const entry = direction === "LONG" ? price + spread / 2 : price - spread / 2;
     const baseAtr = mtf.atr;
@@ -1213,25 +1444,19 @@ export function App() {
       ? entry + baseAtr * (currentMode === "scalping" ? lrn.scalpingTpAtr : lrn.intradayTpAtr)
       : entry - baseAtr * (currentMode === "scalping" ? lrn.scalpingTpAtr : lrn.intradayTpAtr);
 
-    const confidence = clamp(
-      50
-      + Math.abs(mtf.htf) * 10 + Math.abs(mtf.ltf) * 8 + Math.abs(mtf.exec) * 6
-      + scoreConf * 15
-      - spreadPct * 40
-      + (wyckoff.phase !== "unknown" ? 5 : 0)
-      + (ind.rsiDivergence !== "none" ? 4 : 0),
-      50, 97
-    );
-
-    const wyckoffCtx = wyckoff.bias !== "neutral" ? ` Wyckoff ${wyckoff.bias === "accumulation" ? "acumulación" : "distribución"} Fase ${wyckoff.phase}.` : "";
-    const divCtx = ind.rsiDivergence !== "none" ? ` Divergencia RSI ${ind.rsiDivergence === "bullish" ? "alcista" : "bajista"}.` : "";
-    const sqCtx = ind.bbSqueeze ? " BB Squeeze activo — expansión inminente." : "";
-    const rationale = `MTF score ${bullScore}↑/${bearScore}↓.${wyckoffCtx}${divCtx}${sqCtx} Vol delta: ${ind.volumeDeltaPct.toFixed(1)}%. RSI ${ind.rsi.toFixed(0)}.`;
+    // ── Paso 6: Rationale ─────────────────────────────────────────────────────
+    const mtfCtx = `HTF ${mtf.htf.toFixed(2)} / LTF ${mtf.ltf.toFixed(2)} / Exec ${mtf.exec.toFixed(2)}`;
+    const confirmCtx = bestConfirm ? `Confirmación: ${bestConfirm.name} (${(bestConfirm.strength * 100).toFixed(0)}%)` : "Sin confirmación adicional";
+    const wyckoffCtx = currentMode === "intradia" && wyckoff.bias !== "neutral"
+      ? ` | Wyckoff ${wyckoff.bias === "accumulation" ? "Acum" : "Dist"} F${wyckoff.phase} mult×${wyckoffMult.toFixed(2)}` : "";
+    const rationale = `${direction} | ${mtfCtx} | ${confirmCtx}${wyckoffCtx}`;
 
     return {
       asset: currentAsset, mode: currentMode, direction, entry, stopLoss, takeProfit,
       confidence, spreadPct, atr: baseAtr, mtf, indicators: ind, wyckoff, rationale,
-    };
+      // Adjuntar mult para usarlo en createSignalAndExecute
+      ...(currentMode === "intradia" ? { _wyckoffMult: wyckoffMult } : {}),
+    } as Signal & { _wyckoffMult?: number };
   }
 
   // ── IA: trader experto con master en estadística ──
@@ -1328,9 +1553,10 @@ Signal rationale: ${signal.rationale}`;
       const effectiveStop = pos.signal.direction === "LONG"
         ? Math.max(pos.signal.stopLoss, trailingStop) : Math.min(pos.signal.stopLoss, trailingStop);
       const vals = sv[pos.signal.asset];
-      const ma5 = avg(vals.slice(-5)); const ma13 = avg(vals.slice(-13));
+      const maFast = avg(vals.slice(-(pos.signal.mode === "scalping" ? 5 : 10)));
+      const maSlow = avg(vals.slice(-(pos.signal.mode === "scalping" ? 10 : 20)));
       const reversal = pos.signal.mode === "intradia" &&
-        ((pos.signal.direction === "LONG" && ma5 < ma13) || (pos.signal.direction === "SHORT" && ma5 > ma13));
+        ((pos.signal.direction === "LONG" && maFast < maSlow) || (pos.signal.direction === "SHORT" && maFast > maSlow));
       const hitTp = pos.signal.direction === "LONG" ? tradable >= pos.signal.takeProfit : tradable <= pos.signal.takeProfit;
       const hitSl = pos.signal.direction === "LONG" ? tradable <= effectiveStop : tradable >= effectiveStop;
       if (hitTp) { closePosition(pos, tradable, "TP"); return; }
@@ -1350,13 +1576,16 @@ Signal rationale: ${signal.rationale}`;
       return;
     }
     const lrn = learningRef.current;
-    const riskUsd = Math.max(0.5, equity * (riskPct / 100) * lrn.riskScale);
+    // Wyckoff MTF multiplier solo en intradía cuando hay confluencia avanzada
+    const wyckoffMult = (signal as Signal & { _wyckoffMult?: number })._wyckoffMult ?? 1.0;
+    const riskUsd = Math.max(0.5, equity * (riskPct / 100) * lrn.riskScale * wyckoffMult);
     const stopDistance = Math.max(Math.abs(signal.entry - signal.stopLoss), signal.entry * 0.0003);
     const size = riskUsd / stopDistance;
     const marginUsed = (size * signal.entry) / leverageByAsset[signal.asset];
     if (marginUsed > equity * 0.65) { pushToast("⚠️ Margen insuficiente", "warning"); return; }
+    const multTag = wyckoffMult > 1 ? ` | Wyckoff ×${wyckoffMult.toFixed(2)}` : "";
     setOpenPositions(prev => [...prev, { id: Date.now(), signal, size, marginUsed, openedAt: new Date().toISOString(), peak: signal.entry, trough: signal.entry }]);
-    if (!autoLabel) pushToast(`🚀 ${signal.asset} ${signal.direction} @ ${signal.entry.toFixed(2)} | conf ${signal.confidence.toFixed(0)}%${signal.aiRationale ? " | " + signal.aiRationale : ""}`, "success");
+    if (!autoLabel) pushToast(`🚀 ${signal.asset} ${signal.direction} @ ${signal.entry.toFixed(2)} | conf ${signal.confidence.toFixed(0)}%${multTag}${signal.aiRationale ? " | " + signal.aiRationale : ""}`, "success");
   }
 
   async function syncRealData() {
@@ -1613,7 +1842,7 @@ Signal rationale: ${signal.rationale}`;
               {currentIndicators && showIndicators && (
                 <div className="card" style={{ padding: "10px 12px" }}>
                   <p className="label" style={{ marginBottom: 8 }}>Indicadores técnicos</p>
-                  <IndicatorPanel ind={currentIndicators} />
+                  <IndicatorPanel ind={currentIndicators} mode={tab} />
                 </div>
               )}
 
@@ -1738,8 +1967,8 @@ Signal rationale: ${signal.rationale}`;
             <div className="card">
               <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>📡 Fuentes de datos</p>
               <div style={{ fontSize: 12, lineHeight: 2.1 }}>
-                <p><strong>BTC/ETH</strong> → Bybit API v5 (linear perpetual)</p>
-                <p><strong>Oro/Plata</strong> → Binance spot (XAUUSDT, XAGUSDT)</p>
+              <p><strong>Todos los activos</strong> → Binance spot</p>
+              <p>BTCUSDT · ETHUSDT · XAUUSDT · XAGUSDT</p>
                 <p><strong>Estado:</strong> <span style={{ color: liveReady ? "#10b981" : "#ef4444" }}>{feedStatus}</span></p>
               </div>
               <button className="btn-secondary" style={{ marginTop: 10 }} onClick={() => void syncRealData()} disabled={isSyncing}>{isSyncing ? "⟳ Sincronizando..." : "↻ Sync ahora"}</button>
