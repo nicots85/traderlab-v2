@@ -267,3 +267,4 @@ th { color: var(--muted) !important; }
 @media (max-width: 1140px) {
   main > div[style*="300px"] { display: flex !important; flex-direction: column !important; }
 }
+
