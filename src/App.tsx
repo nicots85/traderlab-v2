@@ -51,8 +51,8 @@ const assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"];
 const bybitSymbol: Record<Asset, string> = {
   BTCUSD: "BTCUSDT",
   ETHUSD: "ETHUSDT",
-  XAGUSD: "XAGUSD",   // par perpetuo de plata en Bybit
-  XAUUSD: "XAUUSD",   // par perpetuo de oro en Bybit
+  XAGUSD: "XAGUSDT",  // Bybit usa XAGUSDT para plata
+  XAUUSD: "XAUUSDT",  // Bybit usa XAUUSDT para oro
 };
 
 const assetLabel: Record<Asset, string> = {
@@ -137,40 +137,75 @@ type BybitTickerResp = {
   result: { list: Array<{ symbol: string; lastPrice: string }> };
 };
 
+// ── Bybit helpers ──
 async function fetchBybitKlines(symbol: string, limit = 160): Promise<Candle[]> {
   const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=1&limit=${limit}`;
   const data = await fetchJson<BybitKlineResp>(url);
   if (data.retCode !== 0) throw new Error(`Bybit kline error ${data.retCode}`);
-  // Bybit devuelve de más reciente a más antiguo — invertimos
   return data.result.list.reverse().map(b => ({
-    t: Number(b[0]),
-    o: parseFloat(b[1]),
-    h: parseFloat(b[2]),
-    l: parseFloat(b[3]),
-    c: parseFloat(b[4]),
-    v: parseFloat(b[5]),
+    t: Number(b[0]), o: parseFloat(b[1]), h: parseFloat(b[2]),
+    l: parseFloat(b[3]), c: parseFloat(b[4]), v: parseFloat(b[5]),
   }));
 }
 
 async function fetchBybitTicker(symbol: string): Promise<number> {
   const url = `https://api.bybit.com/v5/market/tickers?category=linear&symbol=${symbol}`;
   const data = await fetchJson<BybitTickerResp>(url);
-  if (data.retCode !== 0) throw new Error(`Bybit ticker error ${data.retCode}`);
+  if (data.retCode !== 0) throw new Error(`Bybit error ${data.retCode}`);
   const price = parseFloat(data.result.list[0]?.lastPrice ?? "0");
   if (!price) throw new Error(`Precio 0 para ${symbol}`);
   return price;
 }
 
+// ── Binance helpers (fallback para metales) ──
+type BinanceKline = [number, string, string, string, string, string];
+
+async function fetchBinanceKlines(symbol: string, limit = 160): Promise<Candle[]> {
+  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1m&limit=${limit}`;
+  const data = await fetchJson<BinanceKline[]>(url);
+  return data.map(b => ({
+    t: b[0], o: parseFloat(b[1]), h: parseFloat(b[2]),
+    l: parseFloat(b[3]), c: parseFloat(b[4]), v: parseFloat(b[5]),
+  }));
+}
+
+async function fetchBinanceTicker(symbol: string): Promise<number> {
+  const url = `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`;
+  const data = await fetchJson<{ price: string }>(url);
+  const price = parseFloat(data.price);
+  if (!price) throw new Error(`Binance precio 0 para ${symbol}`);
+  return price;
+}
+
+// Simbolo equivalente en Binance para fallback
+const binanceSymbol: Record<Asset, string> = {
+  BTCUSD: "BTCUSDT",
+  ETHUSD: "ETHUSDT",
+  XAUUSD: "XAUUSDT",
+  XAGUSD: "XAGUSDT",
+};
+
 async function fetchRealMarketSnapshot(prevPrices: Record<Asset, number>) {
-  // Fetch todos los activos desde Bybit en paralelo
   const results = await Promise.allSettled(
     assets.map(async (asset) => {
-      const sym = bybitSymbol[asset];
-      const [price, candles] = await Promise.all([
-        fetchBybitTicker(sym),
-        fetchBybitKlines(sym, 160),
-      ]);
-      return { asset, price, candles };
+      const bySym = bybitSymbol[asset];
+      const binSym = binanceSymbol[asset];
+      let price: number;
+      let candles: Candle[];
+      let source = "Bybit";
+      try {
+        [price, candles] = await Promise.all([
+          fetchBybitTicker(bySym),
+          fetchBybitKlines(bySym, 160),
+        ]);
+      } catch {
+        source = "Binance";
+        [price, candles] = await Promise.all([
+          fetchBinanceTicker(binSym),
+          fetchBinanceKlines(binSym, 160),
+        ]);
+      }
+      return { asset, price, candles, source };
     })
   );
 
@@ -178,6 +213,7 @@ async function fetchRealMarketSnapshot(prevPrices: Record<Asset, number>) {
   const candleMap: Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
   const seriesMap: Partial<Record<Asset, number[]>> = {};
   const failedAssets: string[] = [];
+  const sourceMap: Partial<Record<Asset, string>> = {};
 
   results.forEach((r, i) => {
     const asset = assets[i];
@@ -185,13 +221,12 @@ async function fetchRealMarketSnapshot(prevPrices: Record<Asset, number>) {
       prices[asset] = r.value.price;
       candleMap[asset] = r.value.candles;
       seriesMap[asset] = r.value.candles.map(c => c.c);
+      sourceMap[asset] = r.value.source;
     } else {
       failedAssets.push(asset);
     }
   });
 
-  // Calcular shock de volatilidad a partir de BTC
-  const btcCandles = candleMap.BTCUSD;
   const btcSeries = seriesMap.BTCUSD ?? [];
   let shock = 0.28;
   if (btcSeries.length > 10) {
@@ -199,11 +234,14 @@ async function fetchRealMarketSnapshot(prevPrices: Record<Asset, number>) {
     shock = clamp(absRet * 220, 0.08, 1.25);
   }
 
+  const metalSources = (["XAUUSD", "XAGUSD"] as Asset[]).map(a => sourceMap[a] ?? "?");
   const sourceNote = failedAssets.length > 0
-    ? `⚠ ${failedAssets.join(", ")} usa precio anterior`
-    : "Bybit";
+    ? `⚠ fallo: ${failedAssets.join(", ")}`
+    : metalSources.some(s => s === "Binance")
+      ? "Bybit + Binance (metales)"
+      : "Bybit";
 
-  return { prices, candleMap, seriesMap, btcCandles, shock, sourceNote };
+  return { prices, candleMap, seriesMap, btcCandles: candleMap.BTCUSD, shock, sourceNote };
 }
 
 // ─── Candlestick Chart ────────────────────────────────────────────────────────
