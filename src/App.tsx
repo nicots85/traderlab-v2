@@ -1432,7 +1432,7 @@ function BacktestTab({ liveReady, backtestSize, setBacktestSize, riskPct, setRis
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
-export // ─── Persistencia ────────────────────────────────────────────────────────────
+// ─── Persistencia ────────────────────────────────────────────────────────────
 
 // ─── AI Chat Panel ────────────────────────────────────────────────────────────
 type ChatMessage = { role: "user" | "ai"; text: string; ts: string };
@@ -1463,7 +1463,7 @@ function AiChatPanel({
     setLoading(true);
 
     // Contexto del sistema para el chat
-    const systemCtx = `You are an elite algorithmic trader and risk manager analyzing session.
+    const systemCtx = `You are an elite algorithmic trader and risk manager analyzing a PAPER TRADING session.
 Context:
 - Open positions: ${openPositions.length}
 - Real trades: ${stats.total} | Win rate: ${stats.winRate.toFixed(1)}% | P&L: $${stats.pnl.toFixed(2)}
@@ -1615,7 +1615,7 @@ function useLocalStorage<T>(key: string, initial: T): [T, React.Dispatch<React.S
   return [val, setVal];
 }
 
-function App() {
+export function App() {
   const [appTab, setAppTab] = useState<AppTab>("trading");
   const [tab, setTab] = useState<Mode>("scalping");
   const [asset, setAsset] = useState<Asset>("BTCUSD");
