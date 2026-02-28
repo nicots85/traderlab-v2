@@ -1631,7 +1631,12 @@ function App() {
     const spread = (spreadPct / 100) * price;
     const mtf = getMtfScore(currentAsset, currentMode);
     const ind = indicatorsMap[currentAsset] ?? computeIndicators(candles[currentAsset]);
-    const wyckoff = wyckoffMap[currentAsset] ?? analyzeWyckoff(candles[currentAsset]);
+    // Wyckoff: SOLO en intradía — en scalping no tiene sentido estructural
+    const wyckoff = currentMode === "intradia"
+      ? (wyckoffMap[currentAsset] ?? analyzeWyckoff(candles[currentAsset]))
+      : { bias: "neutral" as const, phase: "unknown" as const, events: [],
+          supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
+          narrative: "", wyckoffLotMult: 1.0 };
     const lrn = learningRef.current;
 
     // ── Paso 1: Dirección primaria por MTF (obligatorio) ──────────────────────
@@ -1745,9 +1750,10 @@ function App() {
     // ── Paso 4: Calcular confianza ────────────────────────────────────────────
     const confidence = clamp(
       50
-      + mtfStrength * 8                    // cuánto de acuerdo están los 3 TF de MTF
-      + (confirmed ? confirmStrength * 18 : -5)  // indicador confirmador: bono o penalidad leve
-      + (ind.rsiDivergence !== "none" ? 5 : 0)   // divergencia siempre suma
+      + mtfStrength * 8                                      // alineación MTF
+      + (confirmed ? confirmStrength * 18 : -5)              // confirmador técnico
+      + (ind.rsiDivergence !== "none" ? 5 : 0)               // divergencia RSI
+      + (currentMode === "intradia" && wyckoff.bias !== "neutral" ? 4 : 0)  // bono Wyckoff solo intradía
       - spreadPct * 35,
       50, 96
     );
@@ -1796,8 +1802,9 @@ Your job is to evaluate a trading signal and decide whether to execute, skip, or
 
 Rules:
 - SCALPING mode: if MTF momentum is aligned and Stochastic confirms, OPEN unless there is a clear structural reason not to. Frequency matters — a scalper needs trades.
-- INTRADAY mode: require structural confluence (Wyckoff + MTF + at least 1 indicator).
-- Never open against Wyckoff distribution Phase D without invalidation.
+- INTRADAY mode: use Wyckoff as additional context. Require MTF + at least 1 indicator.
+- INTRADAY: never open against Wyckoff distribution Phase D without clear invalidation.
+- SCALPING mode: ignore Wyckoff completely. Decide based on MTF momentum + Stochastic only.
 - BB Squeeze + volume delta = high-probability. RSI divergence = significant edge.
 - Default to OPEN when confidence ≥ 52 in scalping, ≥ 55 in intraday.
 - Respond ONLY with valid JSON: {"decision":"OPEN"|"SKIP"|"WAIT","confidence_adjustment":number,"rationale":"string","risk_notes":"string"}
@@ -1814,7 +1821,7 @@ RSI: ${signal.indicators.rsi.toFixed(1)} | Divergence: ${signal.indicators.rsiDi
 VWAP position: ${signal.entry > signal.indicators.vwap ? "ABOVE" : "BELOW"} (${((signal.entry - signal.indicators.vwap) / signal.indicators.vwap * 100).toFixed(2)}%)
 BB Squeeze: ${signal.indicators.bbSqueeze ? "YES" : "NO"}
 Volume Delta: ${signal.indicators.volumeDeltaPct.toFixed(1)}%
-Wyckoff: ${signal.wyckoff.bias} | Phase: ${signal.wyckoff.phase} | ${signal.wyckoff.narrative}
+${signal.mode === "intradia" ? `Wyckoff: ${signal.wyckoff.bias} | Phase: ${signal.wyckoff.phase} | ${signal.wyckoff.narrative}` : "Wyckoff: N/A (scalping — no aplica)"}
 Signal rationale: ${signal.rationale}`;
 
       const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
