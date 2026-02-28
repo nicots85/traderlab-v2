@@ -1409,7 +1409,21 @@ function BacktestTab({ liveReady, backtestSize, setBacktestSize, riskPct, setRis
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
-export function App() {
+export // ─── Persistencia ────────────────────────────────────────────────────────────
+function useLocalStorage<T>(key: string, initial: T): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const [val, setVal] = useState<T>(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? (JSON.parse(raw) as T) : initial;
+    } catch { return initial; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(key, JSON.stringify(val)); } catch { /* quota */ }
+  }, [key, val]);
+  return [val, setVal];
+}
+
+function App() {
   const [appTab, setAppTab] = useState<AppTab>("trading");
   const [tab, setTab] = useState<Mode>("scalping");
   const [asset, setAsset] = useState<Asset>("BTCUSD");
@@ -1421,16 +1435,16 @@ export function App() {
     XAUUSD: Array.from({ length: 120 }, () => initialPrices.XAUUSD),
   });
   const [candles, setCandles] = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
-  const [balance, setBalance] = useState(100);
+  const [balance, setBalance] = useLocalStorage("tl_balance", 100);
   const [openPositions, setOpenPositions] = useState<Position[]>([]);
-  const [realTrades, setRealTrades] = useState<ClosedTrade[]>([]);
+  const [realTrades, setRealTrades] = useLocalStorage<ClosedTrade[]>("tl_trades", []);
   const [backtestTrades, setBacktestTrades] = useState<ClosedTrade[]>([]);
   const [lastSignal, setLastSignal] = useState<Signal | null>(null);
   const [volumeShock, setVolumeShock] = useState(0.28);
-  const [learning, setLearning] = useState<LearningModel>(initialLearning);
-  const [apiKey, setApiKey] = useState("");
+  const [learning, setLearning] = useLocalStorage<LearningModel>("tl_learning", initialLearning);
+  const [apiKey, setApiKey] = useLocalStorage("tl_apiKey", "");
   const [usingGroq, setUsingGroq] = useState(false);
-  const [riskPct, setRiskPct] = useState(1.2);
+  const [riskPct, setRiskPct] = useLocalStorage("tl_riskPct", 1.2);
   const [backtestSize, setBacktestSize] = useState(40);
   const [lastBacktest, setLastBacktest] = useState<BacktestReport | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -1585,19 +1599,27 @@ export function App() {
   function getMtfScore(a: Asset, mode: Mode = "intradia") {
     const vals = series[a];
     const atr = Math.max(calcAtrFromSeries(vals, 20), prices[a] * 0.0005);
+
     if (mode === "scalping") {
-      const ma5s  = avg(vals.slice(-5));
-      const ma10s = avg(vals.slice(-10));
-      const exec5 = ((vals[vals.length - 1] ?? 0) - (vals[vals.length - 4] ?? 0)) / atr;
-      return { htf: (ma5s - ma10s) / atr, ltf: (ma5s - ma10s) / atr * 1.2, exec: exec5, atr };
+      // Scalping: momentum puro en múltiples ventanas cortas
+      // HTF = momentum 10 velas (contexto de scalp)
+      // LTF = momentum 5 velas (estructura inmediata)
+      // Exec = momentum 3 velas (timing de entrada)
+      const n = vals.length;
+      const htf  = n >= 10 ? (vals[n-1] - vals[n-10]) / atr : 0;
+      const ltf  = n >= 5  ? (vals[n-1] - vals[n-5])  / atr : 0;
+      const exec = n >= 3  ? (vals[n-1] - vals[n-3])  / atr : 0;
+      return { htf, ltf, exec, atr };
     }
+
+    // Intradía: MAs tendenciales
     const ma10 = avg(vals.slice(-10));
     const ma20 = avg(vals.slice(-20));
     const ma50 = vals.length >= 50 ? avg(vals.slice(-50)) : avg(vals);
     const execSlice = vals.slice(-8);
     return {
-      htf: (ma20 - ma50) / atr,
-      ltf: (ma10 - ma20) / atr,
+      htf:  (ma20 - ma50) / atr,
+      ltf:  (ma10 - ma20) / atr,
       exec: ((execSlice[execSlice.length - 1] ?? 0) - (execSlice[0] ?? 0)) / atr,
       atr,
     };
@@ -1627,20 +1649,27 @@ export function App() {
       ? [
           // SCALPING — Estocástico primario (umbrales crypto OS<20/OB>80)
           {
+            // Stoch confirma dirección MTF: K cruzando D en cualquier zona
+            // o simplemente K y D alineados con la dirección
             name: "Stoch",
             confirms: mtfDir === "LONG"
-              ? (ind.stochK < 50 && ind.stochK > ind.stochD)
-              : (ind.stochK > 50 && ind.stochK < ind.stochD),
-            strength: mtfDir === "LONG"
-              ? clamp((50 - ind.stochK) / 30, 0, 1)
-              : clamp((ind.stochK - 50) / 30, 0, 1),
+              ? ind.stochK > ind.stochD  // K sobre D = momentum alcista
+              : ind.stochK < ind.stochD, // K bajo D = momentum bajista
+            strength: (() => {
+              const crossGap = Math.abs(ind.stochK - ind.stochD) / 20; // gap normalizado
+              const zoneBonus = mtfDir === "LONG"
+                ? (ind.stochK < 50 ? 0.3 : 0)  // extra si viene de zona baja
+                : (ind.stochK > 50 ? 0.3 : 0);  // extra si viene de zona alta
+              return clamp(crossGap + zoneBonus, 0, 1);
+            })(),
           },
           {
+            // Stoch en zona extrema: señal de reversión de alta convicción
             name: "Stoch-Extreme",
-            confirms: mtfDir === "LONG" ? ind.stochK < 20 : ind.stochK > 80,
+            confirms: mtfDir === "LONG" ? ind.stochK < 25 : ind.stochK > 75,
             strength: mtfDir === "LONG"
-              ? clamp((20 - ind.stochK) / 20 + 0.5, 0.5, 1)
-              : clamp((ind.stochK - 80) / 20 + 0.5, 0.5, 1),
+              ? clamp((25 - ind.stochK) / 25 + 0.4, 0.4, 1)
+              : clamp((ind.stochK - 75) / 25 + 0.4, 0.4, 1),
           },
           {
             name: "MA5/10",
@@ -1754,7 +1783,11 @@ export function App() {
   async function aiDecision(signal: Signal): Promise<"OPEN" | "SKIP" | "WAIT"> {
     const lrn = learningRef.current;
     if (!usingGroq || !apiKey.trim()) {
-      return signal.confidence >= lrn.confidenceFloor ? "OPEN" : "SKIP";
+      // Scalping necesita piso más bajo para abrir con mayor frecuencia
+      const floor = signal.mode === "scalping"
+        ? Math.max(48, lrn.confidenceFloor - 4)
+        : lrn.confidenceFloor;
+      return signal.confidence >= floor ? "OPEN" : "SKIP";
     }
     try {
       const systemPrompt = `You are an elite institutional trader with 20 years of experience and an MSc in Statistics and Financial Markets. 
@@ -1762,10 +1795,11 @@ You specialize in Wyckoff methodology, orderflow analysis, and multi-timeframe m
 Your job is to evaluate a trading signal and decide whether to execute, skip, or wait.
 
 Rules:
-- Be HIGHLY selective. Only approve signals with statistical edge AND structural confluence.
-- Never open against Wyckoff distribution in Phase C/D without clear invalidation.
-- A BB Squeeze + volume delta alignment is a high-probability setup.
-- RSI divergence confirming direction adds significant edge.
+- SCALPING mode: if MTF momentum is aligned and Stochastic confirms, OPEN unless there is a clear structural reason not to. Frequency matters — a scalper needs trades.
+- INTRADAY mode: require structural confluence (Wyckoff + MTF + at least 1 indicator).
+- Never open against Wyckoff distribution Phase D without invalidation.
+- BB Squeeze + volume delta = high-probability. RSI divergence = significant edge.
+- Default to OPEN when confidence ≥ 52 in scalping, ≥ 55 in intraday.
 - Respond ONLY with valid JSON: {"decision":"OPEN"|"SKIP"|"WAIT","confidence_adjustment":number,"rationale":"string","risk_notes":"string"}
 - confidence_adjustment: integer between -20 and +20
 - rationale: max 120 chars in Spanish
@@ -1803,7 +1837,10 @@ Signal rationale: ${signal.rationale}`;
       const dec = String(parsed.decision ?? "").toUpperCase();
       return dec === "OPEN" ? "OPEN" : dec === "WAIT" ? "WAIT" : "SKIP";
     } catch {
-      return signal.confidence >= learningRef.current.confidenceFloor ? "OPEN" : "SKIP";
+      const floorCatch = signal.mode === "scalping"
+        ? Math.max(48, learningRef.current.confidenceFloor - 4)
+        : learningRef.current.confidenceFloor;
+      return signal.confidence >= floorCatch ? "OPEN" : "SKIP";
     }
   }
 
@@ -2324,7 +2361,15 @@ Signal rationale: ${signal.rationale}`;
             <div className="card">
               <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>🔁 Reiniciar</p>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => { setBalance(100); setOpenPositions([]); setRealTrades([]); setLearning(initialLearning); setLastSignal(null); pushToast("Trading real reiniciado.", "info"); }} style={{ padding: "7px 14px", borderRadius: 7, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.1)", color: "#ef4444", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Reiniciar trading</button>
+                <button onClick={() => {
+                    if (!confirm("¿Reiniciar todo? Se borrarán trades, aprendizaje y balance.")) return;
+                    ["tl_balance","tl_trades","tl_learning","tl_riskPct"].forEach(k => localStorage.removeItem(k));
+                    setBalance(100); setOpenPositions([]); setRealTrades([]);
+                    setLearning(initialLearning); setLastSignal(null);
+                    pushToast("✅ Trading reiniciado — datos borrados.", "info");
+                  }} style={{ padding: "7px 14px", borderRadius: 7, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.1)", color: "#ef4444", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                  🗑 Reiniciar todo
+                </button>
                 <button onClick={() => { setBacktestTrades([]); setLastBacktest(null); pushToast("Backtest borrado.", "info"); }} style={{ padding: "7px 14px", borderRadius: 7, border: "1px solid rgba(99,102,241,0.3)", background: "rgba(99,102,241,0.1)", color: "#a5b4fc", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Limpiar backtest</button>
               </div>
             </div>
