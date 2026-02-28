@@ -102,8 +102,8 @@ const binanceFuturesSymbol: Partial<Record<Asset, string>> = {
 };
 
 const assetLabel: Record<Asset, string> = {
-  BTCUSD: "BTC/USD (500×)", ETHUSD: "ETH/USD (500×)",
-  XAGUSD: "Plata XAG (1000×)", XAUUSD: "Oro XAU (1000×)",
+  BTCUSD: "BTC/USD (100×)", ETHUSD: "ETH/USD (100×)",
+  XAGUSD: "Plata XAG (50×)", XAUUSD: "Oro XAU (100×)",
 };
 
 const initialPrices: Record<Asset, number> = {
@@ -111,12 +111,19 @@ const initialPrices: Record<Asset, number> = {
 };
 
 const leverageByAsset: Record<Asset, number> = {
-  BTCUSD: 500, ETHUSD: 500, XAGUSD: 1000, XAUUSD: 1000,
+  BTCUSD: 100, ETHUSD: 100, XAGUSD: 50, XAUUSD: 100,
+};
+// ATR mínimo por activo — evita sizing explosivo en mercados de bajo precio
+// XAGUSD ~32 usd: ATR 1m mínimo realista = 0.05 usd (0.15%)
+// XAUUSD ~3300 usd: ATR 1m mínimo = 1.5 usd
+// BTC ~95000 usd: ATR 1m mínimo = 50 usd
+const minAtrByAsset: Record<Asset, number> = {
+  BTCUSD: 50, ETHUSD: 5, XAGUSD: 0.08, XAUUSD: 2.0,
 };
 
 const initialLearning: LearningModel = {
   riskScale: 1, confidenceFloor: 52, scalpingTpAtr: 1.35,
-  intradayTpAtr: 2.6, atrTrailMult: 1.4, hourEdge: {},
+  intradayTpAtr: 3.5, atrTrailMult: 0.35, hourEdge: {},
 };
 
 const exitLabel: Record<ExitReason, string> = {
@@ -1185,7 +1192,7 @@ function WyckoffPanel({ wyckoff }: { wyckoff: WyckoffAnalysis }) {
         )}
         <div style={{ display: "flex", gap: 4, marginLeft: "auto", flexWrap: "wrap" }}>
           {wyckoff.events.slice(-5).map((ev, i) => (
-            <span key={i} style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4, background: `${ev.color}20`, color: ev.color, fontWeight: 700, border: `1px solid ${ev.color}30` }}>{ev.label}</span>
+            <span key={i} style={{ fontSize: 11, padding: "1px 5px", borderRadius: 4, background: `${ev.color}20`, color: ev.color, fontWeight: 700, border: `1px solid ${ev.color}30` }}>{ev.label}</span>
           ))}
         </div>
       </div>
@@ -1289,7 +1296,16 @@ function LivePositionCard({ position, prices, spreadByAsset, now, onClose }: {
         <span>Tam: {position.size.toFixed(4)}</span>
         <span>Margen: {money(position.marginUsed)}</span>
         <span>Conf: {position.signal.confidence.toFixed(0)}%</span>
-        {position.signal.wyckoff.bias !== "neutral" && <span style={{ color: position.signal.wyckoff.bias === "accumulation" ? "#10b981" : "#ef4444" }}>Wyckoff: {position.signal.wyckoff.bias === "accumulation" ? "Acum" : "Dist"} F{position.signal.wyckoff.phase}</span>}
+        <span style={{ padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700,
+          background: position.signal.mode === "scalping" ? "rgba(99,102,241,0.2)" : "rgba(245,158,11,0.2)",
+          color: position.signal.mode === "scalping" ? "#a5b4fc" : "#f59e0b" }}>
+          {position.signal.mode === "scalping" ? "SCALP" : "INTRADÍA"}
+        </span>
+        {position.signal.mode === "intradia" && position.signal.wyckoff.bias !== "neutral" && (
+          <span style={{ color: position.signal.wyckoff.bias === "accumulation" ? "#10b981" : "#ef4444" }}>
+            Wyckoff: {position.signal.wyckoff.bias === "accumulation" ? "Acum" : "Dist"} F{position.signal.wyckoff.phase}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -1320,7 +1336,7 @@ function TradeHistory({ trades, showSource = false }: { trades: ClosedTrade[]; s
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, minWidth: 460 }}>
           <thead style={{ background: "rgba(255,255,255,0.03)" }}>
             <tr>{["Activo", "Dir.", "Entrada", "Salida", "P&L", "Resultado", ...(showSource ? ["Fuente"] : [])].map(h => (
-              <th key={h} style={{ padding: "7px 9px", textAlign: "left", color: "var(--muted)", fontWeight: 600, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.08em" }}>{h}</th>
+              <th key={h} style={{ padding: "7px 9px", textAlign: "left", color: "var(--muted)", fontWeight: 600, fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em" }}>{h}</th>
             ))}</tr>
           </thead>
           <tbody>
@@ -1332,7 +1348,14 @@ function TradeHistory({ trades, showSource = false }: { trades: ClosedTrade[]; s
                 <td style={{ padding: "6px 9px" }}>{t.exit.toFixed(2)}</td>
                 <td style={{ padding: "6px 9px", fontWeight: 700, color: t.pnl >= 0 ? "#10b981" : "#ef4444" }}>{t.pnl >= 0 ? "+" : ""}{money(t.pnl)}</td>
                 <td style={{ padding: "6px 9px" }}>{exitLabel[t.result]}</td>
-                {showSource && <td style={{ padding: "6px 9px" }}><span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4, background: t.source === "real" ? "rgba(16,185,129,0.12)" : "rgba(99,102,241,0.12)", color: t.source === "real" ? "#10b981" : "#a5b4fc" }}>{t.source}</span></td>}
+                <td style={{ padding: "6px 9px" }}>
+                  <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, fontWeight: 700,
+                    background: t.mode === "scalping" ? "rgba(99,102,241,0.15)" : "rgba(245,158,11,0.15)",
+                    color: t.mode === "scalping" ? "#a5b4fc" : "#f59e0b" }}>
+                    {t.mode === "scalping" ? "SCALP" : "INTRA"}
+                  </span>
+                </td>
+                {showSource && <td style={{ padding: "6px 9px" }}><span style={{ fontSize: 11, padding: "1px 5px", borderRadius: 4, background: t.source === "real" ? "rgba(16,185,129,0.12)" : "rgba(99,102,241,0.12)", color: t.source === "real" ? "#10b981" : "#a5b4fc" }}>{t.source}</span></td>}
               </tr>
             ))}
             {filtered.length === 0 && <tr><td colSpan={7} style={{ padding: "18px", textAlign: "center", color: "var(--muted)" }}>Sin operaciones</td></tr>}
@@ -1410,6 +1433,175 @@ function BacktestTab({ liveReady, backtestSize, setBacktestSize, riskPct, setRis
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export // ─── Persistencia ────────────────────────────────────────────────────────────
+
+// ─── AI Chat Panel ────────────────────────────────────────────────────────────
+type ChatMessage = { role: "user" | "ai"; text: string; ts: string };
+
+function AiChatPanel({
+  apiKey, usingGroq, openPositions, realTrades, lastSignal, prices, stats,
+}: {
+  apiKey: string; usingGroq: boolean;
+  openPositions: Position[]; realTrades: ClosedTrade[];
+  lastSignal: Signal | null; prices: Record<Asset, number>;
+  stats: { total: number; winRate: number; pnl: number; profitFactor: number; sharpe: number };
+}) {
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    { role: "ai", text: "Hola. Soy tu trader IA. Podés preguntarme sobre los trades activos, la estrategia, el rendimiento, o cualquier duda sobre las operaciones.", ts: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }) }
+  ]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  async function sendMessage() {
+    const q = input.trim();
+    if (!q || loading) return;
+    const ts = new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });
+    setMessages(prev => [...prev, { role: "user", text: q, ts }]);
+    setInput("");
+    setLoading(true);
+
+    // Contexto del sistema para el chat
+    const systemCtx = `You are an elite algorithmic trader and risk manager analyzing session.
+Context:
+- Open positions: ${openPositions.length}
+- Real trades: ${stats.total} | Win rate: ${stats.winRate.toFixed(1)}% | P&L: $${stats.pnl.toFixed(2)}
+- Profit factor: ${stats.profitFactor.toFixed(2)} | Sharpe: ${stats.sharpe.toFixed(2)}
+- Current prices: BTC $${prices.BTCUSD?.toFixed(2)} | ETH $${prices.ETHUSD?.toFixed(2)} | XAU $${prices.XAUUSD?.toFixed(2)} | XAG $${prices.XAGUSD?.toFixed(3)}
+
+Open positions detail:
+${openPositions.length === 0 ? "None" : openPositions.map(p =>
+  `  ${p.signal.asset} ${p.signal.direction} ${p.signal.mode.toUpperCase()} | Entry: ${p.signal.entry.toFixed(3)} | SL: ${p.signal.stopLoss.toFixed(3)} | TP: ${p.signal.takeProfit.toFixed(3)} | Size: ${p.size.toFixed(2)}`
+).join("\n")}
+
+Last signal:
+${lastSignal ? `${lastSignal.asset} ${lastSignal.direction} ${lastSignal.mode} | Conf: ${lastSignal.confidence.toFixed(0)}% | ${lastSignal.rationale}` : "None"}
+
+Last 5 closed trades:
+${realTrades.slice(0, 5).map(t =>
+  `  ${t.asset} ${t.direction} ${t.mode} | ${t.result} | PnL: $${t.pnl.toFixed(2)}`
+).join("\n") || "None"}
+
+Answer in Spanish. Be direct, analytical, honest. Max 200 words. If asked about why a trade opened/closed, reference the actual data above.`;
+
+    if (!usingGroq || !apiKey.trim()) {
+      setMessages(prev => [...prev, {
+        role: "ai",
+        text: "Necesitás activar Groq y configurar una API key en Configuración para usar el chat con IA.",
+        ts: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })
+      }]);
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model: "meta-llama/llama-4-scout-17b-16e-instruct",
+          temperature: 0.4, max_tokens: 350,
+          messages: [
+            { role: "system", content: systemCtx },
+            ...messages.filter(m => m.role !== "ai" || messages.indexOf(m) > 0).slice(-6).map(m => ({
+              role: m.role === "user" ? "user" : "assistant", content: m.text
+            })),
+            { role: "user", content: q }
+          ],
+        }),
+      });
+      const data = await r.json() as { choices: Array<{ message: { content: string } }> };
+      const reply = data?.choices?.[0]?.message?.content ?? "Sin respuesta.";
+      setMessages(prev => [...prev, { role: "ai", text: reply, ts: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }) }]);
+    } catch {
+      setMessages(prev => [...prev, { role: "ai", text: "Error al conectar con Groq. Verificá la API key.", ts: "" }]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const suggestions = [
+    "¿Por qué abriste el último trade?",
+    "¿Qué opinas del rendimiento actual?",
+    "¿Cuál es el mayor riesgo ahora?",
+    "¿Deberías cerrar alguna posición?",
+  ];
+
+  return (
+    <div className="card" style={{ display: "flex", flexDirection: "column", height: 420, padding: 0, overflow: "hidden" }}>
+      {/* Header */}
+      <div style={{ padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 16 }}>🤖</span>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>Chat con la IA</div>
+          <div style={{ fontSize: 10, color: "var(--muted)" }}>
+            {usingGroq && apiKey ? "Llama 4 Scout · contexto en vivo" : "Configurá Groq para activar"}
+          </div>
+        </div>
+      </div>
+
+      {/* Messages */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+        {messages.map((m, i) => (
+          <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: m.role === "user" ? "flex-end" : "flex-start" }}>
+            <div style={{
+              maxWidth: "88%", padding: "8px 11px", borderRadius: m.role === "user" ? "12px 12px 4px 12px" : "12px 12px 12px 4px",
+              background: m.role === "user" ? "rgba(99,102,241,0.25)" : "rgba(255,255,255,0.05)",
+              border: `1px solid ${m.role === "user" ? "rgba(99,102,241,0.4)" : "rgba(255,255,255,0.08)"}`,
+              fontSize: 12.5, lineHeight: 1.5, color: "var(--text)",
+            }}>
+              {m.text}
+            </div>
+            {m.ts && <span style={{ fontSize: 9.5, color: "var(--muted)", marginTop: 2, paddingInline: 4 }}>{m.ts}</span>}
+          </div>
+        ))}
+        {loading && (
+          <div style={{ display: "flex", alignItems: "flex-start" }}>
+            <div style={{ padding: "8px 12px", borderRadius: "12px 12px 12px 4px", background: "rgba(255,255,255,0.05)", fontSize: 12 }}>
+              <span style={{ opacity: 0.6 }}>Analizando</span>
+              <span style={{ animation: "pulse 1s infinite" }}> ···</span>
+            </div>
+          </div>
+        )}
+        <div ref={endRef} />
+      </div>
+
+      {/* Suggestions */}
+      {messages.length <= 2 && (
+        <div style={{ padding: "4px 10px", display: "flex", flexWrap: "wrap", gap: 4 }}>
+          {suggestions.map(s => (
+            <button key={s} onClick={() => setInput(s)}
+              style={{ fontSize: 10.5, padding: "3px 8px", borderRadius: 12, cursor: "pointer",
+                border: "1px solid rgba(99,102,241,0.3)", background: "rgba(99,102,241,0.08)",
+                color: "#a5b4fc" }}>
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Input */}
+      <div style={{ padding: "8px 10px", borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", gap: 6 }}>
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), void sendMessage())}
+          placeholder="Preguntá sobre los trades..."
+          style={{ flex: 1, padding: "7px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)",
+            background: "rgba(255,255,255,0.05)", color: "var(--text)", fontSize: 12.5, outline: "none" }}
+        />
+        <button onClick={() => void sendMessage()} disabled={loading || !input.trim()}
+          style={{ padding: "7px 12px", borderRadius: 8, border: "none", cursor: loading ? "wait" : "pointer",
+            background: loading || !input.trim() ? "rgba(99,102,241,0.2)" : "rgba(99,102,241,0.7)",
+            color: "#fff", fontSize: 13, fontWeight: 700 }}>
+          ↑
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function useLocalStorage<T>(key: string, initial: T): [T, React.Dispatch<React.SetStateAction<T>>] {
   const [val, setVal] = useState<T>(() => {
     try {
@@ -1588,7 +1780,7 @@ function App() {
       riskScale: clamp(0.8 + wr * 0.6 + Math.max(exp, 0) * 0.03, 0.7, 1.5),
       confidenceFloor: floorAdjust,
       scalpingTpAtr: clamp(1.2 + wr * 0.4, 1.15, 1.8),
-      intradayTpAtr: clamp(2.1 + wr * 1.05, 2, 3.4),
+      intradayTpAtr: clamp(3.0 + wr * 1.5, 2.8, 5.0),
       // atrTrailMult ya no se usa para trailing (es estructural), lo mantenemos
       // como parámetro de buffer del swing stop
       atrTrailMult: clamp(0.25 + wr * 0.3, 0.2, 0.6),
@@ -1598,17 +1790,27 @@ function App() {
 
   function getMtfScore(a: Asset, mode: Mode = "intradia") {
     const vals = series[a];
-    const atr = Math.max(calcAtrFromSeries(vals, 20), prices[a] * 0.0005);
+    const atr = Math.max(calcAtrFromSeries(vals, 20), minAtrByAsset[a] ?? prices[a] * 0.001);
 
     if (mode === "scalping") {
-      // Scalping: momentum puro en múltiples ventanas cortas
-      // HTF = momentum 10 velas (contexto de scalp)
-      // LTF = momentum 5 velas (estructura inmediata)
-      // Exec = momentum 3 velas (timing de entrada)
+      // Scalping TF: 15m · 5m · 1m (usando velas de 1m disponibles)
+      // HTF 15m: promedio de los últimos 3 grupos de 5 velas (≈15 velas → 15m momentum)
+      //   usamos EMA rápida sobre las últimas 15 velas para capturar la tendencia de 15m
+      // LTF  5m: momentum de las últimas 5 velas (≈ 1 vela de 5m)
+      // Exec 1m: momentum de las últimas 3 velas (timing fino de entrada)
       const n = vals.length;
-      const htf  = n >= 10 ? (vals[n-1] - vals[n-10]) / atr : 0;
-      const ltf  = n >= 5  ? (vals[n-1] - vals[n-5])  / atr : 0;
-      const exec = n >= 3  ? (vals[n-1] - vals[n-3])  / atr : 0;
+      // 15m: EMA8 vs EMA21 sobre las últimas 45 velas (suficiente contexto)
+      const slice45 = vals.slice(-Math.min(45, n));
+      const ema8_15m  = ema(slice45, Math.min(8,  slice45.length));
+      const ema21_15m = ema(slice45, Math.min(21, slice45.length));
+      const htf = (ema8_15m - ema21_15m) / atr;
+      // 5m: EMA5 vs EMA13 sobre las últimas 20 velas
+      const slice20 = vals.slice(-Math.min(20, n));
+      const ema5_5m  = ema(slice20, Math.min(5,  slice20.length));
+      const ema13_5m = ema(slice20, Math.min(13, slice20.length));
+      const ltf = (ema5_5m - ema13_5m) / atr;
+      // 1m: momentum de las últimas 3 velas (ejecución)
+      const exec = n >= 3 ? (vals[n-1] - vals[n-3]) / atr : 0;
       return { htf, ltf, exec, atr };
     }
 
@@ -1763,12 +1965,16 @@ function App() {
 
     const entry = direction === "LONG" ? price + spread / 2 : price - spread / 2;
     const baseAtr = mtf.atr;
+    // Scalping: SL ajustado al ruido de 1m (1.2× ATR), TP rápido (1.35-1.8× ATR)
+    // Intradía: SL respeta estructura de 15m-1h (3.0× ATR), TP tendencial (4-6× ATR)
+    const slMult  = currentMode === "scalping" ? 1.2 : 3.0;
+    const tpMult  = currentMode === "scalping" ? lrn.scalpingTpAtr : Math.max(lrn.intradayTpAtr * 1.8, 4.0);
     const stopLoss = direction === "LONG"
-      ? entry - baseAtr * (currentMode === "scalping" ? 1.05 : 1.65)
-      : entry + baseAtr * (currentMode === "scalping" ? 1.05 : 1.65);
+      ? entry - baseAtr * slMult
+      : entry + baseAtr * slMult;
     const takeProfit = direction === "LONG"
-      ? entry + baseAtr * (currentMode === "scalping" ? lrn.scalpingTpAtr : lrn.intradayTpAtr)
-      : entry - baseAtr * (currentMode === "scalping" ? lrn.scalpingTpAtr : lrn.intradayTpAtr);
+      ? entry + baseAtr * tpMult
+      : entry - baseAtr * tpMult;
 
     // ── Paso 6: Rationale ─────────────────────────────────────────────────────
     const mtfCtx = `HTF ${mtf.htf.toFixed(2)} / LTF ${mtf.ltf.toFixed(2)} / Exec ${mtf.exec.toFixed(2)}`;
@@ -1798,6 +2004,7 @@ function App() {
     try {
       const systemPrompt = `You are an elite institutional trader with 20 years of experience and an MSc in Statistics and Financial Markets. 
 You specialize in Wyckoff methodology, orderflow analysis, and multi-timeframe momentum strategies.
+This is a PAPER TRADING simulator. Prices are real market data but trades are simulated — no real money at risk.
 Your job is to evaluate a trading signal and decide whether to execute, skip, or wait.
 
 Rules:
@@ -1944,7 +2151,10 @@ Signal rationale: ${signal.rationale}`;
 
   async function createSignalAndExecute(mode: Mode, targetAsset: Asset, autoLabel = false) {
     if (!liveReady) { pushToast("El feed aún no está listo. Sincronice primero.", "warning"); return; }
+    // Respetar el modo activo: si manual, usar el tab actual
+    // Si autoLabel (scan), usar el modo que se pasa
     const signal = generateSignal(mode, targetAsset);
+    // Etiqueta visual en toast diferencia scalp vs intradía
     if (!autoLabel) setLastSignal(signal);
     const decision = await aiDecision(signal);
     if (decision !== "OPEN") {
@@ -1955,7 +2165,10 @@ Signal rationale: ${signal.rationale}`;
     // Wyckoff MTF multiplier solo en intradía cuando hay confluencia avanzada
     const wyckoffMult = (signal as Signal & { _wyckoffMult?: number })._wyckoffMult ?? 1.0;
     const riskUsd = Math.max(0.5, equity * (riskPct / 100) * lrn.riskScale * wyckoffMult);
-    const stopDistance = Math.max(Math.abs(signal.entry - signal.stopLoss), signal.entry * 0.0003);
+    // stopDistance mínimo: el mayor entre el SL calculado y 0.3% del precio
+    // Evita que ATR pequeño en plata/gold genere sizes irreales
+    const minStop = signal.entry * 0.003;
+    const stopDistance = Math.max(Math.abs(signal.entry - signal.stopLoss), minStop);
     const size = riskUsd / stopDistance;
     const marginUsed = (size * signal.entry) / leverageByAsset[signal.asset];
     if (marginUsed > equity * 0.65) { pushToast("⚠️ Margen insuficiente", "warning"); return; }
@@ -1990,6 +2203,9 @@ Signal rationale: ${signal.rationale}`;
   }
 
   async function runAutoScan() {
+    // Auto scan: prueba ambos modos para todos los activos
+    // Scalping primero (más frecuente), luego intradía
+    for (const a of assets) await createSignalAndExecute("scalping",  a, true);
     for (const a of assets) await createSignalAndExecute("intradia", a, true);
   }
 
@@ -2062,13 +2278,13 @@ Signal rationale: ${signal.rationale}`;
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginRight: 20 }}>
           <span style={{ fontSize: 17 }}>⚡</span>
           <span style={{ fontWeight: 800, fontSize: 14, letterSpacing: "-0.02em" }}>TraderLab</span>
-          <span style={{ fontSize: 9, color: "var(--muted)", background: "rgba(255,255,255,0.06)", padding: "2px 5px", borderRadius: 4, fontWeight: 600 }}>v5</span>
+          <span style={{ fontSize: 11, color: "var(--muted)", background: "rgba(255,255,255,0.06)", padding: "2px 5px", borderRadius: 4, fontWeight: 600 }}>v5</span>
         </div>
         <div style={{ display: "flex", gap: 2, flex: 1 }}>
           {NAV.map(t => (
             <button key={t.id} onClick={() => setAppTab(t.id)} style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 12px", borderRadius: 7, border: "none", cursor: "pointer", fontWeight: 600, fontSize: 12, background: appTab === t.id ? "rgba(255,255,255,0.1)" : "transparent", color: appTab === t.id ? "var(--text)" : "var(--muted)", transition: "all 0.13s" }}>
               {t.icon} {t.label}
-              {t.id === "trading" && openPositions.length > 0 && <span style={{ background: "#10b981", color: "#fff", fontSize: 9, fontWeight: 800, borderRadius: "50%", width: 15, height: 15, display: "flex", alignItems: "center", justifyContent: "center" }}>{openPositions.length}</span>}
+              {t.id === "trading" && openPositions.length > 0 && <span style={{ background: "#10b981", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: "50%", width: 15, height: 15, display: "flex", alignItems: "center", justifyContent: "center" }}>{openPositions.length}</span>}
             </button>
           ))}
         </div>
@@ -2081,23 +2297,31 @@ Signal rationale: ${signal.rationale}`;
         </div>
       </nav>
 
-      {/* Header metrics */}
-      <div style={{ background: "rgba(255,255,255,0.02)", borderBottom: "1px solid rgba(255,255,255,0.05)", padding: "10px 20px" }}>
-        <div style={{ maxWidth: 1440, margin: "0 auto", display: "flex", flexWrap: "wrap", gap: 10 }}>
+      {/* Header metrics + Equity Curve */}
+      <div style={{ background: "rgba(255,255,255,0.02)", borderBottom: "1px solid rgba(255,255,255,0.05)", padding: "12px 20px" }}>
+        <div style={{ maxWidth: 1440, margin: "0 auto", display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
           {[
             { label: "Balance", value: money(balance), color: "var(--text)" },
             { label: "P&L no realizado", value: money(unrealized), color: unrealized >= 0 ? "#10b981" : "#ef4444" },
-            { label: "Equity", value: money(equity), color: "var(--text)" },
-            { label: "Win rate (real)", value: `${stats.winRate.toFixed(1)}%`, color: stats.winRate >= 50 ? "#10b981" : "#ef4444" },
+            { label: "Equity", value: money(equity), color: equity >= 100 ? "#10b981" : "#ef4444" },
+            { label: "Win rate", value: `${stats.winRate.toFixed(1)}%`, color: stats.winRate >= 50 ? "#10b981" : "#ef4444" },
             { label: "Factor ganancia", value: stats.profitFactor.toFixed(2), color: stats.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
+            { label: "Sharpe", value: stats.sharpe.toFixed(2), color: stats.sharpe >= 1 ? "#10b981" : "var(--text)" },
             { label: "Trades reales", value: realTrades.length, color: "var(--muted)" },
-            { label: "Posiciones", value: openPositions.length, color: openPositions.length > 0 ? "#f59e0b" : "var(--muted)" },
+            { label: "Posiciones abiertas", value: openPositions.length, color: openPositions.length > 0 ? "#f59e0b" : "var(--muted)" },
           ].map(({ label, value, color }) => (
-            <div key={label} className="metric" style={{ flex: "0 0 auto", minWidth: 100 }}>
-              <span className="label" style={{ fontSize: 11, fontWeight: 600 }}>{label}</span>
-              <strong style={{ color, fontSize: 15 }}>{value}</strong>
+            <div key={label} className="metric" style={{ flex: "0 0 auto", minWidth: 105 }}>
+              <span className="label" style={{ fontSize: 11.5, fontWeight: 600 }}>{label}</span>
+              <strong style={{ color, fontSize: 16 }}>{value}</strong>
             </div>
           ))}
+          {/* Curva de equity — visible siempre en el header */}
+          {realTrades.length >= 2 && (
+            <div style={{ flex: "1 1 200px", minWidth: 200, maxWidth: 340, alignSelf: "stretch", display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+              <span style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 3, display: "block" }}>Curva de equity</span>
+              <EquityCurve trades={realTrades} height={50} />
+            </div>
+          )}
         </div>
       </div>
 
@@ -2240,7 +2464,7 @@ Signal rationale: ${signal.rationale}`;
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginBottom: 8 }}>
                     {[["Entrada", lastSignal.entry.toFixed(2)], ["Stop Loss", lastSignal.stopLoss.toFixed(2)], ["Take Profit", lastSignal.takeProfit.toFixed(2)]].map(([k, v]) => (
                       <div key={k} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 6, padding: "5px 8px", textAlign: "center" }}>
-                        <p style={{ fontSize: 9, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{k}</p>
+                        <p style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{k}</p>
                         <p style={{ fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: k === "Stop Loss" ? "#ef4444" : k === "Take Profit" ? "#10b981" : "var(--text)" }}>{v}</p>
                       </div>
                     ))}
@@ -2260,7 +2484,7 @@ Signal rationale: ${signal.rationale}`;
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                   <h3 style={{ fontWeight: 700, fontSize: 13 }}>Posiciones abiertas</h3>
                   <span style={{ fontSize: 12, color: "var(--muted)" }}>evaluación cada 1s</span>
-                  {openPositions.length > 0 && <span style={{ background: "#f59e0b", color: "#fff", fontSize: 9, fontWeight: 800, padding: "1px 6px", borderRadius: 10 }}>{openPositions.length}</span>}
+                  {openPositions.length > 0 && <span style={{ background: "#f59e0b", color: "#fff", fontSize: 11, fontWeight: 800, padding: "1px 6px", borderRadius: 10 }}>{openPositions.length}</span>}
                 </div>
                 {openPositions.length === 0
                   ? <div className="card" style={{ textAlign: "center", padding: "22px", color: "var(--muted)", fontSize: 12 }}>Sin posiciones abiertas</div>
@@ -2270,11 +2494,16 @@ Signal rationale: ${signal.rationale}`;
                 }
               </div>
 
-              {realTrades.length >= 2 && <div className="card"><EquityCurve trades={realTrades} height={65} /></div>}
+              {/* Equity curve movida al header global */}
             </div>
 
             {/* Der */}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <AiChatPanel
+                apiKey={apiKey} usingGroq={usingGroq}
+                openPositions={openPositions} realTrades={realTrades}
+                lastSignal={lastSignal} prices={prices} stats={stats}
+              />
               <div className="card">
                 <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 13 }}>Estadísticas — trades reales</p>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
@@ -2295,8 +2524,8 @@ Signal rationale: ${signal.rationale}`;
                     <div key={a} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
                       <span style={{ fontSize: 11, fontWeight: 700, minWidth: 52, color: "var(--text)" }}>{a}</span>
                       <span style={{ fontSize: 10, color: col, fontWeight: 700 }}>{w.bias === "neutral" ? "Neutral" : w.bias === "accumulation" ? "Acum." : "Dist."}</span>
-                      {w.phase !== "unknown" && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4, background: `${col}20`, color: col, fontWeight: 700 }}>F{w.phase}</span>}
-                      <span style={{ fontSize: 9, color: "var(--muted)", marginLeft: "auto" }}>{w.events.at(-1)?.label ?? "–"}</span>
+                      {w.phase !== "unknown" && <span style={{ fontSize: 11, padding: "1px 5px", borderRadius: 4, background: `${col}20`, color: col, fontWeight: 700 }}>F{w.phase}</span>}
+                      <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>{w.events.at(-1)?.label ?? "–"}</span>
                     </div>
                   );
                 })}
