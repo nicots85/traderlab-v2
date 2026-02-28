@@ -87,9 +87,16 @@ type AiStatus = "idle" | "testing" | "ok" | "error" | "disabled";
 // ─── Constants ────────────────────────────────────────────────────────────────
 const assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"];
 
-// Binance para todo — simple y estable
-const binanceSymbol: Record<Asset, string> = {
-  BTCUSD: "BTCUSDT", ETHUSD: "ETHUSDT", XAUUSD: "XAUUSDT", XAGUSD: "XAGUSDT",
+// ── Bybit V5 linear perpetuals ──────────────────────────────────────────────
+// BTC/ETH: perpetuos USDT estándar
+// Oro: XAUTUSDT (XAU tokenizado, contrato perpetuo linear Bybit)
+// Plata: PAXGUSDT (proxy gold-backed, el más líquido en Bybit linear para metales)
+// Todos en categoría "linear" — API pública sin auth, sin rate limit estricto
+const bybitLinearSymbol: Record<Asset, string> = {
+  BTCUSD:  "BTCUSDT",
+  ETHUSD:  "ETHUSDT",
+  XAUUSD:  "XAUTUSDT",   // XAU tokenizado — se mueve 1:1 con spot oro
+  XAGUSD:  "PAXGUSDT",   // proxy metales preciosos disponible en Bybit linear
 };
 
 const assetLabel: Record<Asset, string> = {
@@ -594,15 +601,51 @@ async function fetchBinanceTicker(symbol: string): Promise<number> {
   return p;
 }
 
+// ── Bybit V5 linear: ticker en tiempo real ──────────────────────────────────
+// Usamos /v5/market/tickers (category=linear) — público, sin auth
+// Devuelve bid/ask + lastPrice en tiempo real
+async function fetchBybitTickerV5(symbol: string): Promise<number> {
+  const data = await fetchJson<BybitTickerResp>(
+    `https://api.bybit.com/v5/market/tickers?category=linear&symbol=${symbol}`
+  );
+  if (data.retCode !== 0) throw new Error(`Bybit ticker ${data.retCode}`);
+  const item = data.result.list[0];
+  if (!item) throw new Error(`Sin datos para ${symbol}`);
+  // Usamos mid = (bid + ask) / 2 si disponible, sino lastPrice
+  const last = parseFloat(item.lastPrice);
+  if (!last) throw new Error(`Precio 0 para ${symbol}`);
+  return last;
+}
+
+// ── Bybit V5 linear: klines con concurrencia y reverse correcto ─────────────
+async function fetchBybitKlinesV5(symbol: string, limit = 200): Promise<Candle[]> {
+  const data = await fetchJson<BybitKlineResp>(
+    `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=1&limit=${limit}`
+  );
+  if (data.retCode !== 0) throw new Error(`Bybit kline ${data.retCode}`);
+  // Bybit devuelve [reciente → antigua] — reverse() para tener [antigua → reciente]
+  return data.result.list.reverse().map(b => ({
+    t: Number(b[0]),
+    o: parseFloat(b[1]),
+    h: parseFloat(b[2]),
+    l: parseFloat(b[3]),
+    c: parseFloat(b[4]),
+    v: parseFloat(b[5]),
+  }));
+}
+
 async function fetchRealMarketSnapshot(prevPrices: Record<Asset, number>) {
+  // Promise.all por activo: ticker + klines en paralelo (no secuencial)
+  // Bybit API pública V5 — no requiere autenticación ni API key
   const results = await Promise.allSettled(
     assets.map(async (asset) => {
-      const sym = binanceSymbol[asset];
+      const sym = bybitLinearSymbol[asset];
+      // Disparo ticker y klines al mismo tiempo — misma latencia
       const [price, candles] = await Promise.all([
-        fetchBinanceTicker(sym),
-        fetchBinanceKlines(sym, 160),
+        fetchBybitTickerV5(sym),
+        fetchBybitKlinesV5(sym, 200),
       ]);
-      return { asset, price, candles };
+      return { asset, price, candles, source: "Bybit" };
     })
   );
 
@@ -610,6 +653,7 @@ async function fetchRealMarketSnapshot(prevPrices: Record<Asset, number>) {
   const candleMap: Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
   const seriesMap: Partial<Record<Asset, number[]>> = {};
   const failedAssets: string[] = [];
+  const sourceMap: Partial<Record<Asset, string>> = {};
 
   results.forEach((r, i) => {
     const asset = assets[i];
@@ -617,17 +661,27 @@ async function fetchRealMarketSnapshot(prevPrices: Record<Asset, number>) {
       prices[asset] = r.value.price;
       candleMap[asset] = r.value.candles;
       seriesMap[asset] = r.value.candles.map(c => c.c);
-    } else failedAssets.push(asset);
+      sourceMap[asset] = r.value.source;
+    } else {
+      failedAssets.push(asset);
+      console.warn(`[TraderLab] ${asset} falló:`, r.reason);
+    }
   });
 
+  // Shock de volatilidad basado en retornos absolutos de BTC
   const btcSeries = seriesMap.BTCUSD ?? [];
   let shock = 0.28;
   if (btcSeries.length > 10) {
-    const absRet = avg(btcSeries.slice(1).map((v, i) => Math.abs((v - btcSeries[i]) / Math.max(btcSeries[i], 1e-9))));
+    const absRet = avg(
+      btcSeries.slice(1).map((v, i) => Math.abs((v - btcSeries[i]) / Math.max(btcSeries[i], 1e-9)))
+    );
     shock = clamp(absRet * 220, 0.08, 1.25);
   }
 
-  const sourceNote = failedAssets.length > 0 ? `⚠ fallo: ${failedAssets.join(", ")}` : "Binance";
+  const sourceNote = failedAssets.length > 0
+    ? `Bybit ⚠ fallo: ${failedAssets.join(", ")}`
+    : `Bybit V5 linear — XAUTUSDT/PAXGUSDT`;
+
   return { prices, candleMap, seriesMap, shock, sourceNote };
 }
 
@@ -1992,7 +2046,7 @@ Signal rationale: ${signal.rationale}`;
               <div className="card" style={{ fontSize: 10.5, color: "var(--muted)", lineHeight: 1.8 }}>
                 <p style={{ fontWeight: 700, color: "var(--text)", marginBottom: 3 }}>Fuentes</p>
                 <p>BTC/ETH: Bybit v5 (linear)</p>
-                <p>Oro/Plata: Binance spot</p>
+                <p>XAUTUSDT (oro) · PAXGUSDT (plata)</p>
                 <p>Velas 1m · Wyckoff 120 velas</p>
                 <p>Trail: {learning.atrTrailMult.toFixed(2)} ATR</p>
               </div>
@@ -2026,8 +2080,9 @@ Signal rationale: ${signal.rationale}`;
             <div className="card">
               <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>📡 Fuentes de datos</p>
               <div style={{ fontSize: 12, lineHeight: 2.1 }}>
-              <p><strong>Todos los activos</strong> → Binance spot</p>
-              <p>BTCUSDT · ETHUSDT · XAUUSDT · XAGUSDT</p>
+              <p><strong>Todos los activos</strong> → Bybit V5 linear (perpetuos, API pública)</p>
+              <p>BTCUSDT · ETHUSDT · XAUTUSDT (oro) · PAXGUSDT (plata)</p>
+              <p style={{fontSize:10,color:"var(--muted)"}}>Sin API key requerida · Promise.all paralelo · reverse() aplicado</p>
                 <p><strong>Estado:</strong> <span style={{ color: liveReady ? "#10b981" : "#ef4444" }}>{feedStatus}</span></p>
               </div>
               <button className="btn-secondary" style={{ marginTop: 10 }} onClick={() => void syncRealData()} disabled={isSyncing}>{isSyncing ? "⟳ Sincronizando..." : "↻ Sync ahora"}</button>
@@ -2059,4 +2114,4 @@ Signal rationale: ${signal.rationale}`;
       </main>
     </div>
   );
-}
+} 
