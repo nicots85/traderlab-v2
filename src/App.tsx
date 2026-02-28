@@ -845,9 +845,6 @@ function IndicatorPanel({ ind, mode }: { ind: Indicators; mode: Mode }) {
   const maAligned = ind.ma10 > ind.ma20 && ind.ma20 > ind.ma50;
   const maAlignedShort = ind.ma10 < ind.ma20 && ind.ma20 < ind.ma50;
   const maAlignColor = maAligned ? "#10b981" : maAlignedShort ? "#ef4444" : "var(--muted)";
-  const rsiColor = ind.rsi > 70 ? "#ef4444" : ind.rsi < 30 ? "#10b981" : "#f59e0b";
-  const divColor = ind.rsiDivergence === "bullish" ? "#10b981" : ind.rsiDivergence === "bearish" ? "#ef4444" : "var(--muted)";
-  const deltaColor = ind.volumeDeltaPct > 10 ? "#10b981" : ind.volumeDeltaPct < -10 ? "#ef4444" : "var(--muted)";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1224,12 +1221,14 @@ export function App() {
   const learningRef = useRef(learning);
   const volumeShockRef = useRef(volumeShock);
   const seriesRef = useRef(series);
+  const candlesRef = useRef(candles);  // ref para usar en setInterval sin stale closure
 
   useEffect(() => { openPositionsRef.current = openPositions; }, [openPositions]);
   useEffect(() => { prevPricesRef.current = prices; }, [prices]);
   useEffect(() => { learningRef.current = learning; }, [learning]);
   useEffect(() => { volumeShockRef.current = volumeShock; }, [volumeShock]);
   useEffect(() => { seriesRef.current = series; }, [series]);
+  useEffect(() => { candlesRef.current = candles; }, [candles]);
 
   // Tick cada segundo
   useEffect(() => {
@@ -1597,85 +1596,72 @@ Signal rationale: ${signal.rationale}`;
   }, []);
 
   function evaluatePositionsWithCurrentPrices() {
-    const pp = prevPricesRef.current;
+    const pp    = prevPricesRef.current;
     const shock = volumeShockRef.current;
-    const sv = seriesRef.current;
-    const lrn = learningRef.current;
+    const sv    = seriesRef.current;
+    const cc    = candlesRef.current;
+    const lrn   = learningRef.current;
+
     openPositionsRef.current.forEach(pos => {
       const px = pp[pos.signal.asset];
-      const spread = (getSpreadPct(pos.signal.asset, shock) / 100) * px;
-      const tradable = pos.signal.direction === "LONG" ? px - spread / 2 : px + spread / 2;
-      const isLong = pos.signal.direction === "LONG";
+      if (!px) return;
 
-      // Actualizar pico/valle
-      const peak  = Math.max(pos.peak,   tradable);
-      const trough = Math.min(pos.trough, tradable);
+      const spread   = (getSpreadPct(pos.signal.asset, shock) / 100) * px;
+      const isLong   = pos.signal.direction === "LONG";
+      const tradable = isLong ? px - spread / 2 : px + spread / 2;
+      const peak     = Math.max(pos.peak,   tradable);
+      const trough   = Math.min(pos.trough, tradable);
 
-      // ── Trailing por niveles estructurales ──────────────────────────────────
-      // En lugar de ATR fijo desde el pico, buscamos el swing low/high
-      // reciente como nivel natural de defensa.
-      const vals = sv[pos.signal.asset];
+      // ── Trailing estructural: mover SL solo a niveles de swing ────────────
       const swingLookback = pos.signal.mode === "scalping" ? 8 : 20;
-      const recentCandles = candles[pos.signal.asset].slice(-swingLookback);
-
-      let structuralStop = pos.signal.stopLoss; // por defecto no movemos
+      const recentCandles = (cc[pos.signal.asset] ?? []).slice(-swingLookback);
+      const currentSl     = pos.signal.stopLoss;
+      let   newSl         = currentSl;
 
       if (recentCandles.length >= 4) {
+        const lookSlice = recentCandles.slice(0, -2);
         if (isLong) {
-          // Buscar el swing low más alto en el lookback (soporte más cercano)
-          const swingLow = Math.min(...recentCandles.slice(0, -2).map(c => c.l));
-          // Solo movemos el SL si el swing low está POR ENCIMA del SL original
-          // y POR DEBAJO del precio actual (no cortamos la posición aún)
-          const candidateStop = swingLow - pos.signal.atr * 0.3; // pequeño buffer
-          if (candidateStop > pos.signal.stopLoss && candidateStop < tradable) {
-            structuralStop = candidateStop;
+          const swingLow  = Math.min(...lookSlice.map(c => c.l));
+          const candidate = swingLow - pos.signal.atr * lrn.atrTrailMult;
+          if (candidate > currentSl && candidate < tradable - pos.signal.atr * 0.3) {
+            newSl = candidate;
           }
         } else {
-          // SHORT: buscar swing high más bajo
-          const swingHigh = Math.max(...recentCandles.slice(0, -2).map(c => c.h));
-          const candidateStop = swingHigh + pos.signal.atr * 0.3;
-          if (candidateStop < pos.signal.stopLoss && candidateStop > tradable) {
-            structuralStop = candidateStop;
+          const swingHigh = Math.max(...lookSlice.map(c => c.h));
+          const candidate = swingHigh + pos.signal.atr * lrn.atrTrailMult;
+          if (candidate < currentSl && candidate > tradable + pos.signal.atr * 0.3) {
+            newSl = candidate;
           }
         }
       }
 
-      // El SL efectivo es el mejor entre el SL actual y el nivel estructural
-      // Nunca retrocede (ratchet).
-      const effectiveStop = isLong
-        ? Math.max(pos.signal.stopLoss, structuralStop)
-        : Math.min(pos.signal.stopLoss, structuralStop);
+      const trailMoved  = isLong ? newSl > currentSl : newSl < currentSl;
+      const effectiveSl = newSl;
 
-      const trailMoved = isLong
-        ? effectiveStop > pos.signal.stopLoss
-        : effectiveStop < pos.signal.stopLoss;
+      // ── Reversión: solo intradía con ganancia minima 1×ATR ────────────────
+      const vals         = sv[pos.signal.asset] ?? [];
+      const maFast       = avg(vals.slice(-(pos.signal.mode === "scalping" ? 5 : 10)));
+      const maSlow       = avg(vals.slice(-(pos.signal.mode === "scalping" ? 10 : 20)));
+      const profitDist   = isLong ? tradable - pos.signal.entry : pos.signal.entry - tradable;
+      const hasMinProfit = profitDist >= pos.signal.atr * 1.0;
+      const maCross      = isLong ? maFast < maSlow : maFast > maSlow;
+      const reversal     = pos.signal.mode === "intradia" && hasMinProfit && maCross;
 
-      // ── Reversión por cruce de medias (solo intradía, solo en ganancia) ────
-      // Requiere que el trade esté en ganancia mínima de 0.5× ATR
-      // para evitar salidas prematuras por ruido al abrir.
-      const maFast = avg(vals.slice(-(pos.signal.mode === "scalping" ? 5 : 10)));
-      const maSlow = avg(vals.slice(-(pos.signal.mode === "scalping" ? 10 : 20)));
-      const profitDistance = isLong
-        ? tradable - pos.signal.entry
-        : pos.signal.entry - tradable;
-      const hasMinProfit = profitDistance >= pos.signal.atr * 0.5;
-      const reversal = pos.signal.mode === "intradia" && hasMinProfit &&
-        ((isLong && maFast < maSlow) || (!isLong && maFast > maSlow));
-
-      // ── Evaluación de cierre ────────────────────────────────────────────────
+      // ── Cierre ───────────────────────────────────────────────────────────
       const hitTp = isLong ? tradable >= pos.signal.takeProfit : tradable <= pos.signal.takeProfit;
-      const hitSl = isLong ? tradable <= effectiveStop : tradable >= effectiveStop;
+      const hitSl = isLong ? tradable <= effectiveSl           : tradable >= effectiveSl;
 
-      if (hitTp)      { closePosition(pos, tradable, "TP");       return; }
-      if (hitSl)      { closePosition(pos, tradable, trailMoved ? "TRAIL" : "SL"); return; }
-      if (reversal)   { closePosition(pos, tradable, "REVERSAL"); return; }
+      if (hitTp)    { closePosition(pos, tradable, "TP");                        return; }
+      if (hitSl)    { closePosition(pos, tradable, trailMoved ? "TRAIL" : "SL"); return; }
+      if (reversal) { closePosition(pos, tradable, "REVERSAL");                  return; }
 
-      // Actualizar posición con nuevo peak/trough y SL si cambió
-      setOpenPositions(prev => prev.map(p =>
-        p.id === pos.id
-          ? { ...p, peak, trough, signal: { ...p.signal, stopLoss: effectiveStop } }
-          : p
-      ));
+      if (trailMoved || peak !== pos.peak || trough !== pos.trough) {
+        setOpenPositions(prev => prev.map(p =>
+          p.id === pos.id
+            ? { ...p, peak, trough, signal: { ...p.signal, stopLoss: effectiveSl } }
+            : p
+        ));
+      }
     });
   }
 
@@ -2114,4 +2100,4 @@ Signal rationale: ${signal.rationale}`;
       </main>
     </div>
   );
-} 
+}
