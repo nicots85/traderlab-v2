@@ -6,6 +6,58 @@ type Mode = "scalping" | "intradia";
 type Direction = "LONG" | "SHORT";
 type ExitReason = "TP" | "SL" | "TRAIL" | "REVERSAL";
 type Candle = { t: number; o: number; h: number; l: number; c: number; v: number };
+
+// ─── Tipos de Order Flow / Market Control ─────────────────────────────────
+type FootprintCandle = {
+  t: number; o: number; h: number; l: number; c: number; v: number;
+  buyVol: number;    // volumen estimado de agresores compradores
+  sellVol: number;   // volumen estimado de agresores vendedores
+  delta: number;     // buyVol - sellVol
+  deltaPct: number;  // delta / v * 100
+  absorption: "buy" | "sell" | "none"; // absorción detectada
+  initiative: "buy" | "sell" | "neutral"; // quién tomó iniciativa
+};
+
+type VolumeProfileFull = {
+  poc: number;       // Point of Control — precio con más volumen negociado
+  vah: number;       // Value Area High (70% del volumen)
+  val: number;       // Value Area Low
+  hvn: number[];     // High Volume Nodes — zonas de aceptación de precio
+  lvn: number[];     // Low Volume Nodes — zonas de rechazo (vacíos)
+  profile: Array<{ price: number; vol: number; buyVol: number; sellVol: number }>;
+  valueAreaPct: number; // qué % del rango es el Value Area
+};
+
+type CVDAnalysis = {
+  cvd50: number;      // CVD últimas 50 velas (tendencia)
+  cvd20: number;      // CVD últimas 20 velas (estructura)
+  cvd10: number;      // CVD últimas 10 velas (momentum)
+  cvd5:  number;      // CVD últimas 5 velas (ejecución)
+  slope50: number;    // pendiente CVD50
+  slope10: number;    // pendiente CVD10
+  divergence: boolean; // precio sube pero CVD baja (o viceversa) → divergencia
+  trend: "bullish" | "bearish" | "neutral";
+};
+
+type OrderFlowScore = {
+  // Control de mercado: quién domina bid/ask
+  control: "bulls" | "bears" | "contested"; // control neto
+  controlScore: number;    // -100 (osos totales) a +100 (toros totales)
+  // Componentes individuales
+  cvdScore: number;        // contribución CVD
+  footprintScore: number;  // contribución footprint
+  profileScore: number;    // contribución volume profile
+  absorptionScore: number; // contribución absorción
+  // Detalles
+  cvd: CVDAnalysis;
+  profile: VolumeProfileFull;
+  footprint: FootprintCandle[];
+  // Señales de trading
+  longSetup: boolean;      // condiciones para LONG confirmadas
+  shortSetup: boolean;     // condiciones para SHORT confirmadas
+  setupStrength: number;   // 0-1, fuerza del setup
+  narrative: string;       // descripción en español
+};
 type AppTab = "trading" | "backtest" | "configuracion";
 
 // ── Wyckoff ──
@@ -164,9 +216,45 @@ function calcAtrFromSeries(arr: number[], lookback: number): number {
   if (data.length < 2) return 0;
   return avg(data.slice(1).map((v, i) => Math.abs(v - data[i])));
 }
-function getSpreadPct(asset: Asset, shock: number) {
-  const base = asset === "BTCUSD" ? 0.04 : asset === "ETHUSD" ? 0.05 : 0.03;
-  return base * (1 + shock * 1.35);
+// ─── Modelo de spread CFD realista ───────────────────────────────────────────
+type SpreadSnapshot = {
+  spread: number; spreadPct: number; bid: number; ask: number;
+  component: { base: number; volume: number; session: number };
+  sessionLabel: string; isHighVolume: boolean;
+};
+const CFD_BASE_SPREAD_PCT: Record<Asset, number> = {
+  BTCUSD: 0.016, ETHUSD: 0.025, XAUUSD: 0.008, XAGUSD: 0.045,
+};
+function calcCFDSpread(asset: Asset, price: number, shock: number): SpreadSnapshot {
+  const hourUTC = new Date().getUTCHours();
+  const dayUTC  = new Date().getUTCDay();
+  const basePct = CFD_BASE_SPREAD_PCT[asset];
+  // Componente volumen: curva no lineal — spread triplica en picos de volatilidad
+  const shockMult  = 1 + Math.pow(Math.max(shock - 0.08, 0) / 0.4, 1.6) * 1.8;
+  const volumePct  = basePct * (shockMult - 1);
+  // Componente sesión UTC
+  let sessionMult = 1.0; let sessionLabel = "NY";
+  const isWeekend = dayUTC === 0 || dayUTC === 6;
+  if      (isWeekend)                        { sessionMult = 1.6;  sessionLabel = "OFF"; }
+  else if (hourUTC >= 13 && hourUTC < 21)    { sessionMult = 1.0;  sessionLabel = "NY"; }
+  else if (hourUTC >= 7  && hourUTC < 16)    { sessionMult = 1.05; sessionLabel = "LONDON"; }
+  else if (hourUTC >= 0  && hourUTC < 7)     { sessionMult = 1.35; sessionLabel = "ASIA"; }
+  else                                        { sessionMult = 1.20; sessionLabel = "OVERLAP"; }
+  // Metales: sesión importa menos (market makers globales)
+  if (asset === "XAUUSD" || asset === "XAGUSD") sessionMult = 1 + (sessionMult - 1) * 0.4;
+  const sessionPct = basePct * (sessionMult - 1);
+  const totalPct   = (basePct + volumePct + sessionPct) * sessionMult;
+  const spread     = totalPct / 100 * price;
+  return {
+    spread, spreadPct: totalPct,
+    bid: price - spread / 2, ask: price + spread / 2,
+    component: { base: basePct/100*price, volume: volumePct/100*price, session: sessionPct/100*price },
+    sessionLabel, isHighVolume: shock > 0.5 || isWeekend,
+  };
+}
+function getSpreadPct(asset: Asset, shock: number, price?: number) {
+  const p = price ?? (asset==="BTCUSD"?95000:asset==="ETHUSD"?3000:asset==="XAUUSD"?3300:32);
+  return calcCFDSpread(asset, p, shock).spreadPct;
 }
 function calcDrawdown(trades: ClosedTrade[]) {
   let running = 100; let peak = 100; let maxDd = 0;
@@ -1076,6 +1164,180 @@ function TechTip({ term, children }: { term: string; children?: React.ReactNode 
 }
 
 // ─── Indicator Panel ──────────────────────────────────────────────────────────
+
+// ─── Order Flow Panel (solo scalping) ────────────────────────────────────────
+function OrderFlowPanel({ of: ofData, price }: { of: OrderFlowScore; price: number }) {
+  const ctrlColor = ofData.control === "bulls" ? "#10b981" : ofData.control === "bears" ? "#ef4444" : "#f59e0b";
+  const cvd = ofData.cvd;
+  const prof = ofData.profile;
+  const dp = (v: number) => v > 1000 ? 1 : v > 10 ? 2 : 4;
+
+  // Mini barra horizontal para el score de control
+  const barW = Math.abs(ofData.controlScore);
+  const barDir = ofData.controlScore >= 0 ? "right" : "left";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {/* ── Control de mercado — gauge principal ── */}
+      <div className="card" style={{ padding: "12px 14px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)" }}>Control de mercado</span>
+          <span style={{ fontSize: 11, color: "var(--muted)" }}>{ofData.setupStrength > 0.6 ? "🔥 Setup fuerte" : ofData.setupStrength > 0.3 ? "⚡ Setup moderado" : "😐 Indeciso"}</span>
+        </div>
+        {/* Gauge -100 → 0 → +100 */}
+        <div style={{ position: "relative", height: 24, borderRadius: 12, background: "rgba(255,255,255,0.06)", overflow: "hidden", marginBottom: 6 }}>
+          {/* Fondo dividido */}
+          <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "rgba(255,255,255,0.12)" }} />
+          {/* Barra de control */}
+          <div style={{
+            position: "absolute",
+            top: 4, bottom: 4, borderRadius: 8,
+            left:  barDir === "right" ? "50%" : `${50 - barW/2}%`,
+            width: `${barW / 2}%`,
+            background: ofData.controlScore >= 0
+              ? "linear-gradient(90deg, rgba(16,185,129,0.3), #10b981)"
+              : "linear-gradient(90deg, #ef4444, rgba(239,68,68,0.3))",
+            transition: "width 0.6s ease, left 0.6s ease",
+          }} />
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: ctrlColor, textShadow: "0 1px 4px rgba(0,0,0,0.8)" }}>
+              {ofData.control === "bulls" ? "🐂 TOROS" : ofData.control === "bears" ? "🐻 OSOS" : "⚔ DISPUTADO"} {ofData.controlScore > 0 ? "+" : ""}{ofData.controlScore.toFixed(0)}
+            </span>
+          </div>
+        </div>
+        {/* Sub-scores */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 5 }}>
+          {[
+            { label: "CVD", val: ofData.cvdScore },
+            { label: "Footprint", val: ofData.footprintScore },
+            { label: "Perfil Vol", val: ofData.profileScore },
+            { label: "Absorción", val: ofData.absorptionScore },
+          ].map(({ label, val }) => {
+            const pct = clamp(Math.abs(val), 0, 100);
+            const col = val > 0 ? "#10b981" : val < 0 ? "#ef4444" : "var(--muted)";
+            return (
+              <div key={label} style={{ textAlign: "center", background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "6px 4px" }}>
+                <div style={{ fontSize: 9.5, color: "var(--muted)", marginBottom: 3, textTransform: "uppercase" }}>{label}</div>
+                <div style={{ height: 3, borderRadius: 2, background: "rgba(255,255,255,0.06)", marginBottom: 3 }}>
+                  <div style={{ height: "100%", width: `${pct}%`, background: col, borderRadius: 2 }} />
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: col }}>{val > 0 ? "+" : ""}{val.toFixed(0)}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── CVD multi-ventana ── */}
+      <div className="card" style={{ padding: "10px 14px" }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)", marginBottom: 8 }}>CVD Acumulado</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+          {[
+            { label: "CVD 50v", val: cvd.cvd50, trend: cvd.slope50 },
+            { label: "CVD 20v", val: cvd.cvd20, trend: null },
+            { label: "CVD 10v", val: cvd.cvd10, trend: cvd.slope10 },
+            { label: "CVD 5v",  val: cvd.cvd5,  trend: null },
+          ].map(({ label, val, trend }) => {
+            const col = val > 0 ? "#10b981" : val < 0 ? "#ef4444" : "var(--muted)";
+            const arrow = trend !== null ? (trend > 0 ? " ↑" : " ↓") : "";
+            return (
+              <div key={label} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "6px 8px", border: `1px solid ${col}22` }}>
+                <div style={{ fontSize: 9.5, color: "var(--muted)", marginBottom: 2 }}>{label}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: col, fontFamily: "'JetBrains Mono',monospace" }}>
+                  {val > 0 ? "+" : ""}{val.toFixed(1)}{arrow}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {cvd.divergence && (
+          <div style={{ marginTop: 8, fontSize: 11, color: "#f59e0b", background: "rgba(245,158,11,0.1)", borderRadius: 6, padding: "5px 8px" }}>
+            ⚠ Divergencia CVD-precio — el precio se mueve sin respaldo de flujo real
+          </div>
+        )}
+        <div style={{ marginTop: 6, fontSize: 11, color: "var(--muted)" }}>
+          Tendencia: <span style={{ color: cvd.trend === "bullish" ? "#10b981" : cvd.trend === "bearish" ? "#ef4444" : "var(--muted)", fontWeight: 600 }}>
+            {cvd.trend === "bullish" ? "Acumulando ↑" : cvd.trend === "bearish" ? "Distribuyendo ↓" : "Lateral"}
+          </span>
+        </div>
+      </div>
+
+      {/* ── Volume Profile ── */}
+      <div className="card" style={{ padding: "10px 14px" }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)", marginBottom: 8 }}>Perfil de Volumen</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
+          {[
+            { label: "VAH", val: prof.vah, color: "#10b981", note: price > prof.vah ? "← precio aquí" : "" },
+            { label: "POC", val: prof.poc, color: "#f59e0b", note: Math.abs(price - prof.poc) < (prof.vah - prof.val) * 0.15 ? "← precio aquí" : "" },
+            { label: "VAL", val: prof.val, color: "#ef4444", note: price < prof.val ? "← precio aquí" : "" },
+          ].map(({ label, val, color, note }) => (
+            <div key={label} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "6px 8px", border: `1px solid ${color}22` }}>
+              <div style={{ fontSize: 9.5, color: "var(--muted)", marginBottom: 2 }}>{label}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color, fontFamily: "'JetBrains Mono',monospace" }}>{val.toFixed(dp(val))}</div>
+              {note && <div style={{ fontSize: 9, color }}>{note}</div>}
+            </div>
+          ))}
+        </div>
+        {/* Posición del precio en el value area */}
+        <div style={{ fontSize: 11, color: "var(--muted)" }}>
+          Precio: <span style={{ fontWeight: 700, color:
+            price > prof.vah ? "#10b981" :
+            price < prof.val ? "#ef4444" :
+            price > prof.poc ? "#10b981" : "#f59e0b" }}>
+            {price > prof.vah ? "Sobre VAH — aceptación alcista" :
+             price < prof.val ? "Bajo VAL — aceptación bajista" :
+             price > prof.poc ? "Entre POC y VAH — toros" :
+             "Entre VAL y POC — osos"}
+          </span>
+        </div>
+        {(prof.hvn.length > 0 || prof.lvn.length > 0) && (
+          <div style={{ marginTop: 6, fontSize: 10, color: "var(--muted)" }}>
+            {prof.hvn.length > 0 && <>HVN (soporte/resist.): {prof.hvn.slice(0,3).map(p => p.toFixed(dp(p))).join(", ")} </>}
+            {prof.lvn.length > 0 && <>| LVN (vacíos): {prof.lvn.slice(0,3).map(p => p.toFixed(dp(p))).join(", ")}</>}
+          </div>
+        )}
+      </div>
+
+      {/* ── Footprint últimas 6 velas ── */}
+      <div className="card" style={{ padding: "10px 14px" }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)", marginBottom: 8 }}>Footprint (últimas 6 velas)</div>
+        <div style={{ display: "flex", gap: 4, alignItems: "flex-end" }}>
+          {ofData.footprint.slice(-6).map((c, i) => {
+            const isUp  = c.c >= c.o;
+            const dCol  = c.delta > 0 ? "#10b981" : "#ef4444";
+            const hPct  = Math.min(Math.abs(c.deltaPct) * 1.2, 100);
+            return (
+              <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                {/* Vela */}
+                <div style={{ width: "100%", height: 22, borderRadius: 3, background: isUp ? "rgba(16,185,129,0.25)" : "rgba(239,68,68,0.25)", border: `1px solid ${isUp ? "#10b981" : "#ef4444"}44`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <span style={{ fontSize: 9, color: isUp ? "#10b981" : "#ef4444", fontWeight: 700 }}>{isUp ? "▲" : "▼"}</span>
+                </div>
+                {/* Delta bar */}
+                <div style={{ width: "100%", height: 20, borderRadius: 3, background: "rgba(255,255,255,0.04)", overflow: "hidden", position: "relative" }}>
+                  <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: `${hPct}%`, background: dCol, opacity: 0.7, borderRadius: 2 }} />
+                </div>
+                {/* Delta valor */}
+                <div style={{ fontSize: 9, color: dCol, fontFamily: "'JetBrains Mono',monospace" }}>
+                  {c.delta > 0 ? "+" : ""}{c.deltaPct.toFixed(0)}%
+                </div>
+                {/* Absorción */}
+                {c.absorption !== "none" && (
+                  <div style={{ fontSize: 8, color: "#f59e0b" }}>
+                    {c.absorption === "buy" ? "🧲B" : "🧲S"}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ marginTop: 6, fontSize: 10, color: "var(--muted)" }}>
+          Iniciativa: {ofData.footprint.slice(-6).map(c => c.initiative === "buy" ? "🟢" : c.initiative === "sell" ? "🔴" : "⚪").join(" ")}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function IndicatorPanel({ ind, mode }: { ind: Indicators; mode: Mode }) {
   const d = (v: number) => v > 100 ? 1 : v > 1 ? 3 : 4;
   const rsiColor = ind.rsi > 70 ? "#ef4444" : ind.rsi < 30 ? "#10b981" : "#f59e0b";
@@ -1332,36 +1594,38 @@ function TradeHistory({ trades, showSource = false }: { trades: ClosedTrade[]; s
           <option value="todos">Todos</option><option value="TP">TP</option><option value="SL">SL</option><option value="TRAIL">Trail</option><option value="REVERSAL">Rev.</option>
         </select>
       </div>
-      <div style={{ overflowX: "auto", borderRadius: 10, border: "1px solid rgba(255,255,255,0.06)" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, minWidth: 460 }}>
-          <thead style={{ background: "rgba(255,255,255,0.03)" }}>
-            <tr>{["Activo", "Dir.", "Entrada", "Salida", "P&L", "Resultado", ...(showSource ? ["Fuente"] : [])].map(h => (
-              <th key={h} style={{ padding: "7px 9px", textAlign: "left", color: "var(--muted)", fontWeight: 600, fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em" }}>{h}</th>
+      <div className="table-wrap" style={{ overflowX: "auto", borderRadius: 10, border: "1px solid rgba(255,255,255,0.06)" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 480 }}>
+          <thead style={{ background: "rgba(255,255,255,0.04)" }}>
+            <tr>{["Activo", "Modo", "Dir.", "Entrada", "Salida", "P&L", "Resultado", ...(showSource ? ["Fuente"] : [])].map(h => (
+              <th key={h} style={{ padding: "9px 10px", textAlign: "left", color: "var(--muted)", fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", whiteSpace: "nowrap" }}>{h}</th>
             ))}</tr>
           </thead>
           <tbody>
-            {filtered.slice(0, 80).map(t => (
-              <tr key={t.id} style={{ borderTop: "1px solid rgba(255,255,255,0.03)" }}>
-                <td style={{ padding: "6px 9px", fontWeight: 600 }}>{t.asset}</td>
-                <td style={{ padding: "6px 9px", fontWeight: 700, color: t.direction === "LONG" ? "#10b981" : "#ef4444" }}>{t.direction}</td>
-                <td style={{ padding: "6px 9px" }}>{t.entry.toFixed(2)}</td>
-                <td style={{ padding: "6px 9px" }}>{t.exit.toFixed(2)}</td>
-                <td style={{ padding: "6px 9px", fontWeight: 700, color: t.pnl >= 0 ? "#10b981" : "#ef4444" }}>{t.pnl >= 0 ? "+" : ""}{money(t.pnl)}</td>
-                <td style={{ padding: "6px 9px" }}>{exitLabel[t.result]}</td>
-                <td style={{ padding: "6px 9px" }}>
-                  <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, fontWeight: 700,
-                    background: t.mode === "scalping" ? "rgba(99,102,241,0.15)" : "rgba(245,158,11,0.15)",
-                    color: t.mode === "scalping" ? "#a5b4fc" : "#f59e0b" }}>
-                    {t.mode === "scalping" ? "SCALP" : "INTRA"}
-                  </span>
-                </td>
-                {showSource && <td style={{ padding: "6px 9px" }}><span style={{ fontSize: 11, padding: "1px 5px", borderRadius: 4, background: t.source === "real" ? "rgba(16,185,129,0.12)" : "rgba(99,102,241,0.12)", color: t.source === "real" ? "#10b981" : "#a5b4fc" }}>{t.source}</span></td>}
-              </tr>
-            ))}
-            {filtered.length === 0 && <tr><td colSpan={7} style={{ padding: "18px", textAlign: "center", color: "var(--muted)" }}>Sin operaciones</td></tr>}
+            {filtered.slice(0, 80).map(t => {
+              const dpT = (v: number) => v > 1000 ? 2 : v > 10 ? 3 : 4;
+              return (
+                <tr key={t.id} style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+                  <td style={{ padding: "9px 10px", fontWeight: 700, fontSize: 13 }}>{t.asset}</td>
+                  <td style={{ padding: "9px 10px" }}>
+                    <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 5, fontWeight: 700,
+                      background: t.mode === "scalping" ? "rgba(99,102,241,0.15)" : "rgba(245,158,11,0.15)",
+                      color: t.mode === "scalping" ? "#a5b4fc" : "#f59e0b" }}>
+                      {t.mode === "scalping" ? "SCALP" : "INTRA"}
+                    </span>
+                  </td>
+                  <td style={{ padding: "9px 10px", fontWeight: 700, color: t.direction === "LONG" ? "#10b981" : "#ef4444", fontSize: 13 }}>{t.direction}</td>
+                  <td style={{ padding: "9px 10px", fontFamily: "'JetBrains Mono',monospace", fontSize: 12 }}>{t.entry.toFixed(dpT(t.entry))}</td>
+                  <td style={{ padding: "9px 10px", fontFamily: "'JetBrains Mono',monospace", fontSize: 12 }}>{t.exit.toFixed(dpT(t.exit))}</td>
+                  <td style={{ padding: "9px 10px", fontWeight: 800, fontSize: 14, color: t.pnl >= 0 ? "#10b981" : "#ef4444", fontFamily: "'JetBrains Mono',monospace" }}>{t.pnl >= 0 ? "+" : ""}{money(t.pnl)}</td>
+                  <td style={{ padding: "9px 10px", fontSize: 12 }}>{exitLabel[t.result]}</td>
+                  {showSource && <td style={{ padding: "9px 10px" }}><span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 4, background: t.source === "real" ? "rgba(16,185,129,0.12)" : "rgba(99,102,241,0.12)", color: t.source === "real" ? "#10b981" : "#a5b4fc" }}>{t.source}</span></td>}
+                </tr>
+              );
+            })}
+            {filtered.length === 0 && <tr><td colSpan={8} style={{ padding: "20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Sin operaciones</td></tr>}
           </tbody>
         </table>
-      </div>
       <p style={{ marginTop: 5, fontSize: 10, color: "var(--muted)" }}>{filtered.length} operaciones</p>
     </div>
   );
@@ -1432,6 +1696,370 @@ function BacktestTab({ liveReady, backtestSize, setBacktestSize, riskPct, setRis
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SCALPING ENGINE — Control de mercado, liquidez, perfil de volumen
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── ORDER FLOW ENGINE ───────────────────────────────────────────────────────
+
+// 1. FOOTPRINT: reconstruye delta por vela con estimación de agresores
+function buildFootprint(candles: Candle[]): FootprintCandle[] {
+  return candles.map(c => {
+    const range  = Math.max(c.h - c.l, 1e-9);
+    const body   = Math.abs(c.c - c.o);
+    const isUp   = c.c >= c.o;
+    // Estimación de volumen comprador/vendedor basada en posición del cierre
+    // Método: fracción del cierre dentro del rango (buy fraction)
+    const buyFrac  = (c.c - c.l) / range;
+    const sellFrac = 1 - buyFrac;
+    const buyVol   = c.v * buyFrac;
+    const sellVol  = c.v * sellFrac;
+    const delta    = buyVol - sellVol;
+    const deltaPct = c.v > 0 ? (delta / c.v) * 100 : 0;
+    // Absorción: vela con mucho volumen pero cierre débil → absorción de esa dirección
+    // Ej: vela alcista con gran volumen y mecha superior larga → vendedores absorbiendo compradores
+    const upperWick = c.h - Math.max(c.o, c.c);
+    const lowerWick = Math.min(c.o, c.c) - c.l;
+    let absorption: FootprintCandle["absorption"] = "none";
+    if (isUp && upperWick > body * 1.5 && c.v > 0)  absorption = "sell"; // compradores absorbidos
+    if (!isUp && lowerWick > body * 1.5 && c.v > 0) absorption = "buy";  // vendedores absorbidos
+    // Iniciativa: quién tomó el control (la agresión neta en la vela)
+    const initiative: FootprintCandle["initiative"] =
+      deltaPct >  15 ? "buy" :
+      deltaPct < -15 ? "sell" : "neutral";
+    return { ...c, buyVol, sellVol, delta, deltaPct, absorption, initiative };
+  });
+}
+
+// 2. CVD MULTI-VENTANA: acumulación/distribución institucional
+function calcCVDFull(fp: FootprintCandle[]): CVDAnalysis {
+  if (!fp.length) return {
+    cvd50: 0, cvd20: 0, cvd10: 0, cvd5: 0,
+    slope50: 0, slope10: 0, divergence: false, trend: "neutral"
+  };
+  const accumulate = (slice: FootprintCandle[]) => {
+    let cum = 0;
+    return slice.map(c => { cum += c.delta; return cum; });
+  };
+  const tail50 = fp.slice(-50);
+  const tail20 = fp.slice(-20);
+  const tail10 = fp.slice(-10);
+  const tail5  = fp.slice(-5);
+  const ser50 = accumulate(tail50);
+  const ser10 = accumulate(tail10);
+  const cvd50 = ser50[ser50.length - 1] ?? 0;
+  const cvd20 = accumulate(tail20).slice(-1)[0] ?? 0;
+  const cvd10 = ser10[ser10.length - 1] ?? 0;
+  const cvd5  = accumulate(tail5).slice(-1)[0] ?? 0;
+  // Pendiente: regresión lineal simplificada sobre últimas N velas
+  const slope = (ser: number[]) => {
+    const n = ser.length;
+    if (n < 2) return 0;
+    return (ser[n-1] - ser[0]) / n;
+  };
+  const slope50 = slope(ser50);
+  const slope10 = slope(ser10);
+  // Divergencia: precio sube (+) pero CVD baja (−) o viceversa
+  const priceChange = fp.length >= 20
+    ? fp[fp.length-1].c - fp[fp.length-20].c : 0;
+  const divergence = (priceChange > 0 && cvd20 < 0) || (priceChange < 0 && cvd20 > 0);
+  const trend: CVDAnalysis["trend"] =
+    cvd50 > 0 && slope50 > 0 ? "bullish" :
+    cvd50 < 0 && slope50 < 0 ? "bearish" : "neutral";
+  return { cvd50, cvd20, cvd10, cvd5, slope50, slope10, divergence, trend };
+}
+
+// Legacy wrapper para compatibilidad
+function calcCVD(candles: Candle[]): { series: number[]; last: number; slope: number } {
+  const fp = buildFootprint(candles);
+  let cum = 0;
+  const series = fp.map(c => { cum += c.delta; return cum; });
+  const last = series[series.length - 1] ?? 0;
+  const tail = series.slice(-6);
+  const slope = tail.length >= 2 ? (tail[tail.length-1] - tail[0]) / tail.length : 0;
+  return { series, last, slope };
+}
+
+// 3. VOLUME PROFILE COMPLETO con HVN/LVN y delta por nivel
+function calcVolumeProfileFull(fp: FootprintCandle[]): VolumeProfileFull {
+  if (fp.length < 5) {
+    const mid = fp[fp.length-1]?.c ?? 0;
+    return { poc: mid, vah: mid, val: mid, hvn: [], lvn: [], profile: [], valueAreaPct: 0 };
+  }
+  const hi      = Math.max(...fp.map(c => c.h));
+  const lo      = Math.min(...fp.map(c => c.l));
+  const range   = Math.max(hi - lo, 1e-9);
+  const buckets = 32; // más resolución que antes (era 24)
+  const bSize   = range / buckets;
+  const vol     = new Array(buckets).fill(0) as number[];
+  const buyVols = new Array(buckets).fill(0) as number[];
+  const selVols = new Array(buckets).fill(0) as number[];
+
+  fp.forEach(c => {
+    const loIdx = Math.max(0,         Math.floor((c.l - lo) / bSize));
+    const hiIdx = Math.min(buckets-1, Math.floor((c.h - lo) / bSize));
+    const span  = Math.max(hiIdx - loIdx + 1, 1);
+    for (let i = loIdx; i <= hiIdx; i++) {
+      vol[i]     += c.v       / span;
+      buyVols[i] += c.buyVol  / span;
+      selVols[i] += c.sellVol / span;
+    }
+  });
+
+  const pocIdx    = vol.indexOf(Math.max(...vol));
+  const poc       = lo + (pocIdx + 0.5) * bSize;
+  const totalVol  = vol.reduce((a,b) => a+b, 0);
+  const target70  = totalVol * 0.70;
+  let accum = 0, loB = pocIdx, hiB = pocIdx;
+  while (accum < target70 && (loB > 0 || hiB < buckets-1)) {
+    const down = loB > 0       ? vol[loB-1] : -1;
+    const up   = hiB < buckets-1 ? vol[hiB+1] : -1;
+    if (down >= up) { accum += down; loB--; } else { accum += up; hiB++; }
+  }
+  const vah = lo + (hiB + 1) * bSize;
+  const val = lo + loB * bSize;
+
+  // HVN: buckets con volumen > 130% del promedio → zonas de aceptación (soporte/resistencia)
+  // LVN: buckets con volumen < 40% del promedio → vacíos de precio (el precio los cruza rápido)
+  const avgVol  = totalVol / buckets;
+  const hvn: number[] = [];
+  const lvn: number[] = [];
+  vol.forEach((v, i) => {
+    const price = lo + (i + 0.5) * bSize;
+    if (v > avgVol * 1.3) hvn.push(price);
+    if (v < avgVol * 0.4 && i > 2 && i < buckets-2) lvn.push(price); // excluir extremos
+  });
+
+  const profile = vol.map((v, i) => ({
+    price:   lo + (i + 0.5) * bSize,
+    vol:     v,
+    buyVol:  buyVols[i],
+    sellVol: selVols[i],
+  }));
+
+  return { poc, vah, val, hvn, lvn, profile, valueAreaPct: ((hiB - loB) / buckets) * 100 };
+}
+
+// Legacy wrapper
+function calcVolumeProfile(candles: Candle[]): { poc: number; vah: number; val: number; profile: Array<{price: number; vol: number}> } {
+  const fp = buildFootprint(candles);
+  const full = calcVolumeProfileFull(fp);
+  return { poc: full.poc, vah: full.vah, val: full.val, profile: full.profile };
+}
+
+// 4. ORDER FLOW SCORE: motor principal de control de mercado
+function analyzeOrderFlow(candles: Candle[], price: number, vwap: number, atr: number): OrderFlowScore {
+  if (candles.length < 10) {
+    return {
+      control: "contested", controlScore: 0, cvdScore: 0, footprintScore: 0,
+      profileScore: 0, absorptionScore: 0, longSetup: false, shortSetup: false,
+      setupStrength: 0, narrative: "Datos insuficientes",
+      cvd: { cvd50: 0, cvd20: 0, cvd10: 0, cvd5: 0, slope50: 0, slope10: 0, divergence: false, trend: "neutral" },
+      profile: { poc: price, vah: price, val: price, hvn: [], lvn: [], profile: [], valueAreaPct: 0 },
+      footprint: [],
+    };
+  }
+
+  const fp      = buildFootprint(candles.slice(-60));
+  const cvd     = calcCVDFull(fp);
+  const profile = calcVolumeProfileFull(fp);
+
+  // ── Score CVD: dónde fluye el dinero ──────────────────────────────────────
+  // Normalizamos por el volumen total para independizarnos del tamaño del mercado
+  const totalVol  = fp.reduce((s,c) => s + c.v, 1e-9);
+  const cvdNorm50 = clamp(cvd.cvd50 / (totalVol * 0.12), -1, 1);
+  const cvdNorm10 = clamp(cvd.cvd10 / (totalVol * 0.06), -1, 1);
+  const slopeNorm = clamp(cvd.slope50 / (totalVol * 0.003), -1, 1);
+  const cvdScore  = clamp(cvdNorm50 * 40 + cvdNorm10 * 35 + slopeNorm * 25, -100, 100);
+
+  // ── Score Footprint: iniciativa y absorción en velas recientes ────────────
+  const recent15 = fp.slice(-15);
+  let fpBuyScore = 0, fpSellScore = 0;
+  recent15.forEach((c, idx) => {
+    const weight = 0.6 + idx * 0.03; // velas recientes pesan más
+    if (c.initiative === "buy")  fpBuyScore  += weight;
+    if (c.initiative === "sell") fpSellScore += weight;
+    // Absorción: si hay absorción de vendedores (compradores se imponen), bullish
+    if (c.absorption === "buy")  fpBuyScore  += weight * 0.5;
+    if (c.absorption === "sell") fpSellScore += weight * 0.5;
+  });
+  const fpTotal        = fpBuyScore + fpSellScore || 1;
+  const footprintScore = clamp(((fpBuyScore - fpSellScore) / fpTotal) * 100, -100, 100);
+
+  // ── Score Volume Profile: posición del precio respecto al value area ──────
+  // Precio sobre VAH → toros en control, compradores aceptan precios altos
+  // Precio bajo VAL → osos en control
+  // Precio entre VAL y POC → osos leves
+  // Precio entre POC y VAH → toros leves
+  let profileScore = 0;
+  if      (price > profile.vah) profileScore =  80;
+  else if (price > profile.poc) profileScore =  35;
+  else if (price < profile.val) profileScore = -80;
+  else                          profileScore = -35;
+  // Bonus/malus: precio en LVN (movimiento rápido esperado) vs HVN (resistencia)
+  const nearHVN = profile.hvn.some(h => Math.abs(price - h) < atr * 0.5);
+  const nearLVN = profile.lvn.some(l => Math.abs(price - l) < atr * 0.5);
+  if (nearLVN) profileScore *= 1.3; // LVN: precio se moverá más rápido
+  if (nearHVN) profileScore *= 0.7; // HVN: resistencia a seguir
+
+  // ── Score Absorción: órdenes que frenan el movimiento ────────────────────
+  // Absorción de vendedores (compradores absorben sells) → bullish
+  // Absorción de compradores (vendedores absorben buys) → bearish
+  const last20  = fp.slice(-20);
+  const buyAbsorptions  = last20.filter(c => c.absorption === "buy").length;
+  const sellAbsorptions = last20.filter(c => c.absorption === "sell").length;
+  const absorptionScore = clamp(
+    (buyAbsorptions - sellAbsorptions) / Math.max(last20.length * 0.2, 1) * 100,
+    -100, 100
+  );
+
+  // ── Score VWAP: posición respecto al VWAP ────────────────────────────────
+  const vwapDev   = (price - vwap) / Math.max(atr, 1e-9);
+  const vwapScore = clamp(vwapDev * 25, -50, 50); // menor peso
+
+  // ── Score compuesto: ponderado por confiabilidad de cada señal ───────────
+  const controlScore = clamp(
+    cvdScore        * 0.35  // CVD: más confiable, institucional
+    + footprintScore * 0.25  // Footprint: iniciativa real
+    + profileScore   * 0.20  // Perfil: contexto estructural
+    + absorptionScore * 0.12 // Absorción: señal de reversión/continuación
+    + vwapScore      * 0.08, // VWAP: contexto menor
+    -100, 100
+  );
+
+  const control: OrderFlowScore["control"] =
+    controlScore >  20 ? "bulls" :
+    controlScore < -20 ? "bears" : "contested";
+
+  // ── Setup de trading ──────────────────────────────────────────────────────
+  // LONG: toros en control + CVD alcista + precio sobre POC/VAH + sin divergencia bajista
+  const longSetup =
+    controlScore > 18
+    && cvd.trend !== "bearish"
+    && price >= profile.val   // al menos dentro del value area
+    && !cvd.divergence;
+
+  // SHORT: osos en control + CVD bajista + precio bajo POC/VAL + sin divergencia alcista
+  const shortSetup =
+    controlScore < -18
+    && cvd.trend !== "bullish"
+    && price <= profile.vah
+    && !cvd.divergence;
+
+  const setupStrength = clamp(Math.abs(controlScore) / 100, 0, 1);
+
+  // ── Narrativa en español ──────────────────────────────────────────────────
+  const ctrlStr = control === "bulls" ? "TOROS" : control === "bears" ? "OSOS" : "DISPUTADO";
+  const cvdStr  = cvd.trend === "bullish" ? "CVD↑ acumulando" : cvd.trend === "bearish" ? "CVD↓ distribuyendo" : "CVD lateral";
+  const posStr  =
+    price > profile.vah ? `precio sobre VAH (${profile.vah.toFixed(2)}) — aceptación alcista` :
+    price > profile.poc ? `precio sobre POC (${profile.poc.toFixed(2)}) — toros lideran` :
+    price < profile.val ? `precio bajo VAL (${profile.val.toFixed(2)}) — aceptación bajista` :
+    `precio bajo POC (${profile.poc.toFixed(2)}) — osos lideran`;
+  const absorStr = buyAbsorptions > sellAbsorptions
+    ? `absorción alcista (${buyAbsorptions})`
+    : sellAbsorptions > buyAbsorptions
+    ? `absorción bajista (${sellAbsorptions})`
+    : "sin absorción dominante";
+  const divStr = cvd.divergence ? " ⚠ DIVERGENCIA CVD-precio" : "";
+
+  const narrative =
+    `Control: ${ctrlStr} (${controlScore.toFixed(0)}pts) | ${cvdStr} | ${posStr} | ${absorStr}${divStr}`;
+
+  return {
+    control, controlScore, cvdScore, footprintScore, profileScore, absorptionScore,
+    cvd, profile, footprint: fp, longSetup, shortSetup, setupStrength, narrative,
+  };
+}
+
+// Legacy analyzeMarketControl — mantiene compatibilidad con el resto del código
+function calcSyntheticLiquidity(candles: Candle[], atr: number): { levels: Array<{price: number; side: "bid"|"ask"; strength: number}>; bidAskRatio: number } {
+  const fp = buildFootprint(candles.slice(-30));
+  const levels: Array<{price: number; side: "bid"|"ask"; strength: number}> = [];
+  fp.forEach(c => {
+    const upperWick = c.h - Math.max(c.o, c.c);
+    const lowerWick = Math.min(c.o, c.c) - c.l;
+    if (upperWick > atr * 0.3) levels.push({ price: c.h, side: "ask", strength: Math.min(upperWick / atr, 2) });
+    if (lowerWick > atr * 0.3) levels.push({ price: c.l, side: "bid", strength: Math.min(lowerWick / atr, 2) });
+  });
+  const bids = levels.filter(l => l.side === "bid").reduce((s,l) => s+l.strength, 0);
+  const asks = levels.filter(l => l.side === "ask").reduce((s,l) => s+l.strength, 0);
+  return { levels, bidAskRatio: (bids / Math.max(bids+asks, 1e-9)) * 100 };
+}
+
+function analyzeMarketControl(candles: Candle[], ind: Indicators, atr: number): MarketControl {
+  if (candles.length < 10) {
+    return { score: 0, bias: "neutral", cvd: 0, cvdSlope: 0,
+      poc: ind.vwap, vah: ind.vwap, val: ind.vwap,
+      vwapDev: 0, bidAskImbalance: 50, dominantSide: "balanced" };
+  }
+  const price = candles[candles.length-1].c;
+  const of    = analyzeOrderFlow(candles, price, ind.vwap, atr);
+  const { last: cvd, slope: cvdSlope } = calcCVD(candles.slice(-50));
+  const bidAskRatio = calcSyntheticLiquidity(candles.slice(-50), atr).bidAskRatio;
+  const score = of.controlScore;
+  const bias: MarketControl["bias"]   = score > 15 ? "bull" : score < -15 ? "bear" : "neutral";
+  const dominantSide: MarketControl["dominantSide"] =
+    score > 20 ? "buyers" : score < -20 ? "sellers" : "balanced";
+  return {
+    score, bias, cvd, cvdSlope,
+    poc: of.profile.poc, vah: of.profile.vah, val: of.profile.val,
+    vwapDev: of.cvdScore / 100, bidAskImbalance: bidAskRatio, dominantSide
+  };
+}
+
+function calcScalpingRisk(trades: ClosedTrade[], balance: number, maxDailyLoss: number, maxDailyGain: number): ScalpingRisk {
+  const today = new Date().toDateString();
+  const todayTrades = trades.filter(t => new Date(t.closedAt).toDateString() === today);
+  const dailyPnl    = todayTrades.reduce((s, t) => s + t.pnl, 0);
+  const dailyPnlPct = (dailyPnl / Math.max(balance, 1)) * 100;
+  const recent = trades.filter(t => t.source === "real").slice(0, 20);
+  let mathExpectancy = 0;
+  if (recent.length >= 5) {
+    const wins   = recent.filter(t => t.pnl > 0);
+    const losses = recent.filter(t => t.pnl <= 0);
+    const wr     = wins.length / recent.length;
+    const avgW   = wins.length   ? wins.reduce((s,t)=>s+t.pnl,0)/wins.length   : 0;
+    const avgL   = losses.length ? Math.abs(losses.reduce((s,t)=>s+t.pnl,0))/losses.length : 1;
+    mathExpectancy = wr * avgW - (1 - wr) * avgL;
+  }
+  let streak = 0;
+  for (const t of trades.slice(0, 10)) { if (t.pnl <= 0) streak++; else break; }
+  // ── Kelly criterion: fracción óptima del capital a arriesgar ────────────────
+  // Kelly = WR - (1-WR)/RR  donde RR = avgWin/avgLoss
+  const recent20 = trades.filter(t => t.source === "real").slice(0, 20);
+  const recentWins   = recent20.filter(t => t.pnl > 0);
+  const recentLosses = recent20.filter(t => t.pnl <= 0);
+  const kellyWR  = recent20.length >= 5 ? recentWins.length / recent20.length : 0.5;
+  const kellyRR  = recentWins.length && recentLosses.length
+    ? (recentWins.reduce((s,t)=>s+t.pnl,0)/recentWins.length) /
+      (Math.abs(recentLosses.reduce((s,t)=>s+t.pnl,0)/recentLosses.length) || 1)
+    : 1.5;
+  const kellyFraction = clamp(kellyWR - (1 - kellyWR) / kellyRR, 0, 0.25);
+
+  // ── Riesgo de ruina (fórmula de Vince) ───────────────────────────────────
+  const edge = kellyWR - (1 - kellyWR) / Math.max(kellyRR, 0.5);
+  const ruinProb = recent20.length >= 10 && edge > 0
+    ? Math.pow(Math.max((1 - edge) / (1 + edge), 0), 30) * 100
+    : (recent20.length < 5 ? 50 : 75); // conservador si no hay datos
+
+  // ── Sizing multiplier basado en riesgo compuesto ──────────────────────────
+  const ruinRisk = clamp(ruinProb / 100, 0, 1);
+  const ddPct = dailyPnlPct;
+  const sizeMultiplier =
+    ruinRisk > 0.6 || ddPct < -maxDailyLoss * 0.8 ? 0.25 :
+    ruinRisk > 0.4 || ddPct < -maxDailyLoss * 0.5 ? 0.50 :
+    ruinRisk > 0.2 || ddPct < -maxDailyLoss * 0.3 ? 0.75 : 1.0;
+
+  let blocked = false, blockReason = "";
+  if (dailyPnlPct <= -maxDailyLoss) { blocked = true; blockReason = `Límite pérdida diaria (-${maxDailyLoss}%) alcanzado`; }
+  if (streak >= 6) { blocked = true; blockReason = `6 pérdidas consecutivas — pausa obligatoria`; }
+  return { dailyPnl, dailyTrades: todayTrades.length, ruinRisk, ruinProb,
+           mathExpectancy, kellyFraction, kellyWR, kellyRR,
+           blocked, blockReason, sizeMultiplier, streak };
+}
+
 // ─── Persistencia ────────────────────────────────────────────────────────────
 
 // ─── AI Chat Panel ────────────────────────────────────────────────────────────
@@ -1463,27 +2091,51 @@ function AiChatPanel({
     setLoading(true);
 
     // Contexto del sistema para el chat
-    const systemCtx = `You are an elite algorithmic trader and risk manager analyzing a PAPER TRADING session.
-Context:
-- Open positions: ${openPositions.length}
-- Real trades: ${stats.total} | Win rate: ${stats.winRate.toFixed(1)}% | P&L: $${stats.pnl.toFixed(2)}
-- Profit factor: ${stats.profitFactor.toFixed(2)} | Sharpe: ${stats.sharpe.toFixed(2)}
+    // Calcular métricas de riesgo para el chat
+    const chatWins   = realTrades.filter(t=>t.pnl>0);
+    const chatLosses = realTrades.filter(t=>t.pnl<=0);
+    const chatWR     = stats.total > 0 ? chatWins.length / stats.total : 0;
+    const chatAvgW   = chatWins.length   ? chatWins.reduce((s,t)=>s+t.pnl,0)/chatWins.length   : 0;
+    const chatAvgL   = chatLosses.length ? Math.abs(chatLosses.reduce((s,t)=>s+t.pnl,0)/chatLosses.length) : 0;
+    const chatEV     = (chatWR * chatAvgW - (1-chatWR) * chatAvgL).toFixed(3);
+    const chatKelly  = chatAvgL > 0 ? clamp(chatWR - (1-chatWR)/(chatAvgW/chatAvgL), 0, 0.25) : 0;
+    const chatStreak = realTrades.slice(0,10).reduce((s,t)=>t.pnl<=0 ? s+1 : 0, 0);
+
+    const systemCtx = `You are an algorithmic trading system managing a REAL funded account of $100 USDT.
+You speak to your operator in Spanish. Be direct, quantitative, and honest — neither alarmist nor dismissive.
+
+ACCOUNT STATE:
+- Equity: $${stats.total > 0 ? (100 + stats.pnl).toFixed(2) : "100.00"} USDT (initial: $100)
+- P&L total: $${stats.pnl.toFixed(2)} | Trades: ${stats.total} | Win rate: ${stats.winRate.toFixed(1)}%
+- Profit factor: ${stats.profitFactor.toFixed(2)} | Sharpe: ${stats.sharpe.toFixed(2)} | Max DD: ${stats.maxDrawdown?.toFixed(1) ?? "N/A"}%
+- Avg win: $${chatAvgW.toFixed(3)} | Avg loss: $${chatAvgL.toFixed(3)}
+- Expected value/trade: $${chatEV}
+- Kelly fraction: ${(chatKelly*100).toFixed(1)}% of capital
+- Consecutive losses now: ${chatStreak}
+- Open positions: ${openPositions.length}/3
 - Current prices: BTC $${prices.BTCUSD?.toFixed(2)} | ETH $${prices.ETHUSD?.toFixed(2)} | XAU $${prices.XAUUSD?.toFixed(2)} | XAG $${prices.XAGUSD?.toFixed(3)}
 
-Open positions detail:
-${openPositions.length === 0 ? "None" : openPositions.map(p =>
-  `  ${p.signal.asset} ${p.signal.direction} ${p.signal.mode.toUpperCase()} | Entry: ${p.signal.entry.toFixed(3)} | SL: ${p.signal.stopLoss.toFixed(3)} | TP: ${p.signal.takeProfit.toFixed(3)} | Size: ${p.size.toFixed(2)}`
-).join("\n")}
+OPEN POSITIONS:
+${openPositions.length === 0 ? "None" : openPositions.map(p => {
+  const pnlEst = (p.signal.direction === "LONG"
+    ? prices[p.signal.asset] - p.signal.entry
+    : p.signal.entry - prices[p.signal.asset]) * p.size;
+  return `  ${p.signal.asset} ${p.signal.direction} ${p.signal.mode.toUpperCase()} | Entry ${p.signal.entry.toFixed(3)} → now ${prices[p.signal.asset]?.toFixed(3)} | PnL est: $${pnlEst.toFixed(3)} | SL: ${p.signal.stopLoss.toFixed(3)} | TP: ${p.signal.takeProfit.toFixed(3)} | Margin: $${p.marginUsed.toFixed(3)}`;
+}).join("\n")}
 
-Last signal:
-${lastSignal ? `${lastSignal.asset} ${lastSignal.direction} ${lastSignal.mode} | Conf: ${lastSignal.confidence.toFixed(0)}% | ${lastSignal.rationale}` : "None"}
+LAST 5 TRADES:
+${realTrades.slice(0,5).map(t =>
+  `  ${t.asset} ${t.direction} ${t.mode.toUpperCase()} | ${t.result} | PnL: $${t.pnl.toFixed(3)}`
+).join("\n") || "None yet"}
 
-Last 5 closed trades:
-${realTrades.slice(0, 5).map(t =>
-  `  ${t.asset} ${t.direction} ${t.mode} | ${t.result} | PnL: $${t.pnl.toFixed(2)}`
-).join("\n") || "None"}
+LAST SIGNAL: ${lastSignal ? `${lastSignal.asset} ${lastSignal.direction} ${lastSignal.mode} conf:${lastSignal.confidence.toFixed(0)}% | ${lastSignal.rationale}` : "None"}
 
-Answer in Spanish. Be direct, analytical, honest. Max 200 words. If asked about why a trade opened/closed, reference the actual data above.`;
+BEHAVIOR RULES FOR CHAT:
+- When asked about risk, always cite actual numbers (EV, Kelly, ruina, DD)
+- When asked why a trade opened/closed, reference the actual signal data
+- When asked if should open/close, apply the decision framework: EV positive + RR ≥ 1.5 + DD < 5% = lean OPEN
+- Never say "it's just paper trading" — treat everything as real capital
+- Max 220 words per response. Be precise and actionable.`;
 
     if (!usingGroq || !apiKey.trim()) {
       setMessages(prev => [...prev, {
@@ -1632,6 +2284,7 @@ export function App() {
   const [realTrades, setRealTrades] = useLocalStorage<ClosedTrade[]>("tl_trades", []);
   const [backtestTrades, setBacktestTrades] = useState<ClosedTrade[]>([]);
   const [lastSignal, setLastSignal] = useState<Signal | null>(null);
+  const [lastOF, setLastOF] = useState<OrderFlowScore | null>(null);
   const [volumeShock, setVolumeShock] = useState(0.28);
   const [learning, setLearning] = useLocalStorage<LearningModel>("tl_learning", initialLearning);
   const [apiKey, setApiKey] = useLocalStorage("tl_apiKey", "");
@@ -1649,10 +2302,13 @@ export function App() {
   const [aiLatency, setAiLatency] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now());
   const [showIndicators, setShowIndicators] = useState(true);
+  const [maxDailyLoss, setMaxDailyLoss] = useLocalStorage("tl_maxDailyLoss", 3);   // % del balance
+  const [maxDailyGain, setMaxDailyGain] = useLocalStorage("tl_maxDailyGain", 6);   // % del balance
 
-  // Indicadores y Wyckoff calculados por activo
+  // Indicadores, Wyckoff y control de mercado calculados por activo
   const [indicatorsMap, setIndicatorsMap] = useState<Partial<Record<Asset, Indicators>>>({});
   const [wyckoffMap, setWyckoffMap] = useState<Partial<Record<Asset, WyckoffAnalysis>>>({});
+  const [marketControlMap, setMarketControlMap] = useState<Partial<Record<Asset, MarketControl>>>({});
 
   const toastIdRef = useRef(0);
   const prevPricesRef = useRef(initialPrices);
@@ -1696,6 +2352,9 @@ export function App() {
       if (c.length > 25) {
         setIndicatorsMap(prev => ({ ...prev, [a]: computeIndicators(c) }));
         setWyckoffMap(prev => ({ ...prev, [a]: analyzeWyckoff(c) }));
+        const indForControl = computeIndicators(c);
+        const atrForControl = Math.max(calcAtrFromSeries(c.map(x=>x.c), 20), minAtrByAsset[a] ?? 1);
+        setMarketControlMap(prev => ({ ...prev, [a]: analyzeMarketControl(c, indForControl, atrForControl) }));
       }
     });
   }, [candles]);
@@ -1740,6 +2399,15 @@ export function App() {
   }, 0), [openPositions, prices, spreadByAsset]);
 
   const equity = balance + unrealized;
+  const riskMetrics = useMemo(() => calcRiskMetrics(realTrades, balance, 5), [realTrades, balance]);
+  // Order Flow en tiempo real para el activo/modo seleccionado
+  const currentOF = useMemo(() => {
+    if (tab !== "scalping") return null;
+    const c = candles[asset];
+    const ind = currentIndicators;
+    if (!c?.length || !ind) return null;
+    return analyzeOrderFlow(c, prices[asset], ind.vwap, calcAtrFromSeries(series[asset], 20));
+  }, [tab, asset, candles, prices, currentIndicators, series]);
 
   const stats = useMemo(() => {
     const t = realTrades; const total = t.length;
@@ -1833,7 +2501,6 @@ export function App() {
     const spread = (spreadPct / 100) * price;
     const mtf = getMtfScore(currentAsset, currentMode);
     const ind = indicatorsMap[currentAsset] ?? computeIndicators(candles[currentAsset]);
-    // Wyckoff: SOLO en intradía — en scalping no tiene sentido estructural
     const wyckoff = currentMode === "intradia"
       ? (wyckoffMap[currentAsset] ?? analyzeWyckoff(candles[currentAsset]))
       : { bias: "neutral" as const, phase: "unknown" as const, events: [],
@@ -1841,12 +2508,27 @@ export function App() {
           narrative: "", wyckoffLotMult: 1.0 };
     const lrn = learningRef.current;
 
-    // ── Paso 1: Dirección primaria por MTF (obligatorio) ──────────────────────
-    // HTF = EMA21/55 en últimas 70 velas (contexto)
-    // LTF = EMA8/21 en últimas 32 velas (estructura)
-    // Exec = momentum puro en últimas 8 velas (timing)
-    const mtfDir: Direction = (mtf.htf + mtf.ltf + mtf.exec) >= 0 ? "LONG" : "SHORT";
-    const mtfStrength = Math.abs(mtf.htf + mtf.ltf + mtf.exec);  // magnitud de confluencia
+    // ── Scalping: dirección determinada por control de mercado ────────────────
+    // En scalping: Order Flow es la autoridad. MTF confirma, no dicta.
+    const price0 = series[currentAsset]?.[series[currentAsset].length-1] ?? 0;
+    const of = currentMode === "scalping"
+      ? analyzeOrderFlow(candles[currentAsset], price0, ind.vwap, mtf.atr)
+      : null;
+    const mc = currentMode === "scalping"
+      ? (marketControlMap[currentAsset] ?? analyzeMarketControl(candles[currentAsset], ind, mtf.atr))
+      : null;
+
+    // ── Dirección primaria: jerarquía OF > MC > MTF ───────────────────────
+    let mtfDir: Direction;
+    if (currentMode === "scalping" && of) {
+      if      (of.control === "bulls" && of.longSetup)  mtfDir = "LONG";
+      else if (of.control === "bears" && of.shortSetup) mtfDir = "SHORT";
+      else if (mc && mc.bias !== "neutral")              mtfDir = mc.bias === "bull" ? "LONG" : "SHORT";
+      else mtfDir = (mtf.htf + mtf.ltf + mtf.exec) >= 0 ? "LONG" : "SHORT";
+    } else {
+      mtfDir = (mtf.htf + mtf.ltf + mtf.exec) >= 0 ? "LONG" : "SHORT";
+    }
+    const mtfStrength = Math.abs(mtf.htf + mtf.ltf + mtf.exec);
 
     // ── Paso 2: Indicador de confirmación (el más fuerte disponible) ──────────
     // Elige el indicador con mayor convicción en la dirección MTF
@@ -1854,41 +2536,35 @@ export function App() {
 
     const confirmCandidates: ConfirmIndicator[] = currentMode === "scalping"
       ? [
-          // SCALPING — Estocástico primario (umbrales crypto OS<20/OB>80)
-          {
-            // Stoch confirma dirección MTF: K cruzando D en cualquier zona
-            // o simplemente K y D alineados con la dirección
-            name: "Stoch",
-            confirms: mtfDir === "LONG"
-              ? ind.stochK > ind.stochD  // K sobre D = momentum alcista
-              : ind.stochK < ind.stochD, // K bajo D = momentum bajista
-            strength: (() => {
-              const crossGap = Math.abs(ind.stochK - ind.stochD) / 20; // gap normalizado
-              const zoneBonus = mtfDir === "LONG"
-                ? (ind.stochK < 50 ? 0.3 : 0)  // extra si viene de zona baja
-                : (ind.stochK > 50 ? 0.3 : 0);  // extra si viene de zona alta
-              return clamp(crossGap + zoneBonus, 0, 1);
-            })(),
-          },
-          {
-            // Stoch en zona extrema: señal de reversión de alta convicción
-            name: "Stoch-Extreme",
-            confirms: mtfDir === "LONG" ? ind.stochK < 25 : ind.stochK > 75,
-            strength: mtfDir === "LONG"
-              ? clamp((25 - ind.stochK) / 25 + 0.4, 0.4, 1)
-              : clamp((ind.stochK - 75) / 25 + 0.4, 0.4, 1),
-          },
-          {
-            name: "MA5/10",
-            confirms: mtfDir === "LONG" ? ind.ma5 > ind.ma10 : ind.ma5 < ind.ma10,
-            strength: Math.min(Math.abs(ind.ma5 - ind.ma10) / (price * 0.001), 1),
-          },
-          {
-            name: "VolDelta",
-            confirms: mtfDir === "LONG" ? ind.volumeDeltaPct > 8 : ind.volumeDeltaPct < -8,
-            strength: Math.min(Math.abs(ind.volumeDeltaPct) / 40, 1),
-          },
+          // SCALPING — Confirmadores con Order Flow integrado
+          { name: "CVD-Flow",
+            confirms: of
+              ? (mtfDir === "LONG"
+                  ? of.cvd.trend !== "bearish" && of.cvd.cvd10 >= 0 && !of.cvd.divergence
+                  : of.cvd.trend !== "bullish" && of.cvd.cvd10 <= 0 && !of.cvd.divergence)
+              : true,
+            strength: of ? clamp(Math.abs(of.cvdScore) / 80, 0, 1) : 0.5 },
+          { name: "Vol-Profile",
+            confirms: of
+              ? (mtfDir === "LONG" ? price >= of.profile.val : price <= of.profile.vah)
+              : true,
+            strength: of ? clamp(Math.abs(of.profileScore) / 80, 0, 1) : 0.4 },
+          { name: "Footprint",
+            confirms: of ? (mtfDir === "LONG" ? of.footprintScore > 0 : of.footprintScore < 0) : true,
+            strength: of ? clamp(Math.abs(of.footprintScore) / 60, 0, 1) : 0.4 },
+          { name: "Stoch",
+            confirms: mtfDir === "LONG" ? ind.stochK > ind.stochD : ind.stochK < ind.stochD,
+            strength: clamp(Math.abs(ind.stochK - ind.stochD)/20 + (mtfDir==="LONG" && ind.stochK<50 ? 0.3 : mtfDir==="SHORT" && ind.stochK>50 ? 0.3 : 0), 0, 1) },
+          { name: "VolDelta",
+            confirms: mtfDir === "LONG" ? ind.volumeDeltaPct > 5 : ind.volumeDeltaPct < -5,
+            strength: Math.min(Math.abs(ind.volumeDeltaPct) / 35, 1) },
+          { name: "Absorcion",
+            confirms: of ? (mtfDir === "LONG" ? of.absorptionScore > 0 : of.absorptionScore < 0) : false,
+            strength: of ? clamp(Math.abs(of.absorptionScore) / 60, 0, 1) : 0 },
           { name: "BB-Squeeze", confirms: ind.bbSqueeze, strength: ind.bbSqueeze ? 0.72 : 0 },
+          { name: "Stoch-Extreme",
+            confirms: mtfDir === "LONG" ? ind.stochK < 25 : ind.stochK > 75,
+            strength: mtfDir === "LONG" ? clamp((25-ind.stochK)/25+0.4,0.4,1) : clamp((ind.stochK-75)/25+0.4,0.4,1) },
         ]
       : [
           // INTRADÍA — RSI primario (umbrales crypto OS<20/OB>80), MAs tendenciales
@@ -1950,13 +2626,28 @@ export function App() {
     const direction = mtfDir;
 
     // ── Paso 4: Calcular confianza ────────────────────────────────────────────
+    // Score de control de mercado para scalping (0-20 puntos adicionales)
+    const mcScore    = (of && currentMode === "scalping")
+      ? Math.abs(of.controlScore) * 0.22
+      : (mc ? Math.abs(mc.score) * 0.2 : 0);
+    const ofSetupBonus      = (of && currentMode === "scalping")
+      ? ((mtfDir === "LONG" && of.longSetup) || (mtfDir === "SHORT" && of.shortSetup) ? 8 : 0) : 0;
+    const divergencePenalty = (of?.cvd.divergence && currentMode === "scalping") ? 10 : 0;
+    const mcConflict = (of && currentMode === "scalping")
+      ? (of.control === "bulls" && mtfDir === "SHORT") || (of.control === "bears" && mtfDir === "LONG")
+      : (mc ? (mc.bias === "bull" && mtfDir === "SHORT") || (mc.bias === "bear" && mtfDir === "LONG") : false);
     const confidence = clamp(
       50
-      + mtfStrength * 8                                      // alineación MTF
-      + (confirmed ? confirmStrength * 18 : -5)              // confirmador técnico
-      + (ind.rsiDivergence !== "none" ? 5 : 0)               // divergencia RSI
-      + (currentMode === "intradia" && wyckoff.bias !== "neutral" ? 4 : 0)  // bono Wyckoff solo intradía
-      - spreadPct * 35,
+      + mtfStrength * 7
+      + (confirmed ? confirmStrength * 16 : -5)
+      + (ind.rsiDivergence !== "none" ? 4 : 0)
+      + mcScore
+      + ofSetupBonus
+      - divergencePenalty
+      - (mcConflict ? 15 : 0)
+      + (currentMode === "intradia" && wyckoff.bias !== "neutral" ? 4 : 0)
+      - (currentMode === "scalping" ? spreadPct * 55 : spreadPct * 20)
+      - (spreadCostRatio > 0.4 ? 8 : spreadCostRatio > 0.25 ? 4 : 0),
       50, 96
     );
 
@@ -1965,23 +2656,51 @@ export function App() {
 
     const entry = direction === "LONG" ? price + spread / 2 : price - spread / 2;
     const baseAtr = mtf.atr;
-    // Scalping: SL ajustado al ruido de 1m (1.2× ATR), TP rápido (1.35-1.8× ATR)
-    // Intradía: SL respeta estructura de 15m-1h (3.0× ATR), TP tendencial (4-6× ATR)
-    const slMult  = currentMode === "scalping" ? 1.2 : 3.0;
-    const tpMult  = currentMode === "scalping" ? lrn.scalpingTpAtr : Math.max(lrn.intradayTpAtr * 1.8, 4.0);
-    const stopLoss = direction === "LONG"
-      ? entry - baseAtr * slMult
-      : entry + baseAtr * slMult;
-    const takeProfit = direction === "LONG"
-      ? entry + baseAtr * tpMult
-      : entry - baseAtr * tpMult;
+    // ── SL: bajo/sobre el swing más reciente + buffer ATR ───────────────────
+    const slMult = currentMode === "scalping" ? 1.2 : 3.0;
+    // Para scalping: buscar swing low/high reciente en las últimas 8 velas
+    const recentC = candles[currentAsset]?.slice(-8) ?? [];
+    let structuralSl: number;
+    if (currentMode === "scalping" && recentC.length >= 3) {
+      const swingLow  = Math.min(...recentC.map(c => c.l));
+      const swingHigh = Math.max(...recentC.map(c => c.h));
+      structuralSl = direction === "LONG"
+        ? swingLow  - baseAtr * 0.2
+        : swingHigh + baseAtr * 0.2;
+      // Si el swing queda más cerca que 0.8×ATR, usar ATR como fallback
+      const slDist = Math.abs(entry - structuralSl);
+      if (slDist < baseAtr * 0.8) structuralSl = direction === "LONG"
+        ? entry - baseAtr * slMult : entry + baseAtr * slMult;
+    } else {
+      structuralSl = direction === "LONG"
+        ? entry - baseAtr * slMult : entry + baseAtr * slMult;
+    }
+    const stopLoss = structuralSl;
+
+    // ── TP1: VAH/VAL del perfil de volumen (scalping) o múltiplo ATR (intradía)
+    // ── TP2: nivel de liquidez siguiente (trailing en scalping)
+    let takeProfit: number;
+    if (currentMode === "scalping" && mc) {
+      // TP hacia el nivel de liquidez opuesto en el perfil de volumen
+      takeProfit = direction === "LONG"
+        ? Math.max(mc.vah, entry + baseAtr * lrn.scalpingTpAtr)
+        : Math.min(mc.val, entry - baseAtr * lrn.scalpingTpAtr);
+    } else {
+      const tpMult = Math.max(lrn.intradayTpAtr * 1.8, 4.0);
+      takeProfit = direction === "LONG"
+        ? entry + baseAtr * tpMult
+        : entry - baseAtr * tpMult;
+    }
 
     // ── Paso 6: Rationale ─────────────────────────────────────────────────────
     const mtfCtx = `HTF ${mtf.htf.toFixed(2)} / LTF ${mtf.ltf.toFixed(2)} / Exec ${mtf.exec.toFixed(2)}`;
     const confirmCtx = bestConfirm ? `Confirmación: ${bestConfirm.name} (${(bestConfirm.strength * 100).toFixed(0)}%)` : "Sin confirmación adicional";
     const wyckoffCtx = currentMode === "intradia" && wyckoff.bias !== "neutral"
       ? ` | Wyckoff ${wyckoff.bias === "accumulation" ? "Acum" : "Dist"} F${wyckoff.phase} mult×${wyckoffMult.toFixed(2)}` : "";
-    const rationale = `${direction} | ${mtfCtx} | ${confirmCtx}${wyckoffCtx}`;
+    const mcCtx = (of && currentMode === "scalping")
+      ? ` | ${of.narrative}`
+      : (mc ? ` | Control: ${mc.dominantSide} (${mc.score.toFixed(0)}) CVD${mc.cvdSlope>=0?"↑":"↓"} POC:${mc.poc.toFixed(2)}` : "");
+    const rationale = `${direction} | ${mtfCtx} | ${confirmCtx}${wyckoffCtx}${mcCtx}`;
 
     return {
       asset: currentAsset, mode: currentMode, direction, entry, stopLoss, takeProfit,
@@ -2002,34 +2721,146 @@ export function App() {
       return signal.confidence >= floor ? "OPEN" : "SKIP";
     }
     try {
-      const systemPrompt = `You are an elite institutional trader with 20 years of experience and an MSc in Statistics and Financial Markets. 
-You specialize in Wyckoff methodology, orderflow analysis, and multi-timeframe momentum strategies.
-This is a PAPER TRADING simulator. Prices are real market data but trades are simulated — no real money at risk.
-Your job is to evaluate a trading signal and decide whether to execute, skip, or wait.
+      // ── Métricas de gestión de riesgo para el prompt ────────────────────────
+      const lrnSnap     = learningRef.current;
+      const equitySnap  = balance + unrealized;
+      const initialCap  = 100; // capital inicial fijo
+      const riskPerTrade = riskPct / 100;
+      const openCount   = openPositionsRef.current.length;
+      const rrRatio     = Math.abs(signal.takeProfit - signal.entry) /
+                          Math.max(Math.abs(signal.stopLoss - signal.entry), 1e-9);
+      // Riesgo de ruina simplificado (fórmula de Ralph Vince): R = ((1-edge)/(1+edge))^n
+      // donde edge = (wr/100 - (1-wr/100)/rrRatio) y n = trades restantes estimados
+      const wr01   = Math.max(stats.winRate / 100, 0.01);
+      const edge   = wr01 - (1 - wr01) / Math.max(rrRatio, 0.5);
+      const ruinRisk = stats.total >= 10
+        ? (edge > 0 ? Math.pow(Math.max((1 - edge) / (1 + edge), 0), 20) * 100 : 99).toFixed(1)
+        : "N/A (<10 trades)";
+      // Esperanza matemática por trade
+      const avgWin  = stats.total > 0 ? realTrades.filter(t=>t.pnl>0).reduce((a,t)=>a+t.pnl,0) / Math.max(realTrades.filter(t=>t.pnl>0).length,1) : 0;
+      const avgLoss = stats.total > 0 ? Math.abs(realTrades.filter(t=>t.pnl<=0).reduce((a,t)=>a+t.pnl,0) / Math.max(realTrades.filter(t=>t.pnl<=0).length,1)) : 0;
+      const expectedValue = (wr01 * avgWin - (1-wr01) * avgLoss).toFixed(3);
+      // Drawdown actual desde pico de equity
+      const peakEquity = Math.max(initialCap, equitySnap, ...realTrades.map((_,i) =>
+        initialCap + realTrades.slice(0,i+1).reduce((a,t)=>a+t.pnl,0)));
+      const currentDD  = ((peakEquity - equitySnap) / peakEquity * 100).toFixed(1);
+      // Exposición actual
+      const totalMargin = openPositionsRef.current.reduce((a,p)=>a+p.marginUsed,0);
+      const exposurePct = (totalMargin / equitySnap * 100).toFixed(1);
 
-Rules:
-- SCALPING mode: if MTF momentum is aligned and Stochastic confirms, OPEN unless there is a clear structural reason not to. Frequency matters — a scalper needs trades.
-- INTRADAY mode: use Wyckoff as additional context. Require MTF + at least 1 indicator.
-- INTRADAY: never open against Wyckoff distribution Phase D without clear invalidation.
-- SCALPING mode: ignore Wyckoff completely. Decide based on MTF momentum + Stochastic only.
-- BB Squeeze + volume delta = high-probability. RSI divergence = significant edge.
-- Default to OPEN when confidence ≥ 52 in scalping, ≥ 55 in intraday.
-- Respond ONLY with valid JSON: {"decision":"OPEN"|"SKIP"|"WAIT","confidence_adjustment":number,"rationale":"string","risk_notes":"string"}
-- confidence_adjustment: integer between -20 and +20
-- rationale: max 120 chars in Spanish
-- risk_notes: max 80 chars in Spanish`;
+      // ── Métricas adicionales para el prompt ──────────────────────────────────
+      const riskSnap   = calcRiskMetrics(realTrades, balance, maxDailyLoss);
+      const kellyStr   = riskSnap.kellyFraction > 0
+        ? `${(riskSnap.kellyFraction * 100).toFixed(1)}% (WR ${(riskSnap.kellyWR*100).toFixed(0)}% / RR ${riskSnap.kellyRR.toFixed(2)})`
+        : "insuficiente data";
+      const consecLoss = riskSnap.streak;
+      const ruinPct    = riskSnap.ruinProb.toFixed(1);
+      const evSign     = parseFloat(expectedValue) >= 0 ? "POSITIVE ✓" : "NEGATIVE ✗";
 
-      const userMsg = `Asset: ${signal.asset} | Mode: ${signal.mode} | Direction: ${signal.direction}
+      const systemPrompt = `You are an algorithmic trading system managing a REAL funded account.
+
+IDENTITY AND MANDATE:
+- You manage $${initialCap} USDT of real capital. Every dollar lost is permanent until earned back.
+- The initial capital ($${initialCap}) is the absolute floor — if equity approaches it, you stop trading.
+- Your mandate: GROW capital with controlled risk. Not preserve it at all costs, not gamble it.
+- You are NOT risk-averse — you are RISK-CALIBRATED. Edge × frequency = profit.
+
+ACCOUNT STATE RIGHT NOW:
+- Equity: $${equitySnap.toFixed(2)} USDT | Initial capital: $${initialCap} USDT
+- Drawdown from peak: ${currentDD}% (hard limit: 5% daily, 15% overall)
+- Ruin probability next 30 trades: ${ruinPct}% (below 20% = healthy, above 50% = reduce size)
+- Consecutive losses: ${consecLoss} (above 5 = mandatory pause)
+- Expected value per trade: $${expectedValue} [${evSign}]
+- Kelly optimal fraction: ${kellyStr}
+- Win rate: ${stats.winRate.toFixed(1)}% | Profit factor: ${stats.profitFactor.toFixed(2)} | Sharpe: ${stats.sharpe.toFixed(2)}
+- Open positions: ${openCount} | Margin deployed: ${exposurePct}% of equity
+
+RISK RULES (non-negotiable):
+1. Max risk per trade: ${(riskPerTrade * 100).toFixed(1)}% equity = $${(equitySnap * riskPerTrade).toFixed(3)} USDT
+2. Max simultaneous positions: 3 (currently ${openCount})
+3. Daily DD limit: 5% — current: ${currentDD}%
+4. Ruin floor: $${(initialCap * 0.70).toFixed(2)} (−30% from initial) → full stop
+5. If ${consecLoss} consecutive losses → WAIT on next signal regardless of quality
+
+CALIBRATED DECISION FRAMEWORK:
+You must avoid TWO opposite mistakes with equal discipline:
+
+MISTAKE A — OVER-TRADING (reckless):
+Opening when: RR < 1.5 | DD > 4% | EV negative | structure against direction | 5+ consecutive losses
+Consequence: destroys capital, hits ruin threshold, loses the funded account.
+
+MISTAKE B — UNDER-TRADING (fearful):
+Skipping when: signal has positive EV | RR ≥ 1.5 | DD within limits | momentum confirmed
+Consequence: starves the system of data, Kelly fraction never compounds, account stagnates.
+
+CORRECT DECISION LOGIC:
+OPEN  → EV positive + RR ≥ 1.5 + DD within limits + mode-specific confirmation + fewer than 3 positions
+WAIT  → DD > 4% OR consecutive losses = 5 OR EV marginally positive but structure unclear
+SKIP  → EV negative OR RR < 1.2 OR specific structural contradiction (e.g. Phase D distribution LONG)
+
+MODE RULES:
+- SCALPING: MTF momentum + Stoch aligned = OPEN if DD < 3%, EV positive, AND spread < 35% of TP. Frequency is the edge.
+- INTRADAY: require MTF + 1 indicator + Wyckoff not contradicting. Phase D distribution = hard SKIP.
+- NEVER skip a scalp setup purely due to macro uncertainty unless a hard rule is triggered.
+
+CFD SPREAD RULES (broker cobra spread bid-ask en cada operación, sin comisión separada):
+- El spread es una pérdida GARANTIZADA al entrar. El precio debe recuperarlo antes de generar ganancia.
+- En términos reales: TP neto = TP - spread; SL neto = SL + spread.
+- SCALPING: si spread > 35% del TP → requiere confianza ≥ 65% para abrir.
+- SCALPING: si spread > 50% del TP → SKIP, setup matemáticamente inviable.
+- Alta volatilidad/shock: spread se amplía 2-3×. Reducir frecuencia de scalp automáticamente.
+- Sesión ASIA/OFF/WEEKEND: spread +35-60%. Solo intradía con TP amplio es viable.
+- INTRADAY: spread típicamente <10% del TP — menos crítico pero sí afecta el EV.
+- EV neto = (WR × TP_neto) - (1-WR × SL_neto) — siempre calcular con spread incluido.
+
+Respond ONLY with valid JSON:
+{"decision":"OPEN"|"SKIP"|"WAIT","confidence_adjustment":number,"rationale":"string","risk_notes":"string"}
+- confidence_adjustment: integer −20 to +20. Use +10 to +20 only when multiple factors strongly confirm. Use −10 to −20 only when risk rules are near breach.
+- rationale: ≤ 130 chars Spanish — name the key edge or the specific reason to skip
+- risk_notes: ≤ 90 chars Spanish — EV, Kelly, RR, or DD status`;
+
+      const rrQuality = rrRatio >= 2.5 ? "EXCELLENT" : rrRatio >= 1.8 ? "GOOD" : rrRatio >= 1.3 ? "ACCEPTABLE" : "POOR";
+      const sigSpread   = calcCFDSpread(signal.asset, signal.entry, volumeShockRef.current);
+      const spreadCostA = sigSpread.spread;
+      const tpDist      = Math.abs(signal.takeProfit - signal.entry);
+      const slDistA     = Math.abs(signal.stopLoss - signal.entry);
+      const spreadRatioTP  = (spreadCostA / Math.max(tpDist,  1e-9) * 100).toFixed(1);
+      const spreadRatioSL  = (spreadCostA / Math.max(slDistA, 1e-9) * 100).toFixed(1);
+
+      const userMsg = `SIGNAL TO EVALUATE:
+Asset: ${signal.asset} | Mode: ${signal.mode.toUpperCase()} | Direction: ${signal.direction}
 Entry: ${signal.entry.toFixed(4)} | SL: ${signal.stopLoss.toFixed(4)} | TP: ${signal.takeProfit.toFixed(4)}
-RR Ratio: ${(Math.abs(signal.takeProfit - signal.entry) / Math.abs(signal.stopLoss - signal.entry)).toFixed(2)}
-Confidence: ${signal.confidence.toFixed(1)}%
+RR: ${rrRatio.toFixed(2)}:1 [${rrQuality}] | Risk USDT: $${(equitySnap * riskPerTrade).toFixed(3)}
+Expected value if opened: $${expectedValue} [${evSign}]
+Confidence: ${signal.confidence.toFixed(1)}% | Kelly suggests: ${riskSnap.kellyFraction > 0.01 ? "OPEN" : "SKIP (no edge)"}
+
+CFD SPREAD (broker cobra spread, no comisión):
+- Spread: $${spreadCostA.toFixed(4)} (${sigSpread.spreadPct.toFixed(3)}%) | Sesión: ${sigSpread.sessionLabel} | Vol alta: ${sigSpread.isHighVolume ? "SÍ ⚠" : "no"}
+- Spread vs TP: ${spreadRatioTP}% del objetivo (>35% = setup degradado, >50% = SKIP)
+- Spread vs SL: ${spreadRatioSL}% del stop (clave en scalping)
+- Desglose: base=$${sigSpread.component.base.toFixed(4)} + volumen=$${sigSpread.component.volume.toFixed(4)} + sesión=$${sigSpread.component.session.toFixed(4)}
+
+TECHNICAL CONTEXT:
 MTF → HTF: ${signal.mtf.htf.toFixed(2)} | LTF: ${signal.mtf.ltf.toFixed(2)} | Exec: ${signal.mtf.exec.toFixed(2)}
-RSI: ${signal.indicators.rsi.toFixed(1)} | Divergence: ${signal.indicators.rsiDivergence}
-VWAP position: ${signal.entry > signal.indicators.vwap ? "ABOVE" : "BELOW"} (${((signal.entry - signal.indicators.vwap) / signal.indicators.vwap * 100).toFixed(2)}%)
-BB Squeeze: ${signal.indicators.bbSqueeze ? "YES" : "NO"}
-Volume Delta: ${signal.indicators.volumeDeltaPct.toFixed(1)}%
-${signal.mode === "intradia" ? `Wyckoff: ${signal.wyckoff.bias} | Phase: ${signal.wyckoff.phase} | ${signal.wyckoff.narrative}` : "Wyckoff: N/A (scalping — no aplica)"}
-Signal rationale: ${signal.rationale}`;
+${signal.mode === "scalping"
+  ? `Stoch %K: ${signal.indicators.stochK.toFixed(1)} / %D: ${signal.indicators.stochD.toFixed(1)} | ${signal.indicators.stochK > signal.indicators.stochD ? "K>D alcista" : "K<D bajista"}`
+  : `RSI: ${signal.indicators.rsi.toFixed(1)} | Divergencia: ${signal.indicators.rsiDivergence}`}
+VWAP: ${signal.entry > signal.indicators.vwap ? "SOBRE" : "BAJO"} (${((signal.entry - signal.indicators.vwap) / signal.indicators.vwap * 100).toFixed(2)}%)
+BB Squeeze: ${signal.indicators.bbSqueeze ? "SÍ — expansión de volatilidad inminente" : "NO"}
+Vol Delta: ${signal.indicators.volumeDeltaPct.toFixed(1)}% (${signal.indicators.volumeDeltaPct > 0 ? "presión compradora" : "presión vendedora"})
+${signal.mode === "intradia"
+  ? `Wyckoff: ${signal.wyckoff.bias} | Fase: ${signal.wyckoff.phase} | ${signal.wyckoff.narrative}`
+  : "Wyckoff: N/A (scalping)"}
+${signal.mode === "scalping" ? `
+ORDER FLOW (scalping — señal más importante):
+${signal.rationale.includes("Control:") || signal.rationale.includes("TOROS") || signal.rationale.includes("OSOS") ? signal.rationale : "Ver rationale"}` : ""}
+
+RISK CHECK FOR THIS TRADE:
+- Drawdown now: ${currentDD}% (limit 5%) → ${parseFloat(currentDD) > 4 ? "⚠ NEAR LIMIT" : "✓ OK"}
+- Consecutive losses: ${consecLoss} (limit 5) → ${consecLoss >= 4 ? "⚠ CAUTION" : "✓ OK"}
+- Open positions: ${openCount}/3 → ${openCount >= 3 ? "⚠ AT LIMIT — must SKIP" : "✓ OK"}
+- EV signal: ${evSign}
+Rationale from system: ${signal.rationale}`;
 
       const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
@@ -2151,10 +2982,21 @@ Signal rationale: ${signal.rationale}`;
 
   async function createSignalAndExecute(mode: Mode, targetAsset: Asset, autoLabel = false) {
     if (!liveReady) { pushToast("El feed aún no está listo. Sincronice primero.", "warning"); return; }
-    // Respetar el modo activo: si manual, usar el tab actual
-    // Si autoLabel (scan), usar el modo que se pasa
+
+    // ── Verificar límites diarios antes de generar señal ─────────────────────
+    if (mode === "scalping") {
+      const risk = calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain);
+      if (risk.blocked) {
+        if (!autoLabel) pushToast(`🛑 ${risk.blockReason}`, "warning");
+        return;
+      }
+      // Modo defensivo si expectancy negativa con suficientes trades
+      if (risk.mathExpectancy < -0.5 && risk.dailyTrades > 5) {
+        if (!autoLabel) pushToast(`⚠️ Expectativa negativa ($${risk.mathExpectancy.toFixed(2)}). Modo defensivo.`, "warning");
+      }
+    }
+
     const signal = generateSignal(mode, targetAsset);
-    // Etiqueta visual en toast diferencia scalp vs intradía
     if (!autoLabel) setLastSignal(signal);
     const decision = await aiDecision(signal);
     if (decision !== "OPEN") {
@@ -2162,9 +3004,12 @@ Signal rationale: ${signal.rationale}`;
       return;
     }
     const lrn = learningRef.current;
-    // Wyckoff MTF multiplier solo en intradía cuando hay confluencia avanzada
     const wyckoffMult = (signal as Signal & { _wyckoffMult?: number })._wyckoffMult ?? 1.0;
-    const riskUsd = Math.max(0.5, equity * (riskPct / 100) * lrn.riskScale * wyckoffMult);
+    // Ajustar sizing por riesgo de ruina en scalping
+    const riskMult = signal.mode === "scalping"
+      ? calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain).sizeMultiplier
+      : 1.0;
+    const riskUsd = Math.max(0.5, equity * (riskPct / 100) * lrn.riskScale * wyckoffMult * riskMult);
     // stopDistance mínimo: el mayor entre el SL calculado y 0.3% del precio
     // Evita que ATR pequeño en plata/gold genere sizes irreales
     const minStop = signal.entry * 0.003;
@@ -2299,7 +3144,7 @@ Signal rationale: ${signal.rationale}`;
 
       {/* Header metrics + Equity Curve */}
       <div style={{ background: "rgba(255,255,255,0.02)", borderBottom: "1px solid rgba(255,255,255,0.05)", padding: "12px 20px" }}>
-        <div style={{ maxWidth: 1440, margin: "0 auto", display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
+        <div className="header-metrics" style={{ maxWidth: 1440, margin: "0 auto", display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
           {[
             { label: "Balance", value: money(balance), color: "var(--text)" },
             { label: "P&L no realizado", value: money(unrealized), color: unrealized >= 0 ? "#10b981" : "#ef4444" },
@@ -2329,7 +3174,7 @@ Signal rationale: ${signal.rationale}`;
 
         {/* ━━━━━━━━━ TRADING ━━━━━━━━━ */}
         {appTab === "trading" && (
-          <div style={{ display: "grid", gridTemplateColumns: "280px 1fr 320px", gap: 14 }}>
+          <div className="trading-grid">
 
             {/* Izq */}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -2349,7 +3194,20 @@ Signal rationale: ${signal.rationale}`;
                   {assets.map(a => <option key={a} value={a}>{assetLabel[a]}</option>)}
                 </select>
                 <div style={{ marginTop: 8, fontSize: 11 }}>
-                  {[["Precio", prices[asset].toFixed(asset === "BTCUSD" || asset === "ETHUSD" ? 2 : 4)], ["Spread", spreadByAsset[asset].toFixed(4)], ["Apalancamiento", `${leverageByAsset[asset]}×`]].map(([k, v]) => (
+                  {(()=>{
+                    const ss = spreadSnapshot[asset];
+                    const dp = asset === "BTCUSD" || asset === "ETHUSD" ? 2 : asset === "XAUUSD" ? 2 : 4;
+                    return [[
+                      ["Precio", prices[asset].toFixed(dp)],
+                      ["Bid", ss ? ss.bid.toFixed(dp) : "-"],
+                      ["Ask", ss ? ss.ask.toFixed(dp) : "-"],
+                      ["Spread $", ss ? `$${ss.spread.toFixed(dp === 2 ? 2 : 4)}` : "-"],
+                      ["Spread %", ss ? `${ss.spreadPct.toFixed(3)}%` : "-"],
+                      ["Sesión", ss ? ss.sessionLabel : "-"],
+                      ["Vol", ss?.isHighVolume ? "⚠ ALTA" : "Normal"],
+                      ["Leverage", `${leverageByAsset[asset]}×`],
+                    ]];
+                  })()[0].map(([k, v]) => (
                     <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
                       <span style={{ color: "var(--muted)" }}>{k}</span>
                       <span style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>{v}</span>
@@ -2442,7 +3300,10 @@ Signal rationale: ${signal.rationale}`;
               {currentIndicators && showIndicators && (
                 <div className="card" style={{ padding: "10px 12px" }}>
                   <p className="label" style={{ marginBottom: 8 }}>Indicadores técnicos</p>
-                  <IndicatorPanel ind={currentIndicators} mode={tab} />
+                  {tab === "scalping" && currentOF && (
+                  <OrderFlowPanel of={currentOF} price={prices[asset]} />
+                )}
+                <IndicatorPanel ind={currentIndicators} mode={tab} />
                 </div>
               )}
 
@@ -2507,7 +3368,7 @@ Signal rationale: ${signal.rationale}`;
               <div className="card">
                 <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 13 }}>Estadísticas — trades reales</p>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
-                  {[["Trades", stats.total], ["Win rate", `${stats.winRate.toFixed(1)}%`], ["Expectativa", money(stats.expectancy)], ["Factor gan.", stats.profitFactor.toFixed(2)], ["Sharpe", stats.sharpe.toFixed(2)], ["Max DD", `${stats.maxDrawdown.toFixed(1)}%`], ["P&L total", money(stats.pnl)], ["Posiciones", openPositions.length]].map(([l, v]) => (
+                  {[["Trades", stats.total], ["Win rate", `${stats.winRate.toFixed(1)}%`], ["Expectativa", money(stats.expectancy)], ["Factor gan.", stats.profitFactor.toFixed(2)], ["Sharpe", stats.sharpe.toFixed(2)], ["Max DD", `${stats.maxDrawdown.toFixed(1)}%`], ["P&L total", money(stats.pnl)], ["Posiciones", openPositions.length], ["Kelly %", riskMetrics.kellyFraction > 0 ? `${(riskMetrics.kellyFraction*100).toFixed(1)}%` : "N/D"], ["Ruina", riskMetrics.ruinProb !== undefined ? `${riskMetrics.ruinProb.toFixed(0)}%` : "N/D"]].map(([l, v]) => (
                     <div key={l} className="metric"><span className="label" style={{ fontSize: 11, fontWeight: 600 }}>{l}</span><strong style={{ fontSize: 13 }}>{v}</strong></div>
                   ))}
                 </div>
