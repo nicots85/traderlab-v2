@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type Asset = "BTCUSD" | "ETHUSD" | "XAGUSD" | "XAUUSD";
+// Asset es dinámico — los activos disponibles vienen del bridge MT5
+// El tipo string permite cualquier símbolo que entregue el broker
+type Asset = string;
 type Mode = "scalping" | "intradia";
 type Direction = "LONG" | "SHORT";
 type ExitReason = "TP" | "SL" | "TRAIL" | "REVERSAL";
@@ -167,31 +169,63 @@ type Toast = { id: number; msg: string; type: "success" | "warning" | "error" | 
 type AiStatus = "idle" | "testing" | "ok" | "error" | "disabled";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"];
+// assets[] es dinámico — se actualiza con los activos que entregue el bridge.
+// Inicialmente 4 activos base; se expande al primer sync exitoso.
+let assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"];
+
+// Metadata dinámica por activo — se llena desde el bridge
+// (fallback a valores hardcodeados para los 4 activos originales)
+const ASSET_DEFAULTS: Record<string, { label: string; minAtr: number; baseSpreadPct: number }> = {
+  BTCUSD:   { label: "BTC/USD",    minAtr: 50,   baseSpreadPct: 0.012 },
+  ETHUSD:   { label: "ETH/USD",    minAtr: 5,    baseSpreadPct: 0.015 },
+  XAUUSD:   { label: "Oro XAU",   minAtr: 2.0,  baseSpreadPct: 0.018 },
+  XAGUSD:   { label: "Plata XAG", minAtr: 0.08, baseSpreadPct: 0.025 },
+  BNBUSD:   { label: "BNB/USD",   minAtr: 1,    baseSpreadPct: 0.020 },
+  SOLUSD:   { label: "SOL/USD",   minAtr: 0.5,  baseSpreadPct: 0.020 },
+  XRPUSD:   { label: "XRP/USD",   minAtr: 0.005,baseSpreadPct: 0.025 },
+  LTCUSD:   { label: "LTC/USD",   minAtr: 0.5,  baseSpreadPct: 0.020 },
+  DOGEUSD:  { label: "DOGE/USD",  minAtr: 0.001,baseSpreadPct: 0.030 },
+  ADAUSD:   { label: "ADA/USD",   minAtr: 0.003,baseSpreadPct: 0.025 },
+  LINKUSD:  { label: "LINK/USD",  minAtr: 0.05, baseSpreadPct: 0.025 },
+  AVAXUSD:  { label: "AVAX/USD",  minAtr: 0.2,  baseSpreadPct: 0.025 },
+  EURUSD:   { label: "EUR/USD",   minAtr: 0.0002,baseSpreadPct: 0.003 },
+  GBPUSD:   { label: "GBP/USD",   minAtr: 0.0003,baseSpreadPct: 0.004 },
+  USDJPY:   { label: "USD/JPY",   minAtr: 0.03, baseSpreadPct: 0.003 },
+  US30:     { label: "Dow Jones", minAtr: 50,   baseSpreadPct: 0.010 },
+  US500:    { label: "S&P 500",   minAtr: 8,    baseSpreadPct: 0.010 },
+  USTEC:    { label: "NASDAQ",    minAtr: 30,   baseSpreadPct: 0.012 },
+  USOIL:    { label: "WTI Oil",   minAtr: 0.15, baseSpreadPct: 0.020 },
+};
+
+function getAssetLabel(a: Asset)       { return ASSET_DEFAULTS[a]?.label ?? a; }
+function getAssetMinAtr(a: Asset)      { return ASSET_DEFAULTS[a]?.minAtr ?? 1; }
+function getAssetBaseSpread(a: Asset)  { return ASSET_DEFAULTS[a]?.baseSpreadPct ?? 0.020; }
 
 // ── Fuente de datos: exclusivamente MT5 Bridge (PrimeXBT) ───────────────────
 // Todos los datos (precios, velas 1m/5m/15m/4H/1D, spread) vienen del bridge.
 // No hay fallback a APIs externas — si el bridge no está activo, el feed queda offline.
 
-const assetLabel: Record<Asset, string> = {
-  BTCUSD: "BTC/USD (100×)", ETHUSD: "ETH/USD (100×)",
-  XAGUSD: "Plata XAG (50×)", XAUUSD: "Oro XAU (100×)",
-};
+// assetLabel reemplazado por getAssetLabel() dinámico
 
 const initialPrices: Record<Asset, number> = {
-  BTCUSD: 63500, ETHUSD: 3250, XAGUSD: 29.4, XAUUSD: 2330,
+  BTCUSD: 95000, ETHUSD: 3200, XAGUSD: 32.0, XAUUSD: 3300,
+  BNBUSD: 600, SOLUSD: 170, XRPUSD: 0.55, LTCUSD: 90,
 };
 
-const leverageByAsset: Record<Asset, number> = {
+// leverageByAsset fallback — usado cuando el bridge aún no entregó el leverage real
+const leverageByAsset: Record<string, number> = {
   BTCUSD: 100, ETHUSD: 100, XAGUSD: 50, XAUUSD: 100,
+  BNBUSD: 50, SOLUSD: 50, XRPUSD: 50, LTCUSD: 50,
+  DOGEUSD: 50, ADAUSD: 50, LINKUSD: 50, AVAXUSD: 50,
+  EURUSD: 500, GBPUSD: 500, USDJPY: 500,
+  US30: 100, US500: 100, USTEC: 100,
+  USOIL: 100, UKOIL: 100,
 };
 // ATR mínimo por activo — evita sizing explosivo en mercados de bajo precio
 // XAGUSD ~32 usd: ATR 1m mínimo realista = 0.05 usd (0.15%)
 // XAUUSD ~3300 usd: ATR 1m mínimo = 1.5 usd
 // BTC ~95000 usd: ATR 1m mínimo = 50 usd
-const minAtrByAsset: Record<Asset, number> = {
-  BTCUSD: 50, ETHUSD: 5, XAGUSD: 0.08, XAUUSD: 2.0,
-};
+// minAtrByAsset reemplazado por getAssetMinAtr() dinámico
 
 const initialLearning: LearningModel = {
   riskScale: 1, confidenceFloor: 52, scalpingTpAtr: 1.35,
@@ -242,13 +276,11 @@ type SpreadSnapshot = {
   component: { base: number; volume: number; session: number };
   sessionLabel: string; isHighVolume: boolean;
 };
-const CFD_BASE_SPREAD_PCT: Record<Asset, number> = {
-  BTCUSD: 0.016, ETHUSD: 0.025, XAUUSD: 0.008, XAGUSD: 0.045,
-};
+// CFD_BASE_SPREAD_PCT reemplazado por getAssetBaseSpread() dinámico
 function calcCFDSpread(asset: Asset, price: number, shock: number): SpreadSnapshot {
   const hourUTC = new Date().getUTCHours();
   const dayUTC  = new Date().getUTCDay();
-  const basePct = CFD_BASE_SPREAD_PCT[asset];
+  const basePct = getAssetBaseSpread(asset);
   // Componente volumen: curva no lineal — spread triplica en picos de volatilidad
   const shockMult  = 1 + Math.pow(Math.max(shock - 0.08, 0) / 0.4, 1.6) * 1.8;
   const volumePct  = basePct * (shockMult - 1);
@@ -672,24 +704,34 @@ async function fetchFromMT5Bridge(bridgeUrl: string, prevPrices: Record<Asset, n
     assets: Record<string, {
       price: number; bid: number; ask: number;
       spread: number; spread_pct: number; digits: number;
+      contract_size: number; leverage: number; margin_initial: number;
       candles: Candle[]; source: string; error?: string;
     }>;
     ts: string;
   };
 
-  const prices    = { ...prevPrices };
-  const candleMap: Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
-  const seriesMap: Partial<Record<Asset, number[]>> = {};
-  const spreadMap: Partial<Record<Asset, { spread: number; spread_pct: number; bid: number; ask: number }>> = {};
+  const prices      = { ...prevPrices };
+  const candleMap: Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+  const seriesMap:   Partial<Record<Asset, number[]>> = {};
+  const spreadMap:   Partial<Record<Asset, { spread: number; spread_pct: number; bid: number; ask: number }>> = {};
+  const leverageMap: Partial<Record<Asset, number>> = {};
   const failedAssets: string[] = [];
+
+  // Iterar sobre TODOS los activos que el bridge entregó (no solo los 4 base)
+  const bridgeAssets = Object.keys(data.assets);
+  // Actualizar el array global de assets con los que están disponibles en el broker
+  if (bridgeAssets.length > 0) {
+    assets = bridgeAssets.filter(a => data.assets[a] && !(data.assets[a] as { error?: string }).error);
+  }
 
   for (const asset of assets) {
     const d = data.assets[asset];
-    if (!d || d.error) { failedAssets.push(asset); continue; }
-    prices[asset]    = d.price;
-    candleMap[asset] = d.candles;
-    seriesMap[asset] = d.candles.map(c => c.c);
-    spreadMap[asset] = { spread: d.spread, spread_pct: d.spread_pct, bid: d.bid, ask: d.ask };
+    if (!d || (d as { error?: string }).error) { failedAssets.push(asset); continue; }
+    prices[asset]      = d.price;
+    candleMap[asset]   = d.candles ?? [];
+    seriesMap[asset]   = (d.candles ?? []).map((c: Candle) => c.c);
+    spreadMap[asset]   = { spread: d.spread, spread_pct: d.spread_pct, bid: d.bid, ask: d.ask };
+    if (d.leverage && d.leverage > 0) leverageMap[asset] = d.leverage;
   }
 
   // Shock de volatilidad por activo (no solo BTC)
@@ -708,7 +750,7 @@ async function fetchFromMT5Bridge(bridgeUrl: string, prevPrices: Record<Asset, n
     ? `⚠ fallo: ${failedAssets.join(", ")}`
     : `MT5/PrimeXBT (${data.ts.slice(11, 19)} UTC)`;
 
-  return { prices, candleMap, seriesMap, shock, shockByAsset, spreadMap, sourceNote, fromBridge: true };
+  return { prices, candleMap, seriesMap, shock, shockByAsset, spreadMap, leverageMap, sourceNote, fromBridge: true };
 }
 
 // fetchRealMarketSnapshot: wrapper MT5-only.
@@ -2216,19 +2258,18 @@ export function App() {
   const [tab, setTab] = useState<Mode>("scalping");
   const [asset, setAsset] = useState<Asset>("BTCUSD");
   const [prices, setPrices] = useState(initialPrices);
-  const [series, setSeries] = useState<Record<Asset, number[]>>({
-    BTCUSD: Array.from({ length: 120 }, () => initialPrices.BTCUSD),
-    ETHUSD: Array.from({ length: 120 }, () => initialPrices.ETHUSD),
-    XAGUSD: Array.from({ length: 120 }, () => initialPrices.XAGUSD),
-    XAUUSD: Array.from({ length: 120 }, () => initialPrices.XAUUSD),
-  });
-  const [candles,    setCandles]    = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
-  const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
-  const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [series, setSeries] = useState<Record<Asset, number[]>>(
+    Object.fromEntries(Object.entries(initialPrices).map(([a, p]) => [a, Array.from({ length: 120 }, () => p)]))
+  );
+  const [candles,    setCandles]    = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
+  const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
+  const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
   // Velas 4H y 1D — exclusivamente para Wyckoff macro (intradía/swing)
-  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
-  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
+  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
   const [mt5SpreadMap, setMt5SpreadMap] = useState<Partial<Record<Asset, {spread: number; spread_pct: number; bid: number; ask: number}>>>({});
+  // Leverage real del broker (leído del bridge) — reemplaza los valores hardcodeados
+  const [mt5LeverageMap, setMt5LeverageMap] = useState<Partial<Record<Asset, number>>>({});
   const [balance, setBalance] = useLocalStorage("tl_balance", 100);
   const [openPositions, setOpenPositions] = useState<Position[]>([]);
   const [realTrades, setRealTrades] = useLocalStorage<ClosedTrade[]>("tl_trades", []);
@@ -2308,7 +2349,7 @@ export function App() {
       if (c.length > 25) {
         setIndicatorsMap(prev => ({ ...prev, [a]: computeIndicators(c) }));
         const indForControl = computeIndicators(c);
-        const atrForControl = Math.max(calcAtrFromSeries(c.map(x=>x.c), 20), minAtrByAsset[a] ?? 1);
+        const atrForControl = Math.max(calcAtrFromSeries(c.map(x=>x.c), 20), getAssetMinAtr(a));
         setMarketControlMap(prev => ({ ...prev, [a]: analyzeMarketControl(c, indForControl, atrForControl) }));
       }
     });
@@ -2364,18 +2405,42 @@ export function App() {
     }
   }
 
+  // spreadByAsset — usa spread REAL del broker (MT5/PrimeXBT) cuando está disponible.
+  // Fallback: spread estimado por calcCFDSpread (sesión + volatilidad) si bridge no entregó datos.
   const spreadByAsset = useMemo(() => {
     const m = {} as Record<Asset, number>;
-    assets.forEach(a => { m[a] = (getSpreadPct(a, volumeShock) / 100) * prices[a]; });
+    assets.forEach(a => {
+      const real = mt5SpreadMap[a];
+      // spread real = bid-ask absoluto directo de MT5
+      m[a] = real ? real.spread : (getSpreadPct(a, volumeShock) / 100) * prices[a];
+    });
     return m;
-  }, [prices, volumeShock]);
+  }, [prices, volumeShock, mt5SpreadMap]);
 
-  // spreadSnapshot: snapshot completo bid/ask/spread por activo para mostrar en UI
+  // spreadSnapshot — para UI: usa datos reales del bridge si existen
   const spreadSnapshot = useMemo(() => {
     const m = {} as Record<Asset, SpreadSnapshot>;
-    assets.forEach(a => { m[a] = calcCFDSpread(a, prices[a], volumeShock); });
+    assets.forEach(a => {
+      const real = mt5SpreadMap[a];
+      if (real) {
+        // Construir SpreadSnapshot desde datos reales del broker
+        const spreadPct = real.spread_pct;
+        const base = spreadPct * 0.6 / 100 * prices[a];  // aprox 60% base, resto sesión+vol
+        m[a] = {
+          spread: real.spread, spreadPct, bid: real.bid, ask: real.ask,
+          component: { base, volume: real.spread * 0.2, session: real.spread * 0.2 },
+          sessionLabel: "MT5", isHighVolume: spreadPct > 0.05,
+        };
+      } else {
+        m[a] = calcCFDSpread(a, prices[a], volumeShock);
+      }
+    });
     return m;
-  }, [prices, volumeShock]);
+  }, [prices, volumeShock, mt5SpreadMap]);
+
+  // getLeverage — leverage real del broker si está disponible, fallback a hardcodeado
+  const getLeverage = (asset: Asset): number =>
+    mt5LeverageMap[asset] ?? leverageByAsset[asset];
 
   const unrealized = useMemo(() => openPositions.reduce((acc, p) => {
     const mark = prices[p.signal.asset];
@@ -2445,7 +2510,7 @@ export function App() {
 
   function getMtfScore(a: Asset, mode: Mode = "intradia") {
     const vals = series[a];
-    const atr = Math.max(calcAtrFromSeries(vals, 20), minAtrByAsset[a] ?? prices[a] * 0.001);
+    const atr = Math.max(calcAtrFromSeries(vals, 20), getAssetMinAtr(a) ?? prices[a] * 0.001);
 
     if (mode === "scalping") {
       // ── MTF REAL: usa velas 5m y 15m si vienen del bridge ──────────────────
@@ -3036,7 +3101,7 @@ Rationale from system: ${signal.rationale}`;
     const minStop = signal.entry * 0.003;
     const stopDistance = Math.max(Math.abs(signal.entry - signal.stopLoss), minStop);
     const size = riskUsd / stopDistance;
-    const marginUsed = (size * signal.entry) / leverageByAsset[signal.asset];
+    const marginUsed = (size * signal.entry) / getLeverage(signal.asset);
     if (marginUsed > equity * 0.65) { pushToast("⚠️ Margen insuficiente", "warning"); return; }
     const multTag = wyckoffMult > 1 ? ` | Wyckoff ×${wyckoffMult.toFixed(2)}` : "";
     setOpenPositions(prev => [...prev, { id: Date.now(), signal, size, marginUsed, openedAt: new Date().toISOString(), peak: signal.entry, trough: signal.entry }]);
@@ -3124,9 +3189,13 @@ Rationale from system: ${signal.rationale}`;
         return next;
       });
 
-      // Spread real del broker (solo disponible desde bridge)
+      // Spread real del broker (bid-ask directo de MT5/PrimeXBT)
       if (payload.spreadMap && Object.keys(payload.spreadMap).length > 0)
         setMt5SpreadMap(payload.spreadMap);
+
+      // Leverage real del broker — si llega, reemplaza los valores hardcodeados
+      if (payload.leverageMap && Object.keys(payload.leverageMap).length > 0)
+        setMt5LeverageMap(payload.leverageMap);
 
       setVolumeShock(payload.shock);
 
@@ -3153,10 +3222,10 @@ Rationale from system: ${signal.rationale}`;
               };
             })
           );
-          const new5m:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
-          const new15m: Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
-          const new4h:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
-          const new1d:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
+          const new5m:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+          const new15m: Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+          const new4h:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+          const new1d:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
           mtfFetches.forEach(r => {
             if (r.status === "fulfilled") {
               new5m[r.value.a]  = r.value.c5m;
@@ -3234,7 +3303,7 @@ Rationale from system: ${signal.rationale}`;
       const size = riskUsd / Math.max(sd, entry * 0.0003);
       const pnl = dir === "LONG" ? (exit - entry) * size : (entry - exit) * size;
       equityBt += pnl;
-      simulated.push({ id: Date.now() + i, asset: sa, mode, direction: dir, entry, exit, pnl, pnlPct: (pnl / Math.max((size * entry) / leverageByAsset[sa], 0.01)) * 100, result, openedAt: new Date(Date.now() - 60000 * 30).toISOString(), closedAt: new Date().toISOString(), source: "backtest" });
+      simulated.push({ id: Date.now() + i, asset: sa, mode, direction: dir, entry, exit, pnl, pnlPct: (pnl / Math.max((size * entry) / getLeverage(sa), 0.01)) * 100, result, openedAt: new Date(Date.now() - 60000 * 30).toISOString(), closedAt: new Date().toISOString(), source: "backtest" });
       returns.push(pnl);
     }
     if (!simulated.length) { pushToast("Sin velas suficientes.", "warning"); return; }
@@ -3329,7 +3398,28 @@ Rationale from system: ${signal.rationale}`;
               <div className="card">
                 <p className="label" style={{ marginBottom: 5 }}>Activo</p>
                 <select className="sel" value={asset} onChange={e => setAsset(e.target.value as Asset)} style={{ width: "100%" }}>
-                  {assets.map(a => <option key={a} value={a}>{assetLabel[a]}</option>)}
+                  {/* Grupos de activos dinámicos según disponibilidad en el broker */}
+                  {(() => {
+                    const crypto = assets.filter(a => ["BTCUSD","ETHUSD","BNBUSD","SOLUSD","XRPUSD","ADAUSD","DOTUSD","LTCUSD","DOGEUSD","AVAXUSD","LINKUSD","MATICUSD"].includes(a));
+                    const metals = assets.filter(a => ["XAUUSD","XAGUSD"].includes(a));
+                    const forex  = assets.filter(a => ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD"].includes(a));
+                    const idx    = assets.filter(a => ["US30","US500","USTEC"].includes(a));
+                    const energy = assets.filter(a => ["USOIL","UKOIL"].includes(a));
+                    const other  = assets.filter(a => !crypto.includes(a) && !metals.includes(a) && !forex.includes(a) && !idx.includes(a) && !energy.includes(a));
+                    const groups = [
+                      { label: "⬡ Crypto", items: crypto },
+                      { label: "◈ Metales", items: metals },
+                      { label: "₿ Forex",  items: forex },
+                      { label: "▲ Índices", items: idx },
+                      { label: "⛽ Energía", items: energy },
+                      { label: "Otros",   items: other },
+                    ].filter(g => g.items.length > 0);
+                    return groups.map(g => (
+                      <optgroup key={g.label} label={g.label}>
+                        {g.items.map(a => <option key={a} value={a}>{getAssetLabel(a)} ({a})</option>)}
+                      </optgroup>
+                    ));
+                  })()}
                 </select>
                 <div style={{ marginTop: 8, fontSize: 11 }}>
                   {(()=>{
@@ -3340,10 +3430,10 @@ Rationale from system: ${signal.rationale}`;
                       ["Bid", ss ? ss.bid.toFixed(dp) : "-"],
                       ["Ask", ss ? ss.ask.toFixed(dp) : "-"],
                       ["Spread $", ss ? `$${ss.spread.toFixed(dp === 2 ? 2 : 4)}` : "-"],
-                      ["Spread %", ss ? `${ss.spreadPct.toFixed(3)}%` : "-"],
+                      ["Spread", ss ? `${ss.spreadPct.toFixed(3)}% ${mt5SpreadMap[asset] ? "📡 real" : "~ estimado"}` : "-"],
                       ["Sesión", ss ? ss.sessionLabel : "-"],
                       ["Vol", ss?.isHighVolume ? "⚠ ALTA" : "Normal"],
-                      ["Leverage", `${leverageByAsset[asset]}×`],
+                      ["Leverage", `${getLeverage(asset)}× ${mt5LeverageMap[asset] ? "📡" : "~"}`],
                     ]];
                   })()[0].map(([k, v]) => (
                     <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
