@@ -183,6 +183,51 @@ const exitLabel: Record<ExitReason, string> = {
 };
 
 // ─── Math helpers ─────────────────────────────────────────────────────────────
+// ─── Math helpers ─────────────────────────────────────────────────────────────
+
+function calcRiskMetrics(balance: number, riskPct: number, entryPrice: number, slPrice: number, tpPrice: number) {
+  // Cálculo de riesgo basado estructuralmente en una cuenta de 100 USD
+  const baseBalance = 100;
+  const riskAmount = baseBalance * (riskPct / 100);
+  
+  const priceRisk = Math.abs(entryPrice - slPrice);
+  const priceReward = Math.abs(tpPrice - entryPrice);
+  
+  // Ventaja estadística (Risk/Reward Ratio)
+  const riskRewardRatio = priceRisk > 0 ? priceReward / priceRisk : 0;
+  
+  // Optimización de expectativa matemática usando el Criterio de Kelly
+  // (Asumiendo un winrate base del 55% para el cálculo de la ventaja)
+  const winRate = 0.55; 
+  const kellyFraction = riskRewardRatio > 0 ? winRate - ((1 - winRate) / riskRewardRatio) : 0;
+  
+  // Probabilidad de ruina proyectada
+  const ruinProb = kellyFraction > 0 ? Math.max(0.1, (1 - kellyFraction) * 100) : 99;
+
+  const positionSize = priceRisk > 0 ? riskAmount / priceRisk : 0;
+  
+  // Seguimiento activo: Niveles clave para Scalping & Trailing Stop
+  const isLong = tpPrice > entryPrice;
+  // Activación rápida del Trailing Stop a un 25% del recorrido hacia el Take Profit
+  const trailTriggerDistance = priceReward * 0.25; 
+  const trailTriggerPrice = isLong 
+    ? entryPrice + trailTriggerDistance 
+    : entryPrice - trailTriggerDistance;
+  
+  return {
+    riskAmount,
+    positionSize,
+    riskRewardRatio,
+    kellyFraction: Math.max(0, kellyFraction),
+    ruinProb,
+    slDistance: priceRisk,
+    tpDistance: priceReward,
+    trailTriggerPrice
+  };
+}
+
+function clamp(v: number, lo: number, hi: number) { return Math.min(hi, Math.max(lo, v)); }
+// ... (resto de tus funciones: money, avg, std, etc.)
 function clamp(v: number, lo: number, hi: number) { return Math.min(hi, Math.max(lo, v)); }
 function money(v: number) { return `$${v.toFixed(2)}`; }
 function avg(arr: number[]) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0; }
@@ -1682,6 +1727,7 @@ function TradeHistory({ trades, showSource = false }: { trades: ClosedTrade[]; s
             {filtered.length === 0 && <tr><td colSpan={8} style={{ padding: "20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Sin operaciones</td></tr>}
           </tbody>
         </table>
+         </div>
       <p style={{ marginTop: 5, fontSize: 10, color: "var(--muted)" }}>{filtered.length} operaciones</p>
     </div>
   );
