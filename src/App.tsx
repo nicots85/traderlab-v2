@@ -1682,6 +1682,7 @@ function TradeHistory({ trades, showSource = false }: { trades: ClosedTrade[]; s
             {filtered.length === 0 && <tr><td colSpan={8} style={{ padding: "20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Sin operaciones</td></tr>}
           </tbody>
         </table>
+          </div>
       <p style={{ marginTop: 5, fontSize: 10, color: "var(--muted)" }}>{filtered.length} operaciones</p>
     </div>
   );
