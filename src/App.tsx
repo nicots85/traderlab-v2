@@ -169,19 +169,9 @@ type AiStatus = "idle" | "testing" | "ok" | "error" | "disabled";
 // ─── Constants ────────────────────────────────────────────────────────────────
 const assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"];
 
-// ── Fuentes de datos por activo ─────────────────────────────────────────────
-// BTC/ETH/Oro → Bybit V5 linear (API pública, category=linear, sin auth)
-// Plata → Binance spot XAGUSDT (precio real ~32 usd; Bybit no tiene XAG perpetuo)
-const bybitLinearSymbol: Partial<Record<Asset, string>> = {
-  BTCUSD: "BTCUSDT",
-  ETHUSD: "ETHUSDT",
-  XAUUSD: "XAUTUSDT",  // XAU tokenizado perpetuo linear — precio real del oro
-};
-// Binance Futures perpetuo para XAG (mismo formato que Bybit klines)
-// fapi.binance.com — precios del contrato perpetuo XAGUSDT, 50x leverage
-const binanceFuturesSymbol: Partial<Record<Asset, string>> = {
-  XAGUSD: "XAGUSDT",   // Plata — Binance Futures perpetuo (Bybit no tiene XAG linear)
-};
+// ── Fuente de datos: exclusivamente MT5 Bridge (PrimeXBT) ───────────────────
+// Todos los datos (precios, velas 1m/5m/15m/4H/1D, spread) vienen del bridge.
+// No hay fallback a APIs externas — si el bridge no está activo, el feed queda offline.
 
 const assetLabel: Record<Asset, string> = {
   BTCUSD: "BTC/USD (100×)", ETHUSD: "ETH/USD (100×)",
@@ -468,26 +458,13 @@ function computeIndicators(candles: Candle[]): Indicators {
   };
 }
 
-// ─── Wyckoff Engine ───────────────────────────────────────────────────────────
+// ─── Wyckoff Engine (solo 4H y 1D — contexto macro para intradía/swing) ────────
+// Wyckoff NO se usa en scalping ni sobre velas 1m sintéticas.
+// El análisis 4H identifica estructura de acumulación/distribución de mediano plazo.
+// El análisis 1D da el sesgo macro (tendencia dominante).
+// Ambos se usan SOLO como contexto informativo en modo intradía — nunca en scalping.
 
-// Construye velas sintéticas agregando N velas de 1m → 1 vela de N minutos
-function buildSyntheticTF(candles: Candle[], factor: number): Candle[] {
-  const out: Candle[] = [];
-  for (let i = 0; i + factor <= candles.length; i += factor) {
-    const slice = candles.slice(i, i + factor);
-    out.push({
-      t: slice[0].t,
-      o: slice[0].o,
-      h: Math.max(...slice.map(c => c.h)),
-      l: Math.min(...slice.map(c => c.l)),
-      c: slice[slice.length - 1].c,
-      v: slice.reduce((a, c) => a + c.v, 0),
-    });
-  }
-  return out;
-}
-
-// Wyckoff en un solo TF (lógica extraída para reusar en MTF)
+// Wyckoff en un solo TF real (4H o 1D)
 function analyzeWyckoffSingle(candles: Candle[]): WyckoffAnalysis {
   const empty: WyckoffAnalysis = {
     phase: "unknown", bias: "neutral", events: [],
@@ -631,50 +608,51 @@ function analyzeWyckoffSingle(candles: Candle[]): WyckoffAnalysis {
   };
 }
 
-// Wyckoff multi-timeframe: analiza 1m, 5m sintético y 15m sintético
-// Devuelve el análisis del TF más alto con señal definida, más un wyckoffMultiplier
-function analyzeWyckoff(candles: Candle[]): WyckoffAnalysis & { wyckoffLotMult: number } {
-  // Construir TFs sintéticos
-  const tf5  = buildSyntheticTF(candles, 5);   // ~5m
-  const tf15 = buildSyntheticTF(candles, 15);  // ~15m
+// analyzeWyckoff: recibe velas 4H y 1D reales (del bridge).
+// Produce análisis de sesgo macro para intradía/swing.
+// wyckoffLotMult solo se activa cuando 4H y 1D confirman el mismo bias en fase avanzada.
+function analyzeWyckoff(
+  candles4h: Candle[],
+  candles1d: Candle[],
+): WyckoffAnalysis & { wyckoffLotMult: number; tf4h: WyckoffAnalysis | null; tf1d: WyckoffAnalysis | null } {
+  const empty: WyckoffAnalysis & { wyckoffLotMult: number; tf4h: null; tf1d: null } = {
+    phase: "unknown", bias: "neutral", events: [],
+    supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
+    narrative: "Sin velas 4H/1D del bridge. Activá MT5 para contexto macro.",
+    wyckoffLotMult: 1.0, tf4h: null, tf1d: null,
+  };
 
-  const w1  = analyzeWyckoffSingle(candles.slice(-80));
-  const w5  = tf5.length  >= 20 ? analyzeWyckoffSingle(tf5.slice(-60))  : null;
-  const w15 = tf15.length >= 10 ? analyzeWyckoffSingle(tf15.slice(-40)) : null;
+  const w4h = candles4h.length >= 40 ? analyzeWyckoffSingle(candles4h.slice(-120)) : null;
+  const w1d = candles1d.length >= 20 ? analyzeWyckoffSingle(candles1d.slice(-60))  : null;
 
-  // Calcular confluencia: cuántos TFs coinciden en bias
-  const biases = [w1.bias, w5?.bias, w15?.bias].filter(Boolean);
-  const bullBiases = biases.filter(b => b === "accumulation").length;
-  const bearBiases = biases.filter(b => b === "distribution").length;
-  const totalTFs = biases.length;
+  if (!w4h && !w1d) return empty;
 
-  // TF dominante: usar el más alto con señal definida
-  const dominant = (w15?.phase !== "unknown" ? w15 : w5?.phase !== "unknown" ? w5 : w1) ?? w1;
+  // TF dominante: 1D si tiene señal, sino 4H
+  const dominant = (w1d?.phase !== "unknown" ? w1d : w4h) ?? (w4h ?? empty);
 
-  // Multiplicador de lote basado en confluencia Wyckoff MTF
-  // Solo activo en intradía cuando 2+ TFs coinciden en fase avanzada (C, D, E)
+  // Confluencia 4H + 1D en mismo bias
+  const bothBull = w4h?.bias === "accumulation" && w1d?.bias === "accumulation";
+  const bothBear = w4h?.bias === "distribution"  && w1d?.bias === "distribution";
   const advancedPhases = new Set<WyckoffPhase>(["C", "D", "E"]);
-  const confluenceScore = bullBiases >= 2 ? bullBiases : bearBiases >= 2 ? bearBiases : 0;
   const isAdvanced = advancedPhases.has(dominant.phase);
-  const hasSpringOrUtad = dominant.events.some(e => ["Spring", "UTAD", "SOS", "SOW"].includes(e.label));
+  const hasKeyEvent = dominant.events.some(e => ["Spring", "UTAD", "SOS", "SOW", "LPS"].includes(e.label));
 
   let wyckoffLotMult = 1.0;
-  if (confluenceScore >= 2 && isAdvanced && hasSpringOrUtad) {
-    // Confluencia fuerte en fase avanzada con evento clave: hasta 1.5×
-    wyckoffLotMult = confluenceScore === 3 ? 1.5 : 1.3;
-  } else if (confluenceScore >= 2) {
-    wyckoffLotMult = 1.15;
+  if ((bothBull || bothBear) && isAdvanced && hasKeyEvent) {
+    wyckoffLotMult = 1.35; // confluencia real 4H+1D en fase clave
+  } else if ((bothBull || bothBear) && isAdvanced) {
+    wyckoffLotMult = 1.18;
   }
 
-  // Construir narrative enriquecida con info MTF
-  const tfLabel = (w: WyckoffAnalysis | null, name: string) =>
-    w ? `${name}: ${w.bias === "neutral" ? "neutral" : w.bias === "accumulation" ? "acum" : "dist"} F${w.phase}` : "";
-  const mtfNarrative = [tfLabel(w15, "15m"), tfLabel(w5, "5m"), tfLabel(w1, "1m")].filter(Boolean).join(" | ");
+  const tfStr = (w: WyckoffAnalysis | null, name: string) =>
+    w ? `${name}: ${w.bias === "neutral" ? "neutral" : w.bias === "accumulation" ? "Acum" : "Dist"} F${w.phase}` : `${name}: sin datos`;
 
   return {
     ...dominant,
-    narrative: `${dominant.narrative} [${mtfNarrative}] Mult lote: ${wyckoffLotMult.toFixed(2)}×`,
+    narrative: `${dominant.narrative} | ${tfStr(w1d, "1D")} · ${tfStr(w4h, "4H")} | Mult: ${wyckoffLotMult.toFixed(2)}×`,
     wyckoffLotMult,
+    tf4h: w4h,
+    tf1d: w1d,
   };
 }
 
@@ -685,107 +663,7 @@ async function fetchJson<T>(url: string): Promise<T> {
   return r.json() as Promise<T>;
 }
 
-type BybitKlineResp = { retCode: number; result: { list: string[][] } };
-type BybitTickerResp = { retCode: number; result: { list: Array<{ lastPrice: string }> } };
-type BinanceKline = [number, string, string, string, string, string];
-
-async function fetchBybitKlines(symbol: string, limit = 160): Promise<Candle[]> {
-  const data = await fetchJson<BybitKlineResp>(
-    `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=1&limit=${limit}`
-  );
-  if (data.retCode !== 0) throw new Error(`Bybit ${data.retCode}`);
-  return data.result.list.reverse().map(b => ({
-    t: Number(b[0]), o: parseFloat(b[1]), h: parseFloat(b[2]),
-    l: parseFloat(b[3]), c: parseFloat(b[4]), v: parseFloat(b[5]),
-  }));
-}
-
-async function fetchBybitTicker(symbol: string): Promise<number> {
-  const data = await fetchJson<BybitTickerResp>(
-    `https://api.bybit.com/v5/market/tickers?category=linear&symbol=${symbol}`
-  );
-  if (data.retCode !== 0) throw new Error(`Bybit ${data.retCode}`);
-  const p = parseFloat(data.result.list[0]?.lastPrice ?? "0");
-  if (!p) throw new Error(`Precio 0`);
-  return p;
-}
-
-async function fetchBinanceKlines(symbol: string, limit = 160): Promise<Candle[]> {
-  const data = await fetchJson<BinanceKline[]>(
-    `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1m&limit=${limit}`
-  );
-  return data.map(b => ({
-    t: b[0], o: parseFloat(b[1]), h: parseFloat(b[2]),
-    l: parseFloat(b[3]), c: parseFloat(b[4]), v: parseFloat(b[5]),
-  }));
-}
-
-async function fetchBinanceTicker(symbol: string): Promise<number> {
-  const data = await fetchJson<{ price: string }>(
-    `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
-  );
-  const p = parseFloat(data.price);
-  if (!p) throw new Error(`Precio 0`);
-  return p;
-}
-
-// ── Bybit V5 linear: ticker en tiempo real ──────────────────────────────────
-// Usamos /v5/market/tickers (category=linear) — público, sin auth
-// Devuelve bid/ask + lastPrice en tiempo real
-async function fetchBybitTickerV5(symbol: string): Promise<number> {
-  const data = await fetchJson<BybitTickerResp>(
-    `https://api.bybit.com/v5/market/tickers?category=linear&symbol=${symbol}`
-  );
-  if (data.retCode !== 0) throw new Error(`Bybit ticker ${data.retCode}`);
-  const item = data.result.list[0];
-  if (!item) throw new Error(`Sin datos para ${symbol}`);
-  // Usamos mid = (bid + ask) / 2 si disponible, sino lastPrice
-  const last = parseFloat(item.lastPrice);
-  if (!last) throw new Error(`Precio 0 para ${symbol}`);
-  return last;
-}
-
-// ── Bybit V5 linear: klines con concurrencia y reverse correcto ─────────────
-async function fetchBybitKlinesV5(symbol: string, limit = 200): Promise<Candle[]> {
-  const data = await fetchJson<BybitKlineResp>(
-    `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=1&limit=${limit}`
-  );
-  if (data.retCode !== 0) throw new Error(`Bybit kline ${data.retCode}`);
-  // Bybit devuelve [reciente → antigua] — reverse() para tener [antigua → reciente]
-  return data.result.list.reverse().map(b => ({
-    t: Number(b[0]),
-    o: parseFloat(b[1]),
-    h: parseFloat(b[2]),
-    l: parseFloat(b[3]),
-    c: parseFloat(b[4]),
-    v: parseFloat(b[5]),
-  }));
-}
-
-// ── Binance Futures (fapi) para XAG perpetuo ─────────────────────────────────
-async function fetchBinanceFuturesTicker(symbol: string): Promise<number> {
-  const data = await fetchJson<{ symbol: string; lastPrice: string; bidPrice: string; askPrice: string }>(
-    `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`
-  );
-  const p = parseFloat(data.lastPrice ?? (data as unknown as { price: string }).price ?? "0");
-  if (!p) throw new Error(`Binance Futures precio 0 para ${symbol}`);
-  return p;
-}
-
-async function fetchBinanceFuturesKlines(symbol: string, limit = 200): Promise<Candle[]> {
-  // fapi klines ya vienen en orden cronológico [antigua → reciente] — no necesita reverse()
-  const data = await fetchJson<Array<[number, string, string, string, string, string]>>(
-    `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=1m&limit=${limit}`
-  );
-  return data.map(b => ({
-    t: b[0], o: parseFloat(b[1]), h: parseFloat(b[2]),
-    l: parseFloat(b[3]), c: parseFloat(b[4]), v: parseFloat(b[5]),
-  }));
-}
-
-// ── Fuente de datos: MT5 Bridge (PrimeXBT) con fallback a Bybit/Binance ──────
-// Cuando el bridge está activo, UNA sola llamada /snapshot reemplaza todo.
-// Si el bridge no está disponible, cae al sistema anterior (Bybit/Binance).
+// ── MT5 Bridge: única fuente de datos ────────────────────────────────────────
 
 async function fetchFromMT5Bridge(bridgeUrl: string, prevPrices: Record<Asset, number>) {
   const r = await fetch(`${bridgeUrl}/snapshot`, { signal: AbortSignal.timeout(6000) });
@@ -833,73 +711,17 @@ async function fetchFromMT5Bridge(bridgeUrl: string, prevPrices: Record<Asset, n
   return { prices, candleMap, seriesMap, shock, shockByAsset, spreadMap, sourceNote, fromBridge: true };
 }
 
+// fetchRealMarketSnapshot: wrapper MT5-only.
+// Sin bridge activo → error explícito, no hay fallback a APIs externas.
 async function fetchRealMarketSnapshot(
   prevPrices: Record<Asset, number>,
   bridgeUrl?: string,
   useBridge?: boolean,
 ) {
-  // Si el bridge está habilitado y conectado → datos de MT5/PrimeXBT
-  if (useBridge && bridgeUrl) {
-    try {
-      return await fetchFromMT5Bridge(bridgeUrl, prevPrices);
-    } catch (e) {
-      console.warn("[TraderLab] Bridge falló, usando Bybit/Binance como fallback:", e);
-    }
+  if (!useBridge || !bridgeUrl) {
+    throw new Error("MT5 Bridge requerido. Activá y conectá el bridge en Configuración.");
   }
-
-  // Fallback: Bybit + Binance (comportamiento original)
-  const results = await Promise.allSettled(
-    assets.map(async (asset) => {
-      const bybitSym   = bybitLinearSymbol[asset];
-      const binanceSym = binanceFuturesSymbol[asset];
-      if (bybitSym) {
-        const [price, candles] = await Promise.all([
-          fetchBybitTickerV5(bybitSym),
-          fetchBybitKlinesV5(bybitSym, 200),
-        ]);
-        return { asset, price, candles, source: "Bybit" };
-      } else if (binanceSym) {
-        const [price, candles] = await Promise.all([
-          fetchBinanceFuturesTicker(binanceSym),
-          fetchBinanceFuturesKlines(binanceSym, 200),
-        ]);
-        return { asset, price, candles, source: "Binance Futures" };
-      } else {
-        throw new Error(`Sin fuente para ${asset}`);
-      }
-    })
-  );
-
-  const prices    = { ...prevPrices };
-  const candleMap: Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
-  const seriesMap: Partial<Record<Asset, number[]>> = {};
-  const failedAssets: string[] = [];
-
-  results.forEach((r, i) => {
-    const asset = assets[i];
-    if (r.status === "fulfilled") {
-      prices[asset]    = r.value.price;
-      candleMap[asset] = r.value.candles;
-      seriesMap[asset] = r.value.candles.map(c => c.c);
-    } else {
-      failedAssets.push(asset);
-    }
-  });
-
-  const btcSeries = seriesMap.BTCUSD ?? [];
-  let shock = 0.28;
-  if (btcSeries.length > 10) {
-    const absRet = avg(btcSeries.slice(1).map((v, i) => Math.abs((v - btcSeries[i]) / Math.max(btcSeries[i], 1e-9))));
-    shock = clamp(absRet * 220, 0.08, 1.25);
-  }
-
-  return {
-    prices, candleMap, seriesMap, shock,
-    shockByAsset: {} as Partial<Record<Asset, number>>,
-    spreadMap: {} as Partial<Record<Asset, { spread: number; spread_pct: number; bid: number; ask: number }>>,
-    sourceNote: failedAssets.length > 0 ? `⚠ fallo: ${failedAssets.join(", ")}` : `Bybit V5 · Binance Futures`,
-    fromBridge: false,
-  };
+  return await fetchFromMT5Bridge(bridgeUrl, prevPrices);
 }
 
 // ─── Candlestick Chart with Indicators & Wyckoff ─────────────────────────────
@@ -2403,6 +2225,9 @@ export function App() {
   const [candles,    setCandles]    = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
   const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
   const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  // Velas 4H y 1D — exclusivamente para Wyckoff macro (intradía/swing)
+  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
   const [mt5SpreadMap, setMt5SpreadMap] = useState<Partial<Record<Asset, {spread: number; spread_pct: number; bid: number; ask: number}>>>({});
   const [balance, setBalance] = useLocalStorage("tl_balance", 100);
   const [openPositions, setOpenPositions] = useState<Position[]>([]);
@@ -2476,19 +2301,42 @@ export function App() {
     else if (!usingGroq) setAiStatus("disabled");
   }, [usingGroq, apiKey]);
 
-  // Recalcular indicadores y Wyckoff al cambiar velas
+  // Recalcular indicadores y control de mercado al cambiar velas 1m
   useEffect(() => {
     assets.forEach(a => {
       const c = candles[a];
       if (c.length > 25) {
         setIndicatorsMap(prev => ({ ...prev, [a]: computeIndicators(c) }));
-        setWyckoffMap(prev => ({ ...prev, [a]: analyzeWyckoff(c) }));
         const indForControl = computeIndicators(c);
         const atrForControl = Math.max(calcAtrFromSeries(c.map(x=>x.c), 20), minAtrByAsset[a] ?? 1);
         setMarketControlMap(prev => ({ ...prev, [a]: analyzeMarketControl(c, indForControl, atrForControl) }));
       }
     });
   }, [candles]);
+
+  // Recalcular Wyckoff macro solo cuando cambian velas 4H o 1D reales del bridge
+  // Solo para modo intradía — no afecta scalping
+  useEffect(() => {
+    assets.forEach(a => {
+      const c4h = candles4h[a];
+      const c1d = candles1d[a];
+      // Requiere al menos datos mínimos en alguno de los dos TFs
+      if (c4h.length >= 20 || c1d.length >= 10) {
+        setWyckoffMap(prev => ({ ...prev, [a]: analyzeWyckoff(c4h, c1d) }));
+      } else {
+        // Sin datos reales: Wyckoff neutral hasta que el bridge entregue 4H/1D
+        setWyckoffMap(prev => ({
+          ...prev,
+          [a]: {
+            phase: "unknown", bias: "neutral", events: [],
+            supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
+            narrative: "Esperando velas 4H/1D del bridge MT5...",
+            wyckoffLotMult: 1.0, tf4h: null, tf1d: null,
+          },
+        }));
+      }
+    });
+  }, [candles4h, candles1d]);
 
   function pushToast(msg: string, type: Toast["type"] = "info") {
     const id = ++toastIdRef.current;
@@ -2656,11 +2504,17 @@ export function App() {
     const spread = (spreadPct / 100) * price;
     const mtf = getMtfScore(currentAsset, currentMode);
     const ind = indicatorsMap[currentAsset] ?? computeIndicators(candles[currentAsset]);
+    // Wyckoff: solo en intradía, solo del wyckoffMap (calculado desde velas 4H/1D reales)
+    // En scalping: se omite completamente — Order Flow es la autoridad
     const wyckoff = currentMode === "intradia"
-      ? (wyckoffMap[currentAsset] ?? analyzeWyckoff(candles[currentAsset]))
+      ? (wyckoffMap[currentAsset] ?? {
+          bias: "neutral" as const, phase: "unknown" as const, events: [],
+          supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
+          narrative: "Sin datos 4H/1D del bridge.", wyckoffLotMult: 1.0, tf4h: null, tf1d: null,
+        })
       : { bias: "neutral" as const, phase: "unknown" as const, events: [],
           supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
-          narrative: "", wyckoffLotMult: 1.0 };
+          narrative: "N/A (scalping)", wyckoffLotMult: 1.0, tf4h: null, tf1d: null };
     const lrn = learningRef.current;
 
     // ── Scalping: dirección determinada por control de mercado ────────────────
@@ -3246,9 +3100,17 @@ Rationale from system: ${signal.rationale}`;
 
   async function syncRealData() {
     setIsSyncing(true);
+    // Bridge requerido — sin él no hay datos
+    const usingBridge = mt5Enabled && mt5Status === "connected";
+    if (!usingBridge) {
+      setFeedStatus("⚠ MT5 Bridge no activo — conectá el bridge en Configuración");
+      setLiveReady(false);
+      setIsSyncing(false);
+      pushToast("Bridge MT5 desconectado. Activá y conectá el bridge para recibir datos.", "warning");
+      return;
+    }
     try {
-      const usingBridge = mt5Enabled && mt5Status === "connected";
-      const payload = await fetchRealMarketSnapshot(prevPricesRef.current, mt5Url, usingBridge);
+      const payload = await fetchRealMarketSnapshot(prevPricesRef.current, mt5Url, true);
 
       setPrices(payload.prices);
       setSeries(prev => {
@@ -3268,37 +3130,53 @@ Rationale from system: ${signal.rationale}`;
 
       setVolumeShock(payload.shock);
 
-      // Si el bridge está activo → fetch adicional de velas 5m y 15m reales
-      // para getMtfScore con timeframes reales (no sintéticos)
+      // Fetch MTF adicional: 5m/15m para ejecución scalping + 4H/1D para Wyckoff macro
       if (usingBridge) {
         try {
           const mtfFetches = await Promise.allSettled(
             assets.map(async (a) => {
               const r = await fetch(
-                `${mt5Url}/candles_mtf/${a}?limit_1m=5&limit_5m=70&limit_15m=55`,
-                { signal: AbortSignal.timeout(6000) }
+                `${mt5Url}/candles_mtf/${a}?limit_5m=70&limit_15m=55&limit_4h=150&limit_1d=90`,
+                { signal: AbortSignal.timeout(8000) }
               );
               if (!r.ok) throw new Error(`HTTP ${r.status}`);
-              const d = await r.json() as { candles_5m: Candle[]; candles_15m: Candle[] };
-              return { a, c5m: d.candles_5m ?? [], c15m: d.candles_15m ?? [] };
+              const d = await r.json() as {
+                candles_5m: Candle[]; candles_15m: Candle[];
+                candles_4h: Candle[]; candles_1d: Candle[];
+              };
+              return {
+                a,
+                c5m:  d.candles_5m  ?? [],
+                c15m: d.candles_15m ?? [],
+                c4h:  d.candles_4h  ?? [],
+                c1d:  d.candles_1d  ?? [],
+              };
             })
           );
           const new5m:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
           const new15m: Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
+          const new4h:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
+          const new1d:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
           mtfFetches.forEach(r => {
             if (r.status === "fulfilled") {
               new5m[r.value.a]  = r.value.c5m;
               new15m[r.value.a] = r.value.c15m;
+              new4h[r.value.a]  = r.value.c4h;
+              new1d[r.value.a]  = r.value.c1d;
             }
           });
           setCandles5m(new5m);
           setCandles15m(new15m);
-        } catch { /* fallback silencioso → getMtfScore usa sintético */ }
+          setCandles4h(new4h);
+          setCandles1d(new1d);
+        } catch (e) {
+          console.warn("[TraderLab] MTF fetch falló:", e);
+          // Sin velas MTF — Wyckoff queda en neutral, scalping usa sintético
+        }
       }
 
       const timeStr = new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-      const srcIcon = payload.fromBridge ? "📡" : "🌐";
-      setFeedStatus(`${srcIcon} ${timeStr} — ${payload.sourceNote}`);
+      setFeedStatus(`📡 ${timeStr} — ${payload.sourceNote}`);
       setLiveReady(true);
     } catch (e) {
       setFeedStatus("❌ Feed no disponible");
@@ -3481,7 +3359,7 @@ Rationale from system: ${signal.rationale}`;
               </div>
               <div className="card" style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                 <button className="btn-primary" onClick={() => createSignalAndExecute(tab, asset)}>⚡ Generar + ejecutar señal</button>
-                <button className="btn-secondary" onClick={() => void syncRealData()} disabled={isSyncing}>{isSyncing ? "⟳ Sincronizando..." : "↻ Sync Bybit / Binance"}</button>
+                <button className="btn-secondary" onClick={() => void syncRealData()} disabled={isSyncing}>{isSyncing ? "⟳ Sincronizando..." : "↻ Sync MT5 Bridge"}</button>
                 <button className="btn-secondary" onClick={() => void runAutoScan()}>🔍 Escanear todos</button>
               </div>
               <div className="card">
@@ -3520,7 +3398,7 @@ Rationale from system: ${signal.rationale}`;
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
                   <div>
                     <h2 style={{ fontWeight: 800, fontSize: 15, marginBottom: 1 }}>{asset}</h2>
-                    <p style={{ fontSize: 11, color: "var(--muted)" }}>{tab === "intradia" ? "Multi-timeframe confluence" : "Scalping execution"} · Bybit{["XAGUSD", "XAUUSD"].includes(asset) ? "/Binance" : ""}</p>
+                    <p style={{ fontSize: 11, color: "var(--muted)" }}>{tab === "intradia" ? "Intradía / Swing · Wyckoff 4H+1D" : "Scalping · Order Flow 1m"} · MT5 / PrimeXBT</p>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <button onClick={() => setShowIndicators(p => !p)} style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid rgba(255,255,255,0.1)", background: showIndicators ? "rgba(99,102,241,0.15)" : "transparent", color: showIndicators ? "#a5b4fc" : "var(--muted)", cursor: "pointer", fontWeight: 600 }}>
@@ -3567,11 +3445,27 @@ Rationale from system: ${signal.rationale}`;
                 </div>
               )}
 
-              {/* Wyckoff */}
-              {currentWyckoff && (
+              {/* Wyckoff — solo intradía, contexto macro 4H+1D */}
+              {tab === "intradia" && currentWyckoff && (
                 <div className="card" style={{ padding: "10px 12px" }}>
-                  <p className="label" style={{ marginBottom: 6 }}>Análisis Wyckoff</p>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <p className="label" style={{ margin: 0 }}>
+                      <TechTip term="Wyckoff">Wyckoff</TechTip> — Contexto macro
+                    </p>
+                    <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, background: "rgba(99,102,241,0.15)", color: "#a5b4fc", fontWeight: 700 }}>4H + 1D</span>
+                    {(currentWyckoff as WyckoffAnalysis & { tf4h?: unknown; tf1d?: unknown }).tf4h === null &&
+                     (currentWyckoff as WyckoffAnalysis & { tf4h?: unknown; tf1d?: unknown }).tf1d === null && (
+                      <span style={{ fontSize: 10, color: "#f59e0b" }}>⚠ Sin datos bridge</span>
+                    )}
+                  </div>
                   <WyckoffPanel wyckoff={currentWyckoff} />
+                </div>
+              )}
+              {tab === "scalping" && (
+                <div className="card" style={{ padding: "10px 12px", opacity: 0.55 }}>
+                  <p style={{ fontSize: 11, color: "var(--muted)", textAlign: "center" }}>
+                    🔍 Wyckoff no aplica en scalping — el Order Flow es la autoridad en 1m
+                  </p>
                 </div>
               )}
 
@@ -3634,19 +3528,43 @@ Rationale from system: ${signal.rationale}`;
                 </div>
               </div>
 
-              {/* Wyckoff multi-activo */}
+              {/* Wyckoff macro — todos los activos (solo intradía) */}
               <div className="card">
-                <p style={{ fontWeight: 700, marginBottom: 8, fontSize: 13 }}>Wyckoff — todos los activos</p>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <p style={{ fontWeight: 700, fontSize: 13, margin: 0 }}>
+                    <TechTip term="Wyckoff">Wyckoff</TechTip> macro
+                  </p>
+                  <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 8, background: "rgba(99,102,241,0.15)", color: "#a5b4fc", fontWeight: 600 }}>4H · 1D</span>
+                </div>
                 {assets.map(a => {
-                  const w = wyckoffMap[a];
+                  const w = wyckoffMap[a] as (WyckoffAnalysis & { tf4h?: WyckoffAnalysis | null; tf1d?: WyckoffAnalysis | null }) | undefined;
                   if (!w) return <div key={a} style={{ fontSize: 10, color: "var(--muted)", padding: "3px 0" }}>{a}: sin datos</div>;
                   const col = w.bias === "accumulation" ? "#10b981" : w.bias === "distribution" ? "#ef4444" : "#6b7280";
+                  const has4h = w.tf4h && w.tf4h.phase !== "unknown";
+                  const has1d = w.tf1d && w.tf1d.phase !== "unknown";
                   return (
-                    <div key={a} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-                      <span style={{ fontSize: 11, fontWeight: 700, minWidth: 52, color: "var(--text)" }}>{a}</span>
-                      <span style={{ fontSize: 10, color: col, fontWeight: 700 }}>{w.bias === "neutral" ? "Neutral" : w.bias === "accumulation" ? "Acum." : "Dist."}</span>
-                      {w.phase !== "unknown" && <span style={{ fontSize: 11, padding: "1px 5px", borderRadius: 4, background: `${col}20`, color: col, fontWeight: 700 }}>F{w.phase}</span>}
-                      <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>{w.events.at(-1)?.label ?? "–"}</span>
+                    <div key={a} style={{ padding: "6px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, minWidth: 56, color: "var(--text)" }}>{a}</span>
+                        <span style={{ fontSize: 10, color: col, fontWeight: 700 }}>
+                          {w.bias === "neutral" ? "Neutral" : w.bias === "accumulation" ? "Acum." : "Dist."}
+                        </span>
+                        {w.phase !== "unknown" && (
+                          <span style={{ fontSize: 11, padding: "1px 5px", borderRadius: 4, background: `${col}20`, color: col, fontWeight: 700 }}>F{w.phase}</span>
+                        )}
+                        <span style={{ fontSize: 10, color: "var(--muted)", marginLeft: "auto" }}>
+                          {w.events.at(-1)?.label ?? "–"}
+                        </span>
+                      </div>
+                      {/* Sub-row: 4H y 1D */}
+                      <div style={{ display: "flex", gap: 10, marginTop: 3, fontSize: 9.5, color: "var(--muted)" }}>
+                        <span style={{ color: has4h ? col : "var(--muted)" }}>
+                          4H: {has4h ? `${w.tf4h!.bias === "accumulation" ? "Acum" : w.tf4h!.bias === "distribution" ? "Dist" : "Neu"} F${w.tf4h!.phase}` : "sin datos"}
+                        </span>
+                        <span style={{ color: has1d ? col : "var(--muted)" }}>
+                          1D: {has1d ? `${w.tf1d!.bias === "accumulation" ? "Acum" : w.tf1d!.bias === "distribution" ? "Dist" : "Neu"} F${w.tf1d!.phase}` : "sin datos"}
+                        </span>
+                      </div>
                     </div>
                   );
                 })}
@@ -3658,9 +3576,9 @@ Rationale from system: ${signal.rationale}`;
               </div>
               <div className="card" style={{ fontSize: 10.5, color: "var(--muted)", lineHeight: 1.8 }}>
                 <p style={{ fontWeight: 700, color: "var(--text)", marginBottom: 3 }}>Fuentes</p>
-                <p>BTC/ETH: Bybit v5 (linear)</p>
-                <p>XAUTUSDT (oro) · PAXGUSDT (plata)</p>
-                <p>Velas 1m · Wyckoff 120 velas</p>
+                <p>Fuente: MT5 Bridge / PrimeXBT</p>
+                <p>Velas 1m/5m/15m/4H/1D en tiempo real</p>
+                <p>Wyckoff: velas 4H + 1D (contexto macro)</p>
                 <p>Trail: {learning.atrTrailMult.toFixed(2)} ATR</p>
               </div>
             </div>
@@ -3693,7 +3611,7 @@ Rationale from system: ${signal.rationale}`;
             <div className="card">
               <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>📡 Fuentes de datos</p>
               <div style={{ fontSize: 12, lineHeight: 2.1 }}>
-              <p><strong>Todos los activos</strong> → Bybit V5 linear (perpetuos, API pública)</p>
+              <p><strong>Todos los activos</strong> → MT5 Bridge / PrimeXBT (spread real, sin API externas)</p>
               <p>BTCUSDT · ETHUSDT · XAUTUSDT (oro) · PAXGUSDT (plata)</p>
               <p style={{fontSize:10,color:"var(--muted)"}}>Sin API key requerida · Promise.all paralelo · reverse() aplicado</p>
                 <p><strong>Estado:</strong> <span style={{ color: liveReady ? "#10b981" : "#ef4444" }}>{feedStatus}</span></p>
