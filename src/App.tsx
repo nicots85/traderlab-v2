@@ -2505,7 +2505,7 @@ export function App() {
       ? (wyckoffMap[currentAsset] ?? analyzeWyckoff(candles[currentAsset]))
       : { bias: "neutral" as const, phase: "unknown" as const, events: [],
           supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
-          narrative: "", wyckoffLotMult: 1.0 };
+          narrative: of ? of.narrative : "", wyckoffLotMult: 1.0 };
     const lrn = learningRef.current;
 
     // ── Scalping: dirección determinada por control de mercado ────────────────
@@ -2697,10 +2697,17 @@ export function App() {
     const confirmCtx = bestConfirm ? `Confirmación: ${bestConfirm.name} (${(bestConfirm.strength * 100).toFixed(0)}%)` : "Sin confirmación adicional";
     const wyckoffCtx = currentMode === "intradia" && wyckoff.bias !== "neutral"
       ? ` | Wyckoff ${wyckoff.bias === "accumulation" ? "Acum" : "Dist"} F${wyckoff.phase} mult×${wyckoffMult.toFixed(2)}` : "";
+    // En scalping: el rationale comienza con el control de mercado (quién manda)
+    const controlLabel = (of && currentMode === "scalping")
+      ? (of.control === "bulls" ? "🟢 TOROS" : of.control === "bears" ? "🔴 OSOS" : "⚪ DISPUTADO")
+      : "";
+    const cvdArrow = of ? (of.cvd.trend === "bullish" ? "↑" : of.cvd.trend === "bearish" ? "↓" : "→") : "";
     const mcCtx = (of && currentMode === "scalping")
-      ? ` | ${of.narrative}`
+      ? ` | OF: ${controlLabel} score=${of.controlScore.toFixed(0)} CVD${cvdArrow} FP=${of.footprintScore.toFixed(0)} Vol=${price>of.profile.poc?"▲POC":"▼POC"}`
       : (mc ? ` | Control: ${mc.dominantSide} (${mc.score.toFixed(0)}) CVD${mc.cvdSlope>=0?"↑":"↓"} POC:${mc.poc.toFixed(2)}` : "");
-    const rationale = `${direction} | ${mtfCtx} | ${confirmCtx}${wyckoffCtx}${mcCtx}`;
+    const rationale = currentMode === "scalping"
+      ? `${controlLabel} ${direction} | CVD${cvdArrow} FP:${of?.footprintScore.toFixed(0)??"?"} | ${confirmCtx}${mcCtx}`
+      : `${direction} | ${mtfCtx} | ${confirmCtx}${wyckoffCtx}${mcCtx}`;
 
     return {
       asset: currentAsset, mode: currentMode, direction, entry, stopLoss, takeProfit,
@@ -3476,3 +3483,4 @@ Rationale from system: ${signal.rationale}`;
     </div>
   );
 }
+      
