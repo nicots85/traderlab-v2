@@ -1,44 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 
-function calcRiskMetrics(
-  balance: number, 
-  riskPct: number, 
-  entryPrice: number, 
-  slPrice: number, 
-  tpPrice: number
-) {
-  // Se asegura una base de cálculo de 100 USD si el balance no es válido
-  const effectiveBalance = balance > 0 ? balance : 100; 
-  const riskAmount = effectiveBalance * (riskPct / 100);
-  
-  // Distancias de riesgo y beneficio
-  const priceRisk = Math.abs(entryPrice - slPrice);
-  const priceReward = Math.abs(tpPrice - entryPrice);
-  
-  // Expectativa matemática y ventaja estadística (Risk/Reward Ratio)
-  const riskRewardRatio = priceRisk > 0 ? priceReward / priceRisk : 0;
-  
-  // Tamaño de la posición según el riesgo asumido
-  const positionSize = priceRisk > 0 ? riskAmount / priceRisk : 0;
-  
-  // Niveles clave para el seguimiento activo (Scalping & Trailing Stop)
-  // Define a qué distancia de recorrido a favor se debería activar el Trailing Stop
-  const isLong = tpPrice > entryPrice;
-  const trailTriggerDistance = priceReward * 0.3; // Se activa al 30% del camino al TP
-  const trailTriggerPrice = isLong 
-    ? entryPrice + trailTriggerDistance 
-    : entryPrice - trailTriggerDistance;
-  
-  return {
-    riskAmount,
-    positionSize,
-    riskRewardRatio,
-    slDistance: priceRisk,
-    tpDistance: priceReward,
-    trailTriggerPrice // Nivel para comenzar a ajustar el SL dinámicamente
-  };
-}
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Asset = "BTCUSD" | "ETHUSD" | "XAGUSD" | "XAUUSD";
 type Mode = "scalping" | "intradia";
