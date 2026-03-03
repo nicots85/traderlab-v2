@@ -58,6 +58,36 @@ type OrderFlowScore = {
   setupStrength: number;   // 0-1, fuerza del setup
   narrative: string;       // descripción en español
 };
+// ─── MarketControl (legacy, mantenido para compatibilidad con analyzeMarketControl) ───
+type MarketControl = {
+  score: number;         // -100 a +100
+  bias: "bull" | "bear" | "neutral";
+  cvd: number;
+  cvdSlope: number;
+  poc: number;
+  vah: number;
+  val: number;
+  vwapDev: number;
+  bidAskImbalance: number;
+  dominantSide: "buyers" | "sellers" | "balanced";
+};
+
+// ─── ScalpingRisk (gestión de riesgo diario y ruina) ─────────────────────────
+type ScalpingRisk = {
+  dailyPnl: number;
+  dailyTrades: number;
+  ruinRisk: number;
+  ruinProb: number;
+  mathExpectancy: number;
+  kellyFraction: number;
+  kellyWR: number;
+  kellyRR: number;
+  blocked: boolean;
+  blockReason: string;
+  sizeMultiplier: number;
+  streak: number;
+};
+
 type AppTab = "trading" | "backtest" | "configuracion";
 
 // ── Wyckoff ──
@@ -413,12 +443,13 @@ function computeIndicators(candles: Candle[]): Indicators {
     };
   }
   const closes = candles.map(c => c.c);
+  const lastClose = closes[closes.length - 1] ?? 0;
   const rsiArr = calcRSI(closes);
   const rsi = rsiArr[rsiArr.length - 1];
   const rsiDivergence = detectRsiDivergence(closes, rsiArr);
   const { k: stochK, d: stochD } = calcStochastic(candles, 14, 3);
   const mas = calcMAs(closes);
-  const ma5 = closes.length >= 5 ? avg(closes.slice(-5)) : p;
+  const ma5 = closes.length >= 5 ? avg(closes.slice(-5)) : lastClose;
   const vwapData = calcVWAP(candles);
   const bb = calcBollinger(closes);
   const keltner = calcKeltner(candles);
@@ -1682,6 +1713,7 @@ function TradeHistory({ trades, showSource = false }: { trades: ClosedTrade[]; s
             {filtered.length === 0 && <tr><td colSpan={8} style={{ padding: "20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Sin operaciones</td></tr>}
           </tbody>
         </table>
+      </div>
       <p style={{ marginTop: 5, fontSize: 10, color: "var(--muted)" }}>{filtered.length} operaciones</p>
     </div>
   );
@@ -2065,6 +2097,40 @@ function analyzeMarketControl(candles: Candle[], ind: Indicators, atr: number): 
   };
 }
 
+// calcRiskMetrics — métricas completas de riesgo (panel + IA + aiDecision)
+function calcRiskMetrics(trades: ClosedTrade[], balance: number, maxDdPct: number) {
+  const real = trades.filter(t => t.source === "real");
+  const wins   = real.filter(t => t.pnl > 0);
+  const losses = real.filter(t => t.pnl <= 0);
+  const total  = real.length;
+  const winRate = total > 0 ? wins.length / total : 0;
+  const grossProfit = wins.reduce((s, t) => s + t.pnl, 0);
+  const grossLoss   = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+  const pnl         = grossProfit - grossLoss;
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 99 : 0);
+  const avgWin   = wins.length   ? grossProfit / wins.length   : 0;
+  const avgLoss  = losses.length ? grossLoss   / losses.length : 0;
+  const expectancy = total > 0 ? pnl / total : 0;
+  const rets = real.map(t => t.pnlPct ?? (t.pnl / Math.max(balance, 1) * 100));
+  const sharpe = rets.length > 1 ? avg(rets) / (std(rets) || 1) * Math.sqrt(252) : 0;
+  const maxDrawdown  = calcDrawdown(real);
+  const maxDdPctVal  = balance > 0 ? (maxDrawdown / balance) * 100 : 0;
+  const blocked      = maxDdPctVal >= maxDdPct;
+  // Kelly criterion: WR - (1-WR)/RR
+  const kellyWR  = total >= 5 ? winRate : 0.5;
+  const kellyRR  = avgWin > 0 && avgLoss > 0 ? avgWin / avgLoss : 1.5;
+  const kellyFraction = clamp(kellyWR - (1 - kellyWR) / Math.max(kellyRR, 0.1), 0, 0.25);
+  // Riesgo de ruina (Vince)
+  const edge = kellyWR - (1 - kellyWR) / Math.max(kellyRR, 0.5);
+  const ruinProb = total >= 10 && edge > 0
+    ? Math.pow(Math.max((1 - edge) / (1 + edge), 0), 30) * 100
+    : (total < 5 ? 50 : 75);
+  return { total, winRate, pnl, grossProfit, grossLoss, profitFactor,
+           avgWin, avgLoss, expectancy, sharpe, maxDrawdown, maxDdPctVal,
+           kellyFraction, kellyWR, kellyRR, ruinProb, blocked };
+}
+
+
 function calcScalpingRisk(trades: ClosedTrade[], balance: number, maxDailyLoss: number, maxDailyGain: number): ScalpingRisk {
   const today = new Date().toDateString();
   const todayTrades = trades.filter(t => new Date(t.closedAt).toDateString() === today);
@@ -2127,7 +2193,7 @@ function AiChatPanel({
   apiKey: string; usingGroq: boolean;
   openPositions: Position[]; realTrades: ClosedTrade[];
   lastSignal: Signal | null; prices: Record<Asset, number>;
-  stats: { total: number; winRate: number; pnl: number; profitFactor: number; sharpe: number };
+  stats: { total: number; winRate: number; pnl: number; profitFactor: number; sharpe: number; maxDrawdown?: number };
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([
     { role: "ai", text: "Hola. Soy tu trader IA. Podés preguntarme sobre los trades activos, la estrategia, el rendimiento, o cualquier duda sobre las operaciones.", ts: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }) }
@@ -2456,6 +2522,13 @@ export function App() {
     return m;
   }, [prices, volumeShock]);
 
+  // spreadSnapshot: snapshot completo bid/ask/spread por activo para mostrar en UI
+  const spreadSnapshot = useMemo(() => {
+    const m = {} as Record<Asset, SpreadSnapshot>;
+    assets.forEach(a => { m[a] = calcCFDSpread(a, prices[a], volumeShock); });
+    return m;
+  }, [prices, volumeShock]);
+
   const unrealized = useMemo(() => openPositions.reduce((acc, p) => {
     const mark = prices[p.signal.asset];
     const spread = spreadByAsset[p.signal.asset];
@@ -2465,6 +2538,10 @@ export function App() {
 
   const equity = balance + unrealized;
   const riskMetrics = useMemo(() => calcRiskMetrics(realTrades, balance, 5), [realTrades, balance]);
+
+  const currentIndicators = indicatorsMap[asset] ?? null;
+  const currentWyckoff = wyckoffMap[asset] ?? null;
+
   // Order Flow en tiempo real para el activo/modo seleccionado
   const currentOF = useMemo(() => {
     if (tab !== "scalping") return null;
@@ -2493,9 +2570,6 @@ export function App() {
     const c = candles[asset];
     return c.length > 0 ? c : deriveSyntheticCandles(series[asset]);
   }, [asset, candles, series]);
-
-  const currentIndicators = indicatorsMap[asset] ?? null;
-  const currentWyckoff = wyckoffMap[asset] ?? null;
 
   function refreshLearning(trades: ClosedTrade[]) {
     const real = trades.filter(t => t.source === "real");
@@ -2586,7 +2660,7 @@ export function App() {
       ? (wyckoffMap[currentAsset] ?? analyzeWyckoff(candles[currentAsset]))
       : { bias: "neutral" as const, phase: "unknown" as const, events: [],
           supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
-          narrative: of ? of.narrative : "", wyckoffLotMult: 1.0 };
+          narrative: "", wyckoffLotMult: 1.0 };
     const lrn = learningRef.current;
 
     // ── Scalping: dirección determinada por control de mercado ────────────────
@@ -2717,6 +2791,10 @@ export function App() {
     const mcConflict = (of && currentMode === "scalping")
       ? (of.control === "bulls" && mtfDir === "SHORT") || (of.control === "bears" && mtfDir === "LONG")
       : (mc ? (mc.bias === "bull" && mtfDir === "SHORT") || (mc.bias === "bear" && mtfDir === "LONG") : false);
+    // spreadCostRatio: fracción que el spread representa respecto al take profit esperado
+    // Si spread > 35% del TP → setup caro (penaliza confianza)
+    const estTpDist = Math.max(mtf.atr * (currentMode === "scalping" ? lrn.scalpingTpAtr : lrn.intradayTpAtr), spread * 2);
+    const spreadCostRatio = spread / Math.max(estTpDist, 1e-9);
     const confidence = clamp(
       50
       + mtfStrength * 7
@@ -2841,7 +2919,7 @@ export function App() {
       const kellyStr   = riskSnap.kellyFraction > 0
         ? `${(riskSnap.kellyFraction * 100).toFixed(1)}% (WR ${(riskSnap.kellyWR*100).toFixed(0)}% / RR ${riskSnap.kellyRR.toFixed(2)})`
         : "insuficiente data";
-      const consecLoss = riskSnap.streak;
+      const consecLoss = calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain).streak;
       const ruinPct    = riskSnap.ruinProb.toFixed(1);
       const evSign     = parseFloat(expectedValue) >= 0 ? "POSITIVE ✓" : "NEGATIVE ✗";
 
