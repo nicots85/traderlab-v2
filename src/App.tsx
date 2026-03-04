@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Asset = string; // dinámico — lo define el bridge en runtime
@@ -3786,3 +3786,5 @@ Rationale from system: ${signal.rationale}`;
     </div>
   );
 }
+
+export default App;
