@@ -139,6 +139,22 @@ type Signal = {
   aiRiskNotes?: string;
 };
 
+
+// Posición real de MT5 — viene del bridge /positions
+type MT5Position = {
+  ticket: number;
+  symbol: string;      // nombre en MT5 (ej: BTCUSD)
+  asset: Asset;        // nombre en TraderLab (ej: BTCUSD)
+  type: "LONG" | "SHORT";
+  volume: number;
+  open_price: number;
+  current: number;
+  sl: number;
+  tp: number;
+  profit: number;
+  time: string;        // ISO string
+};
+
 type Position = {
   id: number; signal: Signal; size: number; marginUsed: number;
   openedAt: string; peak: number; trough: number;
@@ -2302,6 +2318,9 @@ export function App() {
   const [mt5Status,   setMt5Status]   = useState<"disconnected"|"connected"|"error"|"testing">("disconnected");
   const [mt5Account,  setMt5Account]  = useState<string|null>(null);
   const [mt5Balance,  setMt5Balance]  = useState<number|null>(null);
+  const [mt5Equity,   setMt5Equity]   = useState<number|null>(null);
+  const [mt5Positions, setMt5Positions] = useState<MT5Position[]>([]);
+  const [mt5History,   setMt5History]   = useState<ClosedTrade[]>([]);
 
   // Indicadores, Wyckoff y control de mercado calculados por activo
   const [indicatorsMap, setIndicatorsMap] = useState<Partial<Record<Asset, Indicators>>>({});
@@ -2328,6 +2347,8 @@ export function App() {
     const id = setInterval(() => {
       setNow(Date.now());
       if (openPositionsRef.current.length > 0) evaluatePositionsWithCurrentPrices();
+      // Sincronizar posiciones MT5 reales en cada ciclo de autoScan
+      if (mt5Enabled && mt5Status === "connected") syncMT5State();
     }, 1000);
     return () => clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2391,18 +2412,32 @@ export function App() {
     if (!apiKey.trim() || !usingGroq) { pushToast("Ingrese API Key Groq y active el modo Groq.", "warning"); return; }
     setAiStatus("testing");
     const t0 = Date.now();
+    const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
     try {
       const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model: "meta-llama/llama-4-scout-17b-16e-instruct", temperature: 0, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
+        body: JSON.stringify({ model: GROQ_MODEL, temperature: 0, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) {
+        let detail = "";
+        try { const err = await r.json(); detail = err?.error?.message ?? ""; } catch { /* */ }
+        if (r.status === 401) throw new Error(`API key inválida (401)${detail ? ": " + detail : ""}`);
+        if (r.status === 404) throw new Error(`Modelo no encontrado (404): ${GROQ_MODEL}`);
+        if (r.status === 429) throw new Error("Rate limit alcanzado (429) — esperá unos segundos");
+        throw new Error(`HTTP ${r.status}${detail ? ": " + detail : ""}`);
+      }
       setAiLatency(Date.now() - t0); setAiStatus("ok");
-      pushToast(`✅ Groq conectada — ${Date.now() - t0}ms`, "success");
+      pushToast(`✅ Groq OK — ${GROQ_MODEL} — ${Date.now() - t0}ms`, "success");
     } catch (e) {
       setAiStatus("error");
-      pushToast(`❌ Groq: ${e instanceof Error ? e.message : "error"}`, "error");
+      const msg = e instanceof Error ? e.message : String(e);
+      // "Failed to fetch" = CORS o sin internet
+      if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
+        pushToast("❌ Groq: sin conexión o CORS bloqueado. Verificá internet.", "error");
+      } else {
+        pushToast(`❌ Groq: ${msg}`, "error");
+      }
     }
   }
 
@@ -3111,17 +3146,72 @@ Rationale from system: ${signal.rationale}`;
   }
 
   // ── MT5: test de conexión ────────────────────────────────────────────────
+  // ── Sincronizar posiciones y historial reales desde MT5 ───────────────────
+  async function syncMT5State() {
+    if (!mt5Enabled || mt5Status !== "connected") return;
+    try {
+      // Posiciones abiertas reales
+      const rPos = await fetch(`${mt5Url}/positions`, { signal: AbortSignal.timeout(5000) });
+      if (rPos.ok) {
+        const dPos = await rPos.json() as { positions: MT5Position[] };
+        // Mapear symbol → Asset (ej: BTCUSD → BTCUSD)
+        const mapped = dPos.positions.map(p => ({
+          ...p,
+          asset: (assets.find(a => p.symbol.startsWith(a) || a === p.symbol) ?? p.symbol) as Asset,
+        }));
+        setMt5Positions(mapped);
+      }
+      // Historial reciente (últimos 7 días)
+      const rHist = await fetch(`${mt5Url}/history?days=7`, { signal: AbortSignal.timeout(5000) });
+      if (rHist.ok) {
+        const dHist = await rHist.json() as { deals: Array<{
+          ticket: number; symbol: string; entry: string; type: string;
+          volume: number; price: number; profit: number; time: string;
+        }> };
+        // Convertir deals de cierre a ClosedTrade
+        const closedDeals = dHist.deals.filter(d => d.entry === "OUT");
+        const mt5Trades: ClosedTrade[] = closedDeals.map(d => {
+          const asset = (assets.find(a => d.symbol.startsWith(a) || a === d.symbol) ?? d.symbol) as Asset;
+          return {
+            id: d.ticket,
+            asset,
+            mode: "scalping" as Mode,
+            direction: d.type === "buy" ? "LONG" : "SHORT" as Direction,
+            entry: d.price, // precio aproximado — MT5 no separa entrada/salida en deal OUT
+            exit: d.price,
+            pnl: d.profit,
+            pnlPct: d.profit / Math.max(balance, 1) * 100,
+            result: d.profit > 0 ? "TP" : "SL" as ExitReason,
+            openedAt: d.time,
+            closedAt: d.time,
+            source: "real" as const,
+          };
+        });
+        if (mt5Trades.length > 0) setMt5History(mt5Trades);
+      }
+    } catch { /* sync silencioso — no interrumpir el flujo */ }
+  }
+
   async function testMT5Bridge() {
     setMt5Status("testing");
     try {
       const r = await fetch(`${mt5Url}/status`, { signal: AbortSignal.timeout(5000) });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const d = await r.json() as { connected: boolean; account?: string; balance?: number; demo?: boolean };
+      const d = await r.json() as {
+        connected: boolean; account?: string; balance?: number;
+        equity?: number; demo?: boolean; broker?: string; leverage?: number;
+      };
       if (d.connected) {
         setMt5Status("connected");
         setMt5Account(d.account ?? null);
         setMt5Balance(d.balance ?? null);
-        pushToast(`✅ MT5 — Cuenta ${d.account} | ${d.demo ? "DEMO ✓" : "⚠ REAL"}`, "success");
+        if (d.equity !== undefined) setMt5Equity(d.equity);
+        // Sincronizar posiciones inmediatamente al conectar
+        await syncMT5State();
+        pushToast(
+          `✅ MT5 — Cta ${d.account} | Balance $${d.balance?.toFixed(0)} | ${d.demo ? "DEMO ✓" : "⚠ REAL"} | ${d.broker ?? ""}`,
+          "success"
+        );
       } else {
         setMt5Status("error");
         pushToast("MT5: bridge activo pero MT5 no conectado a PrimeXBT", "warning");
@@ -3152,16 +3242,37 @@ Rationale from system: ${signal.rationale}`;
     } catch { pushToast("MT5: timeout al enviar señal", "error"); }
   }
 
-  // ── MT5: cerrar posición ──────────────────────────────────────────────────
-  async function closeInMT5(asset: Asset, direction: string) {
+  // ── MT5: cerrar posición con ticket específico o por asset ──────────────
+  async function closeInMT5(asset: Asset, direction?: string, ticket?: number) {
     if (!mt5Enabled || mt5Status !== "connected") return;
     try {
-      await fetch(`${mt5Url}/close`, {
+      const body: Record<string, unknown> = { asset };
+      if (ticket) body.ticket = ticket;
+      if (direction) body.direction = direction;
+      const r = await fetch(`${mt5Url}/close`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ asset, direction }),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(8000),
       });
-    } catch { /* silencioso */ }
+      const d = await r.json() as { ok: boolean; closed: number[]; errors: Array<{ticket:number;error:string}> };
+      if (d.closed?.length > 0) {
+        pushToast(`📡 MT5: cerradas ${d.closed.length} posición(es) en ${asset}`, "success");
+        // Actualizar lista de posiciones MT5
+        setMt5Positions(prev => prev.filter(p => !d.closed.includes(p.ticket)));
+        // Re-sincronizar para capturar el trade cerrado en historial
+        setTimeout(() => syncMT5State(), 1500);
+      }
+      if (d.errors?.length > 0) {
+        d.errors.forEach(e => pushToast(`⚠ MT5 ticket #${e.ticket}: ${e.error}`, "error"));
+      }
+    } catch (e) {
+      pushToast(`MT5 cierre fallido: ${e instanceof Error ? e.message : "error"}`, "error");
+    }
+  }
+
+  // ── MT5: cerrar por ticket (desde panel de posiciones MT5) ────────────────
+  async function closeInMT5ByTicket(ticket: number, asset: Asset) {
+    await closeInMT5(asset, undefined, ticket);
   }
 
   async function syncRealData() {
@@ -3355,13 +3466,19 @@ Rationale from system: ${signal.rationale}`;
         <div className="header-metrics" style={{ maxWidth: 1440, margin: "0 auto", display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
           {[
             { label: "Balance", value: money(balance), color: "var(--text)" },
-            { label: "P&L no realizado", value: money(unrealized), color: unrealized >= 0 ? "#10b981" : "#ef4444" },
+            { label: mt5Enabled && mt5Positions.length > 0 ? "P&L MT5 real" : "P&L no realizado",
+              value: mt5Enabled && mt5Positions.length > 0
+                ? money(mt5Positions.reduce((a, p) => a + p.profit, 0))
+                : money(unrealized),
+              color: (mt5Enabled && mt5Positions.length > 0
+                ? mt5Positions.reduce((a, p) => a + p.profit, 0)
+                : unrealized) >= 0 ? "#10b981" : "#ef4444" },
             { label: "Equity", value: money(equity), color: equity >= 100 ? "#10b981" : "#ef4444" },
             { label: "Win rate", value: `${stats.winRate.toFixed(1)}%`, color: stats.winRate >= 50 ? "#10b981" : "#ef4444" },
             { label: "Factor ganancia", value: stats.profitFactor.toFixed(2), color: stats.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
             { label: "Sharpe", value: stats.sharpe.toFixed(2), color: stats.sharpe >= 1 ? "#10b981" : "var(--text)" },
             { label: "Trades reales", value: realTrades.length, color: "var(--muted)" },
-            { label: "Posiciones abiertas", value: openPositions.length, color: openPositions.length > 0 ? "#f59e0b" : "var(--muted)" },
+            { label: "Posiciones abiertas", value: openPositions.length + (mt5Positions.length > 0 ? ` (+${mt5Positions.length} MT5)` : ""), color: openPositions.length > 0 || mt5Positions.length > 0 ? "#f59e0b" : "var(--muted)" },
           ].map(({ label, value, color }) => (
             <div key={label} className="metric" style={{ flex: "0 0 auto", minWidth: 105 }}>
               <span className="label" style={{ fontSize: 11.5, fontWeight: 600 }}>{label}</span>
@@ -3590,6 +3707,68 @@ Rationale from system: ${signal.rationale}`;
                   <span style={{ fontSize: 12, color: "var(--muted)" }}>evaluación cada 1s</span>
                   {openPositions.length > 0 && <span style={{ background: "#f59e0b", color: "#fff", fontSize: 11, fontWeight: 800, padding: "1px 6px", borderRadius: 10 }}>{openPositions.length}</span>}
                 </div>
+                {/* ── Posiciones REALES de MT5 ── */}
+                {mt5Enabled && mt5Status === "connected" && mt5Positions.length > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#10b981", marginBottom: 6, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                      📡 Posiciones MT5 Reales ({mt5Positions.length})
+                    </div>
+                    {mt5Positions.map(p => {
+                      const pnlColor = p.profit >= 0 ? "#10b981" : "#ef4444";
+                      const isLong = p.type === "LONG";
+                      return (
+                        <div key={p.ticket} className="live-card" style={{ borderLeft: `3px solid ${isLong ? "#10b981" : "#ef4444"}`, marginBottom: 6 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              <span style={{ width: 7, height: 7, borderRadius: "50%", background: isLong ? "#10b981" : "#ef4444", animation: "pulse 1.5s infinite", display: "inline-block" }} />
+                              <span style={{ fontWeight: 700, fontSize: 14 }}>{p.symbol}</span>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 6,
+                                background: isLong ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
+                                color: isLong ? "#10b981" : "#ef4444" }}>{p.type}</span>
+                              <span style={{ fontSize: 10, color: "#6366f1", background: "rgba(99,102,241,0.1)", padding: "2px 6px", borderRadius: 4 }}>#{p.ticket}</span>
+                            </div>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              <span style={{ fontWeight: 700, fontSize: 15, color: pnlColor }}>
+                                {p.profit >= 0 ? "+" : ""}{p.profit.toFixed(2)} USD
+                              </span>
+                              <button
+                                onClick={() => closeInMT5ByTicket(p.ticket, p.asset)}
+                                style={{ fontSize: 11, padding: "3px 10px", borderRadius: 6, border: "1px solid rgba(239,68,68,0.4)",
+                                  background: "rgba(239,68,68,0.12)", color: "#ef4444", cursor: "pointer", fontWeight: 700 }}>
+                                Cerrar
+                              </button>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 14, fontSize: 11, color: "var(--muted)", flexWrap: "wrap" }}>
+                            <span>Entrada: <strong style={{ color: "var(--ink)" }}>{p.open_price.toFixed(p.open_price > 100 ? 2 : 4)}</strong></span>
+                            <span>Actual: <strong style={{ color: pnlColor }}>{p.current.toFixed(p.current > 100 ? 2 : 4)}</strong></span>
+                            {p.sl > 0 && <span>SL: <strong style={{ color: "#ef4444" }}>{p.sl.toFixed(p.sl > 100 ? 2 : 4)}</strong></span>}
+                            {p.tp > 0 && <span>TP: <strong style={{ color: "#10b981" }}>{p.tp.toFixed(p.tp > 100 ? 2 : 4)}</strong></span>}
+                            <span>Vol: <strong>{p.volume}</strong></span>
+                            <span style={{ marginLeft: "auto", color: "#6366f1" }}>
+                              {new Date(p.time).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <button
+                      onClick={syncMT5State}
+                      style={{ fontSize: 11, padding: "5px 12px", borderRadius: 7, border: "1px solid rgba(99,102,241,0.3)",
+                        background: "rgba(99,102,241,0.08)", color: "#a5b4fc", cursor: "pointer", width: "100%", marginTop: 4 }}>
+                      ↻ Actualizar posiciones MT5
+                    </button>
+                  </div>
+                )}
+
+                {mt5Enabled && mt5Status === "connected" && mt5Positions.length === 0 && (
+                  <div style={{ fontSize: 11, color: "var(--muted)", padding: "8px 0", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>📡 Sin posiciones abiertas en MT5</span>
+                    <button onClick={syncMT5State} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 5, border: "1px solid rgba(255,255,255,0.1)", background: "transparent", color: "var(--muted)", cursor: "pointer" }}>↻</button>
+                  </div>
+                )}
+
+                {/* ── Posiciones simuladas del motor ── */}
                 {openPositions.length === 0
                   ? <div className="card" style={{ textAlign: "center", padding: "22px", color: "var(--muted)", fontSize: 12 }}>Sin posiciones abiertas</div>
                   : <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -3755,6 +3934,13 @@ Rationale from system: ${signal.rationale}`;
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button className="btn-secondary" onClick={testMT5Bridge} disabled={mt5Status === "testing"} style={{ flex: 1 }}>
                   {mt5Status === "testing" ? "⟳ Probando…" : "🔌 Probar conexión"}
+                </button>
+                <button
+                  className="btn-secondary"
+                  onClick={syncMT5State}
+                  disabled={mt5Status !== "connected"}
+                  style={{ flex: 1 }}>
+                  ↻ Sync posiciones
                 </button>
                 <button
                   onClick={() => setMt5Enabled(p => !p)}
