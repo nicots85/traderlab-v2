@@ -175,7 +175,6 @@ const assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"]; // se expande 
 // Todos los datos (precios, velas 1m/5m/15m/4H/1D, spread) vienen del bridge.
 // No hay fallback a APIs externas — si el bridge no está activo, el feed queda offline.
 
-// assetLabel reemplazado por getAssetLabel() dinámico
 
 const initialPrices: Record<string, number> = {
   BTCUSD: 95000, ETHUSD: 3200, XAGUSD: 32.0, XAUUSD: 3300,
@@ -193,7 +192,6 @@ const leverageByAsset: Record<Asset, number> = {
 // XAGUSD ~32 usd: ATR 1m mínimo realista = 0.05 usd (0.15%)
 // XAUUSD ~3300 usd: ATR 1m mínimo = 1.5 usd
 // BTC ~95000 usd: ATR 1m mínimo = 50 usd
-// minAtrByAsset reemplazado por getAssetMinAtr() dinámico
 
 const initialLearning: LearningModel = {
   riskScale: 1, confidenceFloor: 52, scalpingTpAtr: 1.35,
@@ -244,7 +242,19 @@ type SpreadSnapshot = {
   component: { base: number; volume: number; session: number };
   sessionLabel: string; isHighVolume: boolean;
 };
-// CFD_BASE_SPREAD_PCT reemplazado por getAssetBaseSpread() dinámico
+const assetLabel: Record<Asset, string> = {
+  BTCUSD: "BTC/USD", ETHUSD: "ETH/USD",
+  XAGUSD: "Plata XAG", XAUUSD: "Oro XAU",
+};
+const minAtrByAsset: Record<Asset, number> = {
+  BTCUSD: 50, ETHUSD: 5, XAGUSD: 0.08, XAUUSD: 2.0,
+};
+const CFD_BASE_SPREAD_PCT: Record<Asset, number> = {
+  BTCUSD: 0.016, ETHUSD: 0.025, XAUUSD: 0.008, XAGUSD: 0.045,
+};
+function getAssetLabel(a: Asset)      { return assetLabel[a] ?? a; }
+function getAssetMinAtr(a: Asset)     { return minAtrByAsset[a] ?? 1; }
+function getAssetBaseSpread(a: Asset) { return CFD_BASE_SPREAD_PCT[a] ?? 0.020; }
 function calcCFDSpread(asset: Asset, price: number, shock: number): SpreadSnapshot {
   const hourUTC = new Date().getUTCHours();
   const dayUTC  = new Date().getUTCDay();
