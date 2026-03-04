@@ -2335,7 +2335,7 @@ export function App() {
   // Recalcular indicadores y control de mercado al cambiar velas 1m
   useEffect(() => {
     assets.forEach(a => {
-      const c = candles[a];
+      const c = candles[a] ?? [];
       if (c.length > 25) {
         setIndicatorsMap(prev => ({ ...prev, [a]: computeIndicators(c) }));
         const indForControl = computeIndicators(c);
@@ -2470,7 +2470,7 @@ export function App() {
       .sort((a, b) => b.edge - a.edge).slice(0, 4), [learning.hourEdge]);
 
   const visibleCandles = useMemo(() => {
-    const c = candles[asset];
+    const c = candles[asset] ?? [];
     return c.length > 0 ? c : deriveSyntheticCandles(series[asset] ?? []);
   }, [asset, candles, series]);
 
