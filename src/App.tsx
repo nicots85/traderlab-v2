@@ -1,9 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-// Asset es dinámico — los activos disponibles vienen del bridge MT5
-// El tipo string permite cualquier símbolo que entregue el broker
-type Asset = string;
+type Asset = "BTCUSD" | "ETHUSD" | "XAGUSD" | "XAUUSD";
 type Mode = "scalping" | "intradia";
 type Direction = "LONG" | "SHORT";
 type ExitReason = "TP" | "SL" | "TRAIL" | "REVERSAL";
@@ -169,9 +167,7 @@ type Toast = { id: number; msg: string; type: "success" | "warning" | "error" | 
 type AiStatus = "idle" | "testing" | "ok" | "error" | "disabled";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-// assets[] es dinámico — se actualiza con los activos que entregue el bridge.
-// Inicialmente 4 activos base; se expande al primer sync exitoso.
-let assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"];
+const assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"];
 
 // Metadata dinámica por activo — se llena desde el bridge
 // (fallback a valores hardcodeados para los 4 activos originales)
@@ -209,7 +205,6 @@ function getAssetBaseSpread(a: Asset)  { return ASSET_DEFAULTS[a]?.baseSpreadPct
 
 const initialPrices: Record<Asset, number> = {
   BTCUSD: 95000, ETHUSD: 3200, XAGUSD: 32.0, XAUUSD: 3300,
-  BNBUSD: 600, SOLUSD: 170, XRPUSD: 0.55, LTCUSD: 90,
 };
 
 // leverageByAsset fallback — usado cuando el bridge aún no entregó el leverage real
@@ -711,22 +706,15 @@ async function fetchFromMT5Bridge(bridgeUrl: string, prevPrices: Record<Asset, n
   };
 
   const prices      = { ...prevPrices };
-  const candleMap: Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+  const candleMap: Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
   const seriesMap:   Partial<Record<Asset, number[]>> = {};
   const spreadMap:   Partial<Record<Asset, { spread: number; spread_pct: number; bid: number; ask: number }>> = {};
   const leverageMap: Partial<Record<Asset, number>> = {};
   const failedAssets: string[] = [];
 
-  // Iterar sobre TODOS los activos que el bridge entregó (no solo los 4 base)
-  const bridgeAssets = Object.keys(data.assets);
-  // Actualizar el array global de assets con los que están disponibles en el broker
-  if (bridgeAssets.length > 0) {
-    assets = bridgeAssets.filter(a => data.assets[a] && !(data.assets[a] as { error?: string }).error);
-  }
-
   for (const asset of assets) {
     const d = data.assets[asset];
-    if (!d || (d as { error?: string }).error) { failedAssets.push(asset); continue; }
+    if (!d || d.error) { failedAssets.push(asset); continue; }
     prices[asset]      = d.price;
     candleMap[asset]   = d.candles ?? [];
     seriesMap[asset]   = (d.candles ?? []).map((c: Candle) => c.c);
@@ -2258,15 +2246,18 @@ export function App() {
   const [tab, setTab] = useState<Mode>("scalping");
   const [asset, setAsset] = useState<Asset>("BTCUSD");
   const [prices, setPrices] = useState(initialPrices);
-  const [series, setSeries] = useState<Record<Asset, number[]>>(
-    Object.fromEntries(Object.entries(initialPrices).map(([a, p]) => [a, Array.from({ length: 120 }, () => p)]))
-  );
-  const [candles,    setCandles]    = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
-  const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
-  const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
+  const [series, setSeries] = useState<Record<Asset, number[]>>({
+    BTCUSD: Array.from({ length: 120 }, () => initialPrices.BTCUSD),
+    ETHUSD: Array.from({ length: 120 }, () => initialPrices.ETHUSD),
+    XAGUSD: Array.from({ length: 120 }, () => initialPrices.XAGUSD),
+    XAUUSD: Array.from({ length: 120 }, () => initialPrices.XAUUSD),
+  });
+  const [candles,    setCandles]    = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
   // Velas 4H y 1D — exclusivamente para Wyckoff macro (intradía/swing)
-  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
-  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
+  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
   const [mt5SpreadMap, setMt5SpreadMap] = useState<Partial<Record<Asset, {spread: number; spread_pct: number; bid: number; ask: number}>>>({});
   // Leverage real del broker (leído del bridge) — reemplaza los valores hardcodeados
   const [mt5LeverageMap, setMt5LeverageMap] = useState<Partial<Record<Asset, number>>>({});
@@ -3222,10 +3213,10 @@ Rationale from system: ${signal.rationale}`;
               };
             })
           );
-          const new5m:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
-          const new15m: Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
-          const new4h:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
-          const new1d:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+          const new5m:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
+          const new15m: Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
+          const new4h:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
+          const new1d:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
           mtfFetches.forEach(r => {
             if (r.status === "fulfilled") {
               new5m[r.value.a]  = r.value.c5m;
@@ -3398,28 +3389,7 @@ Rationale from system: ${signal.rationale}`;
               <div className="card">
                 <p className="label" style={{ marginBottom: 5 }}>Activo</p>
                 <select className="sel" value={asset} onChange={e => setAsset(e.target.value as Asset)} style={{ width: "100%" }}>
-                  {/* Grupos de activos dinámicos según disponibilidad en el broker */}
-                  {(() => {
-                    const crypto = assets.filter(a => ["BTCUSD","ETHUSD","BNBUSD","SOLUSD","XRPUSD","ADAUSD","DOTUSD","LTCUSD","DOGEUSD","AVAXUSD","LINKUSD","MATICUSD"].includes(a));
-                    const metals = assets.filter(a => ["XAUUSD","XAGUSD"].includes(a));
-                    const forex  = assets.filter(a => ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD"].includes(a));
-                    const idx    = assets.filter(a => ["US30","US500","USTEC"].includes(a));
-                    const energy = assets.filter(a => ["USOIL","UKOIL"].includes(a));
-                    const other  = assets.filter(a => !crypto.includes(a) && !metals.includes(a) && !forex.includes(a) && !idx.includes(a) && !energy.includes(a));
-                    const groups = [
-                      { label: "⬡ Crypto", items: crypto },
-                      { label: "◈ Metales", items: metals },
-                      { label: "₿ Forex",  items: forex },
-                      { label: "▲ Índices", items: idx },
-                      { label: "⛽ Energía", items: energy },
-                      { label: "Otros",   items: other },
-                    ].filter(g => g.items.length > 0);
-                    return groups.map(g => (
-                      <optgroup key={g.label} label={g.label}>
-                        {g.items.map(a => <option key={a} value={a}>{getAssetLabel(a)} ({a})</option>)}
-                      </optgroup>
-                    ));
-                  })()}
+                  {assets.map(a => <option key={a} value={a}>{getAssetLabel(a)}</option>)}
                 </select>
                 <div style={{ marginTop: 8, fontSize: 11 }}>
                   {(()=>{
