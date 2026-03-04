@@ -2252,11 +2252,11 @@ export function App() {
     () => Object.fromEntries(Object.entries(initialPrices).map(([a, p]) => [a, Array.from({ length: 120 }, () => p)]))
   );
   const [candles,    setCandles]    = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
-  const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>(EMPTY_CANDLES);
-  const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>(EMPTY_CANDLES);
+  const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
+  const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
   // Velas 4H y 1D — exclusivamente para Wyckoff macro (intradía/swing)
-  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>(EMPTY_CANDLES);
-  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>(EMPTY_CANDLES);
+  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
+  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
   const [mt5SpreadMap, setMt5SpreadMap] = useState<Partial<Record<Asset, {spread: number; spread_pct: number; bid: number; ask: number}>>>({});
   // Leverage real del broker (leído del bridge) — reemplaza los valores hardcodeados
   const [mt5LeverageMap, setMt5LeverageMap] = useState<Partial<Record<Asset, number>>>({});
@@ -2558,7 +2558,7 @@ export function App() {
     const spreadPct = getSpreadPct(currentAsset, volumeShock);
     const spread = (spreadPct / 100) * price;
     const mtf = getMtfScore(currentAsset, currentMode);
-    const ind = indicatorsMap[currentAsset] ?? computeIndicators(candles[currentAsset]);
+    const ind = indicatorsMap[currentAsset] ?? computeIndicators(candles[currentAsset] ?? []);
     // Wyckoff: solo en intradía, solo del wyckoffMap (calculado desde velas 4H/1D reales)
     // En scalping: se omite completamente — Order Flow es la autoridad
     const wyckoff = currentMode === "intradia"
@@ -2576,10 +2576,10 @@ export function App() {
     // En scalping: Order Flow es la autoridad. MTF confirma, no dicta.
     const price0 = series[currentAsset]?.[series[currentAsset].length-1] ?? 0;
     const of = currentMode === "scalping"
-      ? analyzeOrderFlow(candles[currentAsset], price0, ind.vwap, mtf.atr)
+      ? analyzeOrderFlow(candles[currentAsset] ?? [], price0, ind.vwap, mtf.atr)
       : null;
     const mc = currentMode === "scalping"
-      ? (marketControlMap[currentAsset] ?? analyzeMarketControl(candles[currentAsset], ind, mtf.atr))
+      ? (marketControlMap[currentAsset] ?? analyzeMarketControl(candles[currentAsset] ?? [], ind, mtf.atr))
       : null;
 
     // ── Dirección primaria: jerarquía OF > MC > MTF ───────────────────────
@@ -3414,7 +3414,7 @@ Rationale from system: ${signal.rationale}`;
                     const ss = spreadSnapshot[asset];
                     const dp = asset === "BTCUSD" || asset === "ETHUSD" ? 2 : asset === "XAUUSD" ? 2 : 4;
                     return [[
-                      ["Precio", prices[asset].toFixed(dp)],
+                      ["Precio", (prices[asset] ?? 0).toFixed(dp)],
                       ["Bid", ss ? ss.bid.toFixed(dp) : "-"],
                       ["Ask", ss ? ss.ask.toFixed(dp) : "-"],
                       ["Spread $", ss ? `$${ss.spread.toFixed(dp === 2 ? 2 : 4)}` : "-"],
