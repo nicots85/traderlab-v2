@@ -2243,6 +2243,40 @@ function useLocalStorage<T>(key: string, initial: T): [T, React.Dispatch<React.S
   return useState<T>(initial);
 }
 
+
+// ── Error Boundary — muestra el error en pantalla en vez de negro ─────────────
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{
+          background: "#0f172a", color: "#f87171", padding: 32,
+          fontFamily: "monospace", fontSize: 14, minHeight: "100vh",
+          whiteSpace: "pre-wrap", wordBreak: "break-all"
+        }}>
+          <h2 style={{ color: "#ef4444", marginBottom: 16 }}>
+            💥 TraderLab — Error de render
+          </h2>
+          <strong>{this.state.error.message}</strong>
+          {'\n\n'}
+          {this.state.error.stack}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export function App() {
   const [appTab, setAppTab] = useState<AppTab>("trading");
   const [tab, setTab] = useState<Mode>("scalping");
@@ -3175,7 +3209,7 @@ Rationale from system: ${signal.rationale}`;
       });
       setCandles(prev => {
         const next = { ...prev };
-        assets.forEach(a => { if (payload.candleMap[a].length) next[a] = payload.candleMap[a]; });
+        assets.forEach(a => { if (payload.candleMap[a]?.length) next[a] = payload.candleMap[a]; });
         return next;
       });
 
@@ -3786,4 +3820,11 @@ Rationale from system: ${signal.rationale}`;
   );
 }
 
-export default App;
+function AppWithBoundary() {
+  return (
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
+  );
+}
+export default AppWithBoundary;
