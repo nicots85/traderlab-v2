@@ -2395,7 +2395,7 @@ export function App() {
       const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model: "llama-3.1-8b-instant", temperature: 0, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
+        body: JSON.stringify({ model: "meta-llama/llama-4-scout-17b-16e-instruct", temperature: 0, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setAiLatency(Date.now() - t0); setAiStatus("ok");
