@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type Asset = string; // dinámico — lo define el bridge en runtime
+type Asset = "BTCUSD" | "ETHUSD" | "XAGUSD" | "XAUUSD";
 type Mode = "scalping" | "intradia";
 type Direction = "LONG" | "SHORT";
 type ExitReason = "TP" | "SL" | "TRAIL" | "REVERSAL";
@@ -167,35 +167,9 @@ type Toast = { id: number; msg: string; type: "success" | "warning" | "error" | 
 type AiStatus = "idle" | "testing" | "ok" | "error" | "disabled";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-let assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"]; // se expande con los datos del bridge
+const assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"]; // se expande con los datos del bridge
 
-// Metadata dinámica por activo — se llena desde el bridge
-// (fallback a valores hardcodeados para los 4 activos originales)
-const ASSET_DEFAULTS: Record<string, { label: string; minAtr: number; baseSpreadPct: number }> = {
-  BTCUSD:   { label: "BTC/USD",    minAtr: 50,   baseSpreadPct: 0.012 },
-  ETHUSD:   { label: "ETH/USD",    minAtr: 5,    baseSpreadPct: 0.015 },
-  XAUUSD:   { label: "Oro XAU",   minAtr: 2.0,  baseSpreadPct: 0.018 },
-  XAGUSD:   { label: "Plata XAG", minAtr: 0.08, baseSpreadPct: 0.025 },
-  BNBUSD:   { label: "BNB/USD",   minAtr: 1,    baseSpreadPct: 0.020 },
-  SOLUSD:   { label: "SOL/USD",   minAtr: 0.5,  baseSpreadPct: 0.020 },
-  XRPUSD:   { label: "XRP/USD",   minAtr: 0.005,baseSpreadPct: 0.025 },
-  LTCUSD:   { label: "LTC/USD",   minAtr: 0.5,  baseSpreadPct: 0.020 },
-  DOGEUSD:  { label: "DOGE/USD",  minAtr: 0.001,baseSpreadPct: 0.030 },
-  ADAUSD:   { label: "ADA/USD",   minAtr: 0.003,baseSpreadPct: 0.025 },
-  LINKUSD:  { label: "LINK/USD",  minAtr: 0.05, baseSpreadPct: 0.025 },
-  AVAXUSD:  { label: "AVAX/USD",  minAtr: 0.2,  baseSpreadPct: 0.025 },
-  EURUSD:   { label: "EUR/USD",   minAtr: 0.0002,baseSpreadPct: 0.003 },
-  GBPUSD:   { label: "GBP/USD",   minAtr: 0.0003,baseSpreadPct: 0.004 },
-  USDJPY:   { label: "USD/JPY",   minAtr: 0.03, baseSpreadPct: 0.003 },
-  US30:     { label: "Dow Jones", minAtr: 50,   baseSpreadPct: 0.010 },
-  US500:    { label: "S&P 500",   minAtr: 8,    baseSpreadPct: 0.010 },
-  USTEC:    { label: "NASDAQ",    minAtr: 30,   baseSpreadPct: 0.012 },
-  USOIL:    { label: "WTI Oil",   minAtr: 0.15, baseSpreadPct: 0.020 },
-};
 
-function getAssetLabel(a: Asset)       { return ASSET_DEFAULTS[a]?.label ?? a; }
-function getAssetMinAtr(a: Asset)      { return ASSET_DEFAULTS[a]?.minAtr ?? 1; }
-function getAssetBaseSpread(a: Asset)  { return ASSET_DEFAULTS[a]?.baseSpreadPct ?? 0.020; }
 
 // ── Fuente de datos: exclusivamente MT5 Bridge (PrimeXBT) ───────────────────
 // Todos los datos (precios, velas 1m/5m/15m/4H/1D, spread) vienen del bridge.
@@ -212,14 +186,8 @@ const initialPrices: Record<string, number> = {
   USOIL: 78, UKOIL: 82,
 };
 
-// leverageByAsset fallback — usado cuando el bridge aún no entregó el leverage real
-const leverageByAsset: Record<string, number> = {
+const leverageByAsset: Record<Asset, number> = {
   BTCUSD: 100, ETHUSD: 100, XAGUSD: 50, XAUUSD: 100,
-  BNBUSD: 50, SOLUSD: 50, XRPUSD: 50, LTCUSD: 50,
-  DOGEUSD: 50, ADAUSD: 50, LINKUSD: 50, AVAXUSD: 50,
-  EURUSD: 500, GBPUSD: 500, USDJPY: 500,
-  US30: 100, US500: 100, USTEC: 100,
-  USOIL: 100, UKOIL: 100,
 };
 // ATR mínimo por activo — evita sizing explosivo en mercados de bajo precio
 // XAGUSD ~32 usd: ATR 1m mínimo realista = 0.05 usd (0.15%)
@@ -718,11 +686,7 @@ async function fetchFromMT5Bridge(bridgeUrl: string, prevPrices: Record<Asset, n
   const failedAssets: string[] = [];
 
   // Expandir assets[] con todos los disponibles en el broker
-  const bridgeAssets = Object.keys(data.assets).filter(
-    a => data.assets[a] && !data.assets[a].error
-  );
-  if (bridgeAssets.length > 0) assets = bridgeAssets;
-
+  
   for (const asset of assets) {
     const d = data.assets[asset];
     if (!d || d.error) { failedAssets.push(asset); continue; }
@@ -2282,15 +2246,18 @@ export function App() {
   const [tab, setTab] = useState<Mode>("scalping");
   const [asset, setAsset] = useState<Asset>("BTCUSD");
   const [prices, setPrices] = useState<Record<Asset, number>>(initialPrices);
-  const [series, setSeries] = useState<Record<Asset, number[]>>(
-    () => Object.fromEntries(Object.entries(initialPrices).map(([a, p]) => [a, Array.from({ length: 120 }, () => p)]))
-  );
-  const [candles,    setCandles]    = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
-  const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
-  const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
+  const [series, setSeries] = useState<Record<Asset, number[]>>({
+    BTCUSD: Array.from({ length: 120 }, () => initialPrices.BTCUSD),
+    ETHUSD: Array.from({ length: 120 }, () => initialPrices.ETHUSD),
+    XAGUSD: Array.from({ length: 120 }, () => initialPrices.XAGUSD),
+    XAUUSD: Array.from({ length: 120 }, () => initialPrices.XAUUSD),
+  });
+  const [candles,    setCandles]    = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
   // Velas 4H y 1D — exclusivamente para Wyckoff macro (intradía/swing)
-  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
-  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
+  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
   const [mt5SpreadMap, setMt5SpreadMap] = useState<Partial<Record<Asset, {spread: number; spread_pct: number; bid: number; ask: number}>>>({});
   // Leverage real del broker (leído del bridge) — reemplaza los valores hardcodeados
   const [mt5LeverageMap, setMt5LeverageMap] = useState<Partial<Record<Asset, number>>>({});
