@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type Asset = "BTCUSD" | "ETHUSD" | "XAGUSD" | "XAUUSD";
+type Asset = string; // dinámico — lo define el bridge en runtime
 type Mode = "scalping" | "intradia";
 type Direction = "LONG" | "SHORT";
 type ExitReason = "TP" | "SL" | "TRAIL" | "REVERSAL";
@@ -167,7 +167,7 @@ type Toast = { id: number; msg: string; type: "success" | "warning" | "error" | 
 type AiStatus = "idle" | "testing" | "ok" | "error" | "disabled";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"];
+let assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"]; // se expande con los datos del bridge
 
 // Metadata dinámica por activo — se llena desde el bridge
 // (fallback a valores hardcodeados para los 4 activos originales)
@@ -203,8 +203,13 @@ function getAssetBaseSpread(a: Asset)  { return ASSET_DEFAULTS[a]?.baseSpreadPct
 
 // assetLabel reemplazado por getAssetLabel() dinámico
 
-const initialPrices: Record<Asset, number> = {
+const initialPrices: Record<string, number> = {
   BTCUSD: 95000, ETHUSD: 3200, XAGUSD: 32.0, XAUUSD: 3300,
+  BNBUSD: 600, SOLUSD: 170, XRPUSD: 0.55, LTCUSD: 90,
+  DOGEUSD: 0.22, AVAXUSD: 40, LINKUSD: 18,
+  EURUSD: 1.08, GBPUSD: 1.27, USDJPY: 149,
+  US30: 39000, US500: 5100, USTEC: 18000,
+  USOIL: 78, UKOIL: 82,
 };
 
 // leverageByAsset fallback — usado cuando el bridge aún no entregó el leverage real
@@ -706,18 +711,24 @@ async function fetchFromMT5Bridge(bridgeUrl: string, prevPrices: Record<Asset, n
   };
 
   const prices      = { ...prevPrices };
-  const candleMap: Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
+  const candleMap: Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
   const seriesMap:   Partial<Record<Asset, number[]>> = {};
   const spreadMap:   Partial<Record<Asset, { spread: number; spread_pct: number; bid: number; ask: number }>> = {};
   const leverageMap: Partial<Record<Asset, number>> = {};
   const failedAssets: string[] = [];
+
+  // Expandir assets[] con todos los disponibles en el broker
+  const bridgeAssets = Object.keys(data.assets).filter(
+    a => data.assets[a] && !data.assets[a].error
+  );
+  if (bridgeAssets.length > 0) assets = bridgeAssets;
 
   for (const asset of assets) {
     const d = data.assets[asset];
     if (!d || d.error) { failedAssets.push(asset); continue; }
     prices[asset]      = d.price;
     candleMap[asset]   = d.candles ?? [];
-    seriesMap[asset]   = (d.candles ?? []).map((c: Candle) => c.c);
+    seriesMap[asset]   = (d.candles ?? []).map(c => c.c);
     spreadMap[asset]   = { spread: d.spread, spread_pct: d.spread_pct, bid: d.bid, ask: d.ask };
     if (d.leverage && d.leverage > 0) leverageMap[asset] = d.leverage;
   }
@@ -2228,36 +2239,25 @@ BEHAVIOR RULES FOR CHAT:
   );
 }
 
+// useLocalStorage reemplazado por useState in-memory (localStorage no disponible en este entorno)
 function useLocalStorage<T>(key: string, initial: T): [T, React.Dispatch<React.SetStateAction<T>>] {
-  const [val, setVal] = useState<T>(() => {
-    try {
-      const raw = localStorage.getItem(key);
-      return raw ? (JSON.parse(raw) as T) : initial;
-    } catch { return initial; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem(key, JSON.stringify(val)); } catch { /* quota */ }
-  }, [key, val]);
-  return [val, setVal];
+  return useState<T>(initial);
 }
 
 export function App() {
   const [appTab, setAppTab] = useState<AppTab>("trading");
   const [tab, setTab] = useState<Mode>("scalping");
   const [asset, setAsset] = useState<Asset>("BTCUSD");
-  const [prices, setPrices] = useState(initialPrices);
-  const [series, setSeries] = useState<Record<Asset, number[]>>({
-    BTCUSD: Array.from({ length: 120 }, () => initialPrices.BTCUSD),
-    ETHUSD: Array.from({ length: 120 }, () => initialPrices.ETHUSD),
-    XAGUSD: Array.from({ length: 120 }, () => initialPrices.XAGUSD),
-    XAUUSD: Array.from({ length: 120 }, () => initialPrices.XAUUSD),
-  });
-  const [candles,    setCandles]    = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
-  const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
-  const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [prices, setPrices] = useState<Record<Asset, number>>(initialPrices);
+  const [series, setSeries] = useState<Record<Asset, number[]>>(
+    () => Object.fromEntries(Object.entries(initialPrices).map(([a, p]) => [a, Array.from({ length: 120 }, () => p)]))
+  );
+  const [candles,    setCandles]    = useState<Record<Asset, Candle[]>>({} as Record<Asset, Candle[]>);
+  const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>(EMPTY_CANDLES);
+  const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>(EMPTY_CANDLES);
   // Velas 4H y 1D — exclusivamente para Wyckoff macro (intradía/swing)
-  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
-  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>(EMPTY_CANDLES);
+  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>(EMPTY_CANDLES);
   const [mt5SpreadMap, setMt5SpreadMap] = useState<Partial<Record<Asset, {spread: number; spread_pct: number; bid: number; ask: number}>>>({});
   // Leverage real del broker (leído del bridge) — reemplaza los valores hardcodeados
   const [mt5LeverageMap, setMt5LeverageMap] = useState<Partial<Record<Asset, number>>>({});
@@ -2452,7 +2452,7 @@ export function App() {
     const c = candles[asset];
     const ind = currentIndicators;
     if (!c?.length || !ind) return null;
-    return analyzeOrderFlow(c, prices[asset], ind.vwap, calcAtrFromSeries(series[asset], 20));
+    return analyzeOrderFlow(c, prices[asset] ?? 0, ind.vwap, calcAtrFromSeries(series[asset] ?? [], 20));
   }, [tab, asset, candles, prices, currentIndicators, series]);
 
   const stats = useMemo(() => {
@@ -2472,7 +2472,7 @@ export function App() {
 
   const visibleCandles = useMemo(() => {
     const c = candles[asset];
-    return c.length > 0 ? c : deriveSyntheticCandles(series[asset]);
+    return c.length > 0 ? c : deriveSyntheticCandles(series[asset] ?? []);
   }, [asset, candles, series]);
 
   function refreshLearning(trades: ClosedTrade[]) {
@@ -3213,10 +3213,10 @@ Rationale from system: ${signal.rationale}`;
               };
             })
           );
-          const new5m:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
-          const new15m: Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
-          const new4h:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
-          const new1d:  Record<Asset, Candle[]> = { BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] };
+          const new5m:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+          const new15m: Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+          const new4h:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+          const new1d:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
           mtfFetches.forEach(r => {
             if (r.status === "fulfilled") {
               new5m[r.value.a]  = r.value.c5m;
@@ -3389,7 +3389,26 @@ Rationale from system: ${signal.rationale}`;
               <div className="card">
                 <p className="label" style={{ marginBottom: 5 }}>Activo</p>
                 <select className="sel" value={asset} onChange={e => setAsset(e.target.value as Asset)} style={{ width: "100%" }}>
-                  {assets.map(a => <option key={a} value={a}>{getAssetLabel(a)}</option>)}
+                  {(() => {
+                    const GROUPS: [string, string[]][] = [
+                      ["⬡ Crypto",  ["BTCUSD","ETHUSD","BNBUSD","SOLUSD","XRPUSD","ADAUSD","DOTUSD","LTCUSD","DOGEUSD","AVAXUSD","LINKUSD","MATICUSD"]],
+                      ["◈ Metales", ["XAUUSD","XAGUSD"]],
+                      ["₣ Forex",   ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD"]],
+                      ["▲ Índices", ["US30","US500","USTEC"]],
+                      ["⛽ Energía", ["USOIL","UKOIL"]],
+                    ];
+                    const grouped = GROUPS.map(([lbl, ids]) => ({
+                      lbl, items: ids.filter(id => assets.includes(id))
+                    })).filter(g => g.items.length > 0);
+                    const used = grouped.flatMap(g => g.items);
+                    const other = assets.filter(a => !used.includes(a));
+                    if (other.length) grouped.push({ lbl: "Otros", items: other });
+                    return grouped.map(g => (
+                      <optgroup key={g.lbl} label={g.lbl}>
+                        {g.items.map(a => <option key={a} value={a}>{getAssetLabel(a)}</option>)}
+                      </optgroup>
+                    ));
+                  })()}
                 </select>
                 <div style={{ marginTop: 8, fontSize: 11 }}>
                   {(()=>{
@@ -3751,7 +3770,7 @@ Rationale from system: ${signal.rationale}`;
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={() => {
                     if (!confirm("¿Reiniciar todo? Se borrarán trades, aprendizaje y balance.")) return;
-                    ["tl_balance","tl_trades","tl_learning","tl_riskPct"].forEach(k => localStorage.removeItem(k));
+                    /* reset in-memory: recargar la página para resetear el estado */
                     setBalance(100); setOpenPositions([]); setRealTrades([]);
                     setLearning(initialLearning); setLastSignal(null);
                     pushToast("✅ Trading reiniciado — datos borrados.", "info");
