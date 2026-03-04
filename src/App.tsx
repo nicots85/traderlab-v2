@@ -583,7 +583,7 @@ function analyzeWyckoffSingle(candles: Candle[]): WyckoffAnalysis {
   });
 
   // 9. LPS / LPSY
-  const lastSosIdx = events.filter(e => e.label === "SOS").at(-1)?.candleIndex ?? -1;
+  const lastSosIdx = events.filter(e => e.label === "SOS").slice(-1)[0]?.candleIndex ?? -1;
   if (lastSosIdx > 0 && lastSosIdx < window.length - 3) {
     const lpsSlice = window.slice(lastSosIdx).map((c, i) => ({ c, i: lastSosIdx + i }))
       .filter(({ c, i }) => lows[i] > supportLevel && c.v < avgVol * 0.9);
@@ -781,12 +781,11 @@ function CandlestickChart({ candles, indicators, wyckoff, showIndicators }: {
   wyckoff: WyckoffAnalysis | null;
   showIndicators: boolean;
 }) {
-  const { useState: useS, useRef: useR, useCallback: useCB } = { useState, useRef, useCallback };
   // ── Zoom + Pan state ─────────────────────────────────────────────────────
-  const [visibleCount, setVisibleCount] = useS(60);   // velas visibles
-  const [offset, setOffset] = useS(0);                 // desplazamiento desde el final
-  const svgRef = useR<SVGSVGElement>(null);
-  const dragRef = useR<{ startX: number; startOffset: number } | null>(null);
+  const [visibleCount, setVisibleCount] = useState(60);
+  const [offset, setOffset] = useState(0);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const dragRef = useRef<{ startX: number; startOffset: number } | null>(null);
 
   const totalCandles = candles.length;
   const maxOffset = Math.max(0, totalCandles - visibleCount);
@@ -794,18 +793,18 @@ function CandlestickChart({ candles, indicators, wyckoff, showIndicators }: {
   const visible = candles.slice(startIdx, startIdx + visibleCount);
 
   // Scroll = zoom (más velas = más zoom out)
-  const handleWheel = useCB((e: React.WheelEvent) => {
+  const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
     const delta = e.deltaY > 0 ? 5 : -5;
-    setVisibleCount(v => clamp(v + delta, 10, Math.min(200, totalCandles)));
+    setVisibleCount((v: number) => clamp(v + delta, 10, Math.min(200, totalCandles)));
   }, [totalCandles]);
 
   // Drag = pan
-  const handleMouseDown = useCB((e: React.MouseEvent) => {
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
     dragRef.current = { startX: e.clientX, startOffset: offset };
   }, [offset]);
 
-  const handleMouseMove = useCB((e: React.MouseEvent) => {
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (!dragRef.current || !svgRef.current) return;
     const rect = svgRef.current.getBoundingClientRect();
     const pxPerCandle = rect.width / visibleCount;
@@ -814,14 +813,14 @@ function CandlestickChart({ candles, indicators, wyckoff, showIndicators }: {
     setOffset(clamp(dragRef.current.startOffset - deltaCandles, 0, maxOffset));
   }, [visibleCount, maxOffset]);
 
-  const handleMouseUp = useCB(() => { dragRef.current = null; }, []);
+  const handleMouseUp = useCallback(() => { dragRef.current = null; }, []);
 
   // Touch support
-  const touchRef = useR<{ startX: number; startOffset: number } | null>(null);
-  const handleTouchStart = useCB((e: React.TouchEvent) => {
+  const touchRef = useRef<{ startX: number; startOffset: number } | null>(null);
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
     touchRef.current = { startX: e.touches[0].clientX, startOffset: offset };
   }, [offset]);
-  const handleTouchMove = useCB((e: React.TouchEvent) => {
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
     if (!touchRef.current || !svgRef.current) return;
     const rect = svgRef.current.getBoundingClientRect();
     const pxPerCandle = rect.width / visibleCount;
@@ -3171,7 +3170,7 @@ Rationale from system: ${signal.rationale}`;
       setPrices(payload.prices);
       setSeries(prev => {
         const next = { ...prev };
-        assets.forEach(a => { const s = payload.seriesMap[a]; if (s?.length) next[a] = s; else next[a] = [...prev[a].slice(-159), payload.prices[a]]; });
+        assets.forEach(a => { const s = payload.seriesMap[a]; if (s?.length) next[a] = s; else next[a] = [...(prev[a] ?? []).slice(-159), payload.prices[a]]; });
         return next;
       });
       setCandles(prev => {
@@ -3632,7 +3631,7 @@ Rationale from system: ${signal.rationale}`;
                           <span style={{ fontSize: 11, padding: "1px 5px", borderRadius: 4, background: `${col}20`, color: col, fontWeight: 700 }}>F{w.phase}</span>
                         )}
                         <span style={{ fontSize: 10, color: "var(--muted)", marginLeft: "auto" }}>
-                          {w.events.at(-1)?.label ?? "–"}
+                          {w.events.slice(-1)[0]?.label ?? "–"}
                         </span>
                       </div>
                       {/* Sub-row: 4H y 1D */}
