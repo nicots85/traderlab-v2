@@ -2129,7 +2129,7 @@ BEHAVIOR RULES FOR CHAT:
     try {
       const r = await fetch("/api/groq", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
         body: JSON.stringify({
           model: groqModel,
           temperature: 0.4, max_tokens: 350,
@@ -2142,11 +2142,23 @@ BEHAVIOR RULES FOR CHAT:
           ],
         }),
       });
+      if (!r.ok) {
+        let detail = "";
+        try { const e = await r.json(); detail = e?.error?.message ?? `HTTP ${r.status}`; } catch { detail = `HTTP ${r.status}`; }
+        throw new Error(detail);
+      }
       const data = await r.json() as { choices: Array<{ message: { content: string } }> };
-      const reply = data?.choices?.[0]?.message?.content ?? "Sin respuesta.";
+      const reply = data?.choices?.[0]?.message?.content?.trim() ?? "Sin respuesta.";
       setMessages(prev => [...prev, { role: "ai", text: reply, ts: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }) }]);
-    } catch {
-      setMessages(prev => [...prev, { role: "ai", text: "Error al conectar con Groq. Verificá la API key.", ts: "" }]);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const friendly = msg.includes("Failed to fetch") || msg.includes("NetworkError")
+        ? "Sin conexión al proxy /api/groq. Verificá el deploy en Vercel."
+        : msg.includes("401") ? "API key inválida — regenerala en console.groq.com"
+        : msg.includes("404") ? `Modelo no encontrado: ${groqModel}. Reconectá Groq en Configuración.`
+        : msg.includes("429") ? "Rate limit de Groq — esperá unos segundos."
+        : `Error: ${msg}`;
+      setMessages(prev => [...prev, { role: "ai", text: friendly, ts: "" }]);
     } finally {
       setLoading(false);
     }
@@ -3013,7 +3025,7 @@ Rationale from system: ${signal.rationale}`;
 
       const r = await fetch("/api/groq", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
         body: JSON.stringify({
           model: groqModel, temperature: 0.15, max_tokens: 220,
           messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMsg }],
@@ -4111,17 +4123,64 @@ Rationale from system: ${signal.rationale}`;
 
             <div className="card">
               <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>🔁 Reiniciar</p>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => {
-                    if (!confirm("¿Reiniciar todo? Se borrarán trades, aprendizaje y balance.")) return;
-                    /* reset in-memory: recargar la página para resetear el estado */
-                    setBalance(100); setOpenPositions([]); setRealTrades([]);
-                    setLearning(initialLearning); setLastSignal(null);
-                    pushToast("✅ Trading reiniciado — datos borrados.", "info");
-                  }} style={{ padding: "7px 14px", borderRadius: 7, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.1)", color: "#ef4444", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
-                  🗑 Reiniciar todo
-                </button>
-                <button onClick={() => { setBacktestTrades([]); setLastBacktest(null); pushToast("Backtest borrado.", "info"); }} style={{ padding: "7px 14px", borderRadius: 7, border: "1px solid rgba(99,102,241,0.3)", background: "rgba(99,102,241,0.1)", color: "#a5b4fc", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Limpiar backtest</button>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+
+                {/* ── Reiniciar aprendizaje ── */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderRadius: 8, background: "rgba(245,158,11,0.07)", border: "1px solid rgba(245,158,11,0.2)" }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: "#f59e0b" }}>🧠 Reiniciar aprendizaje</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                      Resetea riskScale, confidenceFloor, TP/SL dinámicos y hourEdge.<br/>
+                      <span style={{ color: "#6366f1" }}>No toca trades ni balance.</span>
+                    </div>
+                  </div>
+                  <button onClick={() => {
+                    if (!confirm("¿Reiniciar el modelo de aprendizaje? Se resetean los parámetros adaptativos (riskScale, TP/SL, confidenceFloor). Los trades y el balance no se tocan.")) return;
+                    setLearning(initialLearning);
+                    learningRef.current = initialLearning;
+                    pushToast("🧠 Aprendizaje reiniciado — parámetros adaptativos reseteados.", "info");
+                  }} style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(245,158,11,0.4)", background: "rgba(245,158,11,0.12)", color: "#f59e0b", fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}>
+                    Reiniciar
+                  </button>
+                </div>
+
+                {/* ── Cerrar posiciones abiertas (solo internas) ── */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderRadius: 8, background: "rgba(99,102,241,0.07)", border: "1px solid rgba(99,102,241,0.2)" }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: "#a5b4fc" }}>📋 Limpiar estado interno</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                      Cierra las posiciones del motor interno y limpia historial.<br/>
+                      <span style={{ color: "#f59e0b" }}>No afecta posiciones reales en MT5.</span>
+                    </div>
+                  </div>
+                  <button onClick={() => {
+                    if (!confirm("¿Limpiar el estado interno? Se borran posiciones del motor y el historial de trades. Las posiciones reales en MT5 NO se tocan.")) return;
+                    setOpenPositions([]);
+                    setRealTrades([]);
+                    setBacktestTrades([]);
+                    setLastBacktest(null);
+                    setLastSignal(null);
+                    pushToast("📋 Estado interno limpiado — posiciones MT5 intactas.", "info");
+                  }} style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(99,102,241,0.3)", background: "rgba(99,102,241,0.1)", color: "#a5b4fc", fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}>
+                    Limpiar
+                  </button>
+                </div>
+
+                {/* ── Backtest ── */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderRadius: 8, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)" }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: "var(--muted)" }}>📊 Limpiar backtest</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>Borra los resultados del último backtest.</div>
+                  </div>
+                  <button onClick={() => {
+                    setBacktestTrades([]);
+                    setLastBacktest(null);
+                    pushToast("Backtest borrado.", "info");
+                  }} style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)", color: "var(--muted)", fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}>
+                    Limpiar
+                  </button>
+                </div>
+
               </div>
             </div>
           </div>
