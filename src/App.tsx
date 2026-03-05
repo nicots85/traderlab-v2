@@ -2126,7 +2126,7 @@ BEHAVIOR RULES FOR CHAT:
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
-          model: "meta-llama/llama-4-scout-17b-16e-instruct",
+          model: "llama-3.3-70b-versatile",
           temperature: 0.4, max_tokens: 350,
           messages: [
             { role: "system", content: systemCtx },
@@ -2318,9 +2318,12 @@ export function App() {
   const [mt5Status,   setMt5Status]   = useState<"disconnected"|"connected"|"error"|"testing">("disconnected");
   const [mt5Account,  setMt5Account]  = useState<string|null>(null);
   const [mt5Balance,  setMt5Balance]  = useState<number|null>(null);
-  const [mt5Equity,   setMt5Equity]   = useState<number|null>(null);
-  const [mt5Positions, setMt5Positions] = useState<MT5Position[]>([]);
-  const [mt5History,   setMt5History]   = useState<ClosedTrade[]>([]);
+  const [mt5Equity,      setMt5Equity]      = useState<number|null>(null);
+  const [mt5Margin,      setMt5Margin]      = useState<number|null>(null);
+  const [mt5FreeMargin,  setMt5FreeMargin]  = useState<number|null>(null);
+  const [mt5MarginLevel, setMt5MarginLevel] = useState<number|null>(null);
+  const [mt5Positions,   setMt5Positions]   = useState<MT5Position[]>([]);
+  const [mt5History,     setMt5History]     = useState<ClosedTrade[]>([]);
 
   // Indicadores, Wyckoff y control de mercado calculados por activo
   const [indicatorsMap, setIndicatorsMap] = useState<Partial<Record<Asset, Indicators>>>({});
@@ -2414,7 +2417,7 @@ export function App() {
     if (!apiKey.trim() || !usingGroq) { pushToast("Ingrese API Key Groq y active el modo Groq.", "warning"); return; }
     setAiStatus("testing");
     const t0 = Date.now();
-    const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
+    const GROQ_MODEL = "llama-3.3-70b-versatile";
     try {
       const r = await fetch("/api/groq", {
         method: "POST",
@@ -2989,7 +2992,7 @@ Rationale from system: ${signal.rationale}`;
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
-          model: "meta-llama/llama-4-scout-17b-16e-instruct", temperature: 0.15, max_tokens: 220,
+          model: "llama-3.3-70b-versatile", temperature: 0.15, max_tokens: 220,
           messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMsg }],
         }),
       });
@@ -3221,13 +3224,28 @@ Rationale from system: ${signal.rationale}`;
       // Posiciones abiertas reales
       const rPos = await fetch(`${mt5Url}/positions`, { signal: AbortSignal.timeout(5000) });
       if (rPos.ok) {
-        const dPos = await rPos.json() as { positions: MT5Position[] };
+        const dPos = await rPos.json() as {
+          positions: MT5Position[];
+          total: number;
+          total_profit?: number;
+          balance?: number;
+          equity?: number;
+          margin?: number;
+          free_margin?: number;
+          margin_level?: number;
+        };
         // Mapear symbol → Asset (ej: BTCUSD → BTCUSD)
         const mapped = dPos.positions.map(p => ({
           ...p,
           asset: (assets.find(a => p.symbol.startsWith(a) || a === p.symbol) ?? p.symbol) as Asset,
         }));
         setMt5Positions(mapped);
+        // Actualizar datos del encabezado desde /positions (más fresco que /status)
+        if (dPos.balance   !== undefined && dPos.balance   !== null) setMt5Balance(dPos.balance);
+        if (dPos.equity    !== undefined && dPos.equity    !== null) setMt5Equity(dPos.equity);
+        if (dPos.margin    !== undefined && dPos.margin    !== null) setMt5Margin(dPos.margin);
+        if (dPos.free_margin !== undefined && dPos.free_margin !== null) setMt5FreeMargin(dPos.free_margin);
+        if (dPos.margin_level !== undefined && dPos.margin_level !== null) setMt5MarginLevel(dPos.margin_level);
       }
       // Historial reciente (últimos 7 días)
       const rHist = await fetch(`${mt5Url}/history?days=7`, { signal: AbortSignal.timeout(5000) });
@@ -3549,20 +3567,36 @@ Rationale from system: ${signal.rationale}`;
       <div style={{ background: "rgba(255,255,255,0.02)", borderBottom: "1px solid rgba(255,255,255,0.05)", padding: "12px 20px" }}>
         <div className="header-metrics" style={{ maxWidth: 1440, margin: "0 auto", display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
           {[
-            { label: "Balance", value: money(balance), color: "var(--text)" },
-            { label: mt5Enabled && mt5Positions.length > 0 ? "P&L MT5 real" : "P&L no realizado",
+            // Cuando MT5 está conectado: mostrar datos reales del broker
+            { label: "Balance",
+              value: mt5Enabled && mt5Balance !== null ? `$${mt5Balance.toFixed(2)}` : money(balance),
+              color: "var(--text)" },
+            { label: "Patrimonio",
+              value: mt5Enabled && mt5Equity !== null ? `$${mt5Equity.toFixed(2)}` : money(equity),
+              color: mt5Enabled && mt5Equity !== null && mt5Balance !== null
+                ? (mt5Equity >= mt5Balance ? "#10b981" : "#ef4444")
+                : (equity >= balance ? "#10b981" : "#ef4444") },
+            { label: "P&L abierto",
               value: mt5Enabled && mt5Positions.length > 0
                 ? money(mt5Positions.reduce((a, p) => a + p.profit, 0))
                 : money(unrealized),
               color: (mt5Enabled && mt5Positions.length > 0
                 ? mt5Positions.reduce((a, p) => a + p.profit, 0)
                 : unrealized) >= 0 ? "#10b981" : "#ef4444" },
-            { label: "Equity", value: money(equity), color: equity >= 100 ? "#10b981" : "#ef4444" },
             { label: "Win rate", value: `${stats.winRate.toFixed(1)}%`, color: stats.winRate >= 50 ? "#10b981" : "#ef4444" },
             { label: "Factor ganancia", value: stats.profitFactor.toFixed(2), color: stats.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
             { label: "Sharpe", value: stats.sharpe.toFixed(2), color: stats.sharpe >= 1 ? "#10b981" : "var(--text)" },
             { label: "Trades reales", value: realTrades.length, color: "var(--muted)" },
-            { label: "Posiciones abiertas", value: openPositions.length + (mt5Positions.length > 0 ? ` (+${mt5Positions.length} MT5)` : ""), color: openPositions.length > 0 || mt5Positions.length > 0 ? "#f59e0b" : "var(--muted)" },
+            { label: mt5Enabled && mt5Margin !== null ? "Margen usado" : "Margen usado",
+              value: mt5Enabled && mt5Margin !== null ? `$${mt5Margin.toFixed(2)}` : money(openPositions.reduce((a,p)=>a+p.marginUsed,0)),
+              color: "var(--muted)" },
+            { label: mt5Enabled && mt5FreeMargin !== null ? "Margen libre" : "Posiciones",
+              value: mt5Enabled && mt5FreeMargin !== null
+                ? `$${mt5FreeMargin.toFixed(2)}${mt5MarginLevel !== null ? ` (${mt5MarginLevel.toFixed(0)}%)` : ""}`
+                : String(openPositions.length + (mt5Positions.length > 0 ? ` (+${mt5Positions.length} MT5)` : "")),
+              color: mt5Enabled && mt5MarginLevel !== null
+                ? (mt5MarginLevel > 500 ? "#10b981" : mt5MarginLevel > 200 ? "#f59e0b" : "#ef4444")
+                : (openPositions.length > 0 || mt5Positions.length > 0 ? "#f59e0b" : "var(--muted)") },
           ].map(({ label, value, color }) => (
             <div key={label} className="metric" style={{ flex: "0 0 auto", minWidth: 105 }}>
               <span className="label" style={{ fontSize: 11.5, fontWeight: 600 }}>{label}</span>
