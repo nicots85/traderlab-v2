@@ -1058,7 +1058,7 @@ const GLOSSARY: Record<string, string> = {
   "Vol Delta":    "Volume Delta: diferencia entre volumen comprador y vendedor estimado. Positivo = presión de compra dominante.",
   "ATR":          "Average True Range: medida de volatilidad promedio. Se usa para calcular stops y take profits proporcionales al movimiento real del mercado.",
   "Confianza":    "Score interno 0-100% que refleja cuántos factores técnicos confluyen en la misma dirección. Por encima del umbral configurado, la IA evalúa si abrir.",
-  <Tip label="Win Rate" text="Porcentaje de operaciones ganadoras. El sistema aprende de este valor para ajustar el tamaño de posición y el piso de confianza." />:     "Porcentaje de trades ganadores sobre el total. Por sí solo no indica rentabilidad — importa también el ratio ganancia/pérdida.",
+  "Win Rate":     "Porcentaje de trades ganadores sobre el total. Por sí solo no indica rentabilidad — importa también el ratio ganancia/pérdida.",
   "Sharpe":       "Ratio de Sharpe: retorno ajustado por riesgo. >1 es aceptable, >2 es excelente. Mide si el rendimiento justifica la volatilidad asumida.",
   "Profit Factor":"Ratio entre ganancias brutas y pérdidas brutas. >1.5 es saludable. >2 es muy bueno.",
   "Drawdown":     "Caída máxima desde un pico de equity. Mide el peor momento histórico de la curva de capital.",
@@ -1186,7 +1186,7 @@ function OrderFlowPanel({ of: ofData, price }: { of: OrderFlowScore; price: numb
 
       {/* ── CVD multi-ventana ── */}
       <div className="card" style={{ padding: "10px 14px" }}>
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)", marginBottom: 8 }}><Tip label="CVD Acumulado" text="Cumulative Volume Delta: diferencia acumulada entre volumen comprador y vendedor. Positivo = más compradores. Ayuda a detectar divergencias." /><//div>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)", marginBottom: 8 }}><Tip label="CVD Acumulado" text="Cumulative Volume Delta: diferencia acumulada entre volumen comprador y vendedor. Positivo = más compradores. Ayuda a detectar divergencias." /></div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
           {[
             { label: "CVD 50v", val: cvd.cvd50, trend: cvd.slope50 },
@@ -3781,7 +3781,7 @@ Rationale from system: ${signal.rationale}`;
             { label: "Balance",
               value: mt5Enabled && mt5Balance !== null ? `$${mt5Balance.toFixed(2)}` : money(balance),
               color: "var(--text)" },
-            { label: <Tip label="Patrimonio" text="Equity: balance + PnL flotante de posiciones abiertas. Cuando hay posiciones, puede ser diferente al balance." />,
+            { label: "Patrimonio",
               value: mt5Enabled && mt5Equity !== null ? `$${mt5Equity.toFixed(2)}` : money(equity),
               color: mt5Enabled && mt5Equity !== null && mt5Balance !== null
                 ? (mt5Equity >= mt5Balance ? "#10b981" : "#ef4444")
@@ -3797,7 +3797,7 @@ Rationale from system: ${signal.rationale}`;
             { label: "Factor ganancia", value: stats.profitFactor.toFixed(2), color: stats.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
             { label: "Sharpe", value: stats.sharpe.toFixed(2), color: stats.sharpe >= 1 ? "#10b981" : "var(--text)" },
             { label: "Trades reales", value: realTrades.length, color: "var(--muted)" },
-            { label: mt5Enabled && mt5Margin !== null ? <Tip label="Margen usado" text="Dinero bloqueado como garantía por las posiciones abiertas. Calculado como: (lotes × precio × contract_size) / apalancamiento." /> : "Margen usado",
+            { label: mt5Enabled && mt5Margin !== null ? "Margen usado": "Margen usado",
               value: mt5Enabled && mt5Margin !== null ? `$${mt5Margin.toFixed(2)}` : money(openPositions.reduce((a,p)=>a+p.marginUsed,0)),
               color: "var(--muted)" },
             { label: mt5Enabled && mt5FreeMargin !== null ? "Margen libre" : "Posiciones",
