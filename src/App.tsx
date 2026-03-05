@@ -2420,8 +2420,7 @@ export function App() {
     const t0 = Date.now();
     try {
       // Paso 1: listar modelos disponibles en la cuenta
-      const rModels = await fetch("/api/groq", {
-        method: "GET",
+      const rModels = await fetch("https://api.groq.com/openai/v1/models", {
         headers: { Authorization: `Bearer ${apiKey.trim()}` },
       });
       if (!rModels.ok) {
