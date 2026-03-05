@@ -1900,11 +1900,13 @@ function analyzeOrderFlow(candles: Candle[], price: number, vwap: number, atr: n
   // ── Setup de trading ──────────────────────────────────────────────────────
   // Detectar zonas extremas (sobrecompra / sobreventa)
   // En extremos el setup se INVIERTE: no seguimos el momentum, anticipamos el rebote
-  const rsiVal   = closes.length >= 14
+  // RSI calculado desde las velas disponibles en analyzeOrderFlow
+  const _cls = candles.slice(-30).map(c => c.c);
+  const rsiVal = _cls.length >= 14
     ? (() => {
         let g = 0, l = 0;
-        for (let i = closes.length - 14; i < closes.length; i++) {
-          const d = closes[i] - closes[i - 1];
+        for (let i = _cls.length - 14; i < _cls.length; i++) {
+          const d = _cls[i] - _cls[i - 1];
           if (d > 0) g += d; else l -= d;
         }
         const rs = g / Math.max(l, 1e-9);
