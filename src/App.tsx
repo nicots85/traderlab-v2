@@ -192,17 +192,22 @@ const assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"]; // se expande 
 // No hay fallback a APIs externas — si el bridge no está activo, el feed queda offline.
 
 
-const initialPrices: Record<string, number> = {
-  BTCUSD: 95000, ETHUSD: 3200, XAGUSD: 32.0, XAUUSD: 3300,
-  BNBUSD: 600, SOLUSD: 170, XRPUSD: 0.55, LTCUSD: 90,
-  DOGEUSD: 0.22, AVAXUSD: 40, LINKUSD: 18,
-  EURUSD: 1.08, GBPUSD: 1.27, USDJPY: 149,
-  US30: 39000, US500: 5100, USTEC: 18000,
-  USOIL: 78, UKOIL: 82,
+const initialPrices: Record<Asset, number> = {
+  BTCUSD: 71300, ETHUSD: 2080, XAGUSD: 81.8, XAUUSD: 5076,
 };
 
 const leverageByAsset: Record<Asset, number> = {
   BTCUSD: 100, ETHUSD: 100, XAGUSD: 50, XAUUSD: 100,
+};
+// Tamaño mínimo de lote y contract size real del broker (PrimeXBT)
+const contractSize: Record<Asset, number> = {
+  BTCUSD: 1, ETHUSD: 1, XAUUSD: 100, XAGUSD: 5000,
+};
+const volMin: Record<Asset, number> = {
+  BTCUSD: 0.001, ETHUSD: 0.01, XAUUSD: 0.01, XAGUSD: 0.01,
+};
+const volStep: Record<Asset, number> = {
+  BTCUSD: 0.001, ETHUSD: 0.01, XAUUSD: 0.01, XAGUSD: 0.01,
 };
 // ATR mínimo por activo — evita sizing explosivo en mercados de bajo precio
 // XAGUSD ~32 usd: ATR 1m mínimo realista = 0.05 usd (0.15%)
@@ -263,10 +268,10 @@ const assetLabel: Record<Asset, string> = {
   XAGUSD: "Plata XAG", XAUUSD: "Oro XAU",
 };
 const minAtrByAsset: Record<Asset, number> = {
-  BTCUSD: 50, ETHUSD: 5, XAGUSD: 0.08, XAUUSD: 2.0,
+  BTCUSD: 100, ETHUSD: 8, XAGUSD: 0.15, XAUUSD: 5.0,
 };
 const CFD_BASE_SPREAD_PCT: Record<Asset, number> = {
-  BTCUSD: 0.016, ETHUSD: 0.025, XAUUSD: 0.008, XAGUSD: 0.045,
+  BTCUSD: 0.00069, ETHUSD: 0.0012, XAUUSD: 0.00006, XAGUSD: 0.00067,
 };
 function getAssetLabel(a: Asset)      { return assetLabel[a] ?? a; }
 function getAssetMinAtr(a: Asset)     { return minAtrByAsset[a] ?? 1; }
@@ -2418,43 +2423,40 @@ export function App() {
     if (!apiKey.trim() || !usingGroq) { pushToast("Ingrese API Key Groq y active el modo Groq.", "warning"); return; }
     setAiStatus("testing");
     const t0 = Date.now();
+    // Probar modelos en orden hasta encontrar uno activo
+    const CANDIDATES = [
+      "llama3-70b-8192",
+      "llama3-8b-8192",
+      "llama-3.1-8b-instant",
+      "llama-3.3-70b-versatile",
+      "gemma2-9b-it",
+      "mixtral-8x7b-32768",
+    ];
+    let chosenModel = "";
+    let lastStatus = 0;
+    let lastDetail = "";
+    for (const candidate of CANDIDATES) {
+      try {
+        const r = await fetch("/api/groq", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
+          body: JSON.stringify({ model: candidate, temperature: 0, max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+        });
+        lastStatus = r.status;
+        if (r.status === 401) { lastDetail = "API key inválida"; break; }
+        if (r.status === 429) { lastDetail = "Rate limit"; break; }
+        if (r.ok) { chosenModel = candidate; break; }
+        try { const d = await r.json(); lastDetail = d?.error?.message ?? `HTTP ${r.status}`; } catch { lastDetail = `HTTP ${r.status}`; }
+      } catch (fetchErr) {
+        lastDetail = fetchErr instanceof Error ? fetchErr.message : "fetch error";
+        break; // Error de red — no tiene sentido probar más modelos
+      }
+    }
     try {
-      // Paso 1: listar modelos disponibles en la cuenta
-      const rModels = await fetch("https://api.groq.com/openai/v1/models", {
-        headers: { Authorization: `Bearer ${apiKey.trim()}` },
-      });
-      if (!rModels.ok) {
-        if (rModels.status === 401) throw new Error("API key inválida (401)");
-        throw new Error(`Error listando modelos: HTTP ${rModels.status}`);
-      }
-      const mData = await rModels.json() as { data: Array<{ id: string }> };
-      const available = mData.data.map((m: { id: string }) => m.id);
-
-      // Paso 2: elegir el mejor modelo disponible
-      const PREFERRED = [
-        "llama-3.3-70b-versatile",
-        "llama3-70b-8192",
-        "llama3-8b-8192",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it",
-      ];
-      const GROQ_MODEL = PREFERRED.find(m => available.includes(m)) ?? available[0];
-      if (!GROQ_MODEL) throw new Error("No hay modelos disponibles en esta cuenta Groq");
-
-      // Paso 3: test con el modelo elegido
-      const r = await fetch("/api/groq", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
-        body: JSON.stringify({ model: GROQ_MODEL, temperature: 0, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
-      });
-      if (!r.ok) {
-        let detail = "";
-        try { const err = await r.json(); detail = err?.error?.message ?? ""; } catch { /* */ }
-        throw new Error(`HTTP ${r.status}${detail ? ": " + detail : ""}`);
-      }
-      setGroqModel(GROQ_MODEL);
+      if (!chosenModel) throw new Error(lastDetail || `Ningún modelo disponible (último HTTP ${lastStatus})`);
+      setGroqModel(chosenModel);
       setAiLatency(Date.now() - t0); setAiStatus("ok");
-      pushToast(`✅ Groq OK — ${GROQ_MODEL} — ${Date.now() - t0}ms`, "success");
+      pushToast(`✅ Groq OK — ${chosenModel} — ${Date.now() - t0}ms`, "success");
     } catch (e) {
       setAiStatus("error");
       const msg = e instanceof Error ? e.message : String(e);
@@ -3202,8 +3204,15 @@ Rationale from system: ${signal.rationale}`;
     // Evita que ATR pequeño en plata/gold genere sizes irreales
     const minStop = signal.entry * 0.003;
     const stopDistance = Math.max(Math.abs(signal.entry - signal.stopLoss), minStop);
-    const size = riskUsd / stopDistance;
-    const marginUsed = (size * signal.entry) / getLeverage(signal.asset);
+    // Calcular lotes respetando volMin y volStep del broker
+    const cs   = contractSize[signal.asset] ?? 1;
+    const vMin = volMin[signal.asset]       ?? 0.01;
+    const vStp = volStep[signal.asset]      ?? 0.01;
+    // size en lotes = riskUsd / (stopDistance * contractSize)
+    const rawLots = riskUsd / (stopDistance * cs);
+    // Redondear al volStep más cercano hacia abajo, asegurar >= volMin
+    const size = Math.max(vMin, Math.floor(rawLots / vStp) * vStp);
+    const marginUsed = (size * cs * signal.entry) / getLeverage(signal.asset);
     // ── Riesgo de margen total (anti-liquidación) ──────────────────────────
     const totalMarginUsed = openPositionsRef.current.reduce((a, p) => a + p.marginUsed, 0);
     const mt5MarginUsed   = mt5Enabled && mt5Balance !== null
