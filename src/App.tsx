@@ -2122,7 +2122,7 @@ BEHAVIOR RULES FOR CHAT:
     }
 
     try {
-      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      const r = await fetch("/api/groq", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -2329,13 +2329,15 @@ export function App() {
 
   const toastIdRef = useRef(0);
   const prevPricesRef = useRef(initialPrices);
-  const openPositionsRef = useRef(openPositions);
+  const openPositionsRef  = useRef(openPositions);
+  const mt5PositionsRef   = useRef(mt5Positions);
   const learningRef = useRef(learning);
   const volumeShockRef = useRef(volumeShock);
   const seriesRef = useRef(series);
   const candlesRef = useRef(candles);  // ref para usar en setInterval sin stale closure
 
-  useEffect(() => { openPositionsRef.current = openPositions; }, [openPositions]);
+  useEffect(() => { openPositionsRef.current  = openPositions;  }, [openPositions]);
+  useEffect(() => { mt5PositionsRef.current   = mt5Positions;   }, [mt5Positions]);
   useEffect(() => { prevPricesRef.current = prices; }, [prices]);
   useEffect(() => { learningRef.current = learning; }, [learning]);
   useEffect(() => { volumeShockRef.current = volumeShock; }, [volumeShock]);
@@ -2414,7 +2416,7 @@ export function App() {
     const t0 = Date.now();
     const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
     try {
-      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      const r = await fetch("/api/groq", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
         body: JSON.stringify({ model: GROQ_MODEL, temperature: 0, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
@@ -2983,7 +2985,7 @@ RISK CHECK FOR THIS TRADE:
 - EV signal: ${evSign}
 Rationale from system: ${signal.rationale}`;
 
-      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      const r = await fetch("/api/groq", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -3010,13 +3012,34 @@ Rationale from system: ${signal.rationale}`;
     }
   }
 
-  const closePosition = useCallback((position: Position, exit: number, result: ExitReason) => {
+  const closePosition = useCallback(async (position: Position, exit: number, result: ExitReason) => {
+    // Si MT5 está conectado, cerrar en el broker PRIMERO y esperar confirmación
+    if (mt5Enabled && mt5Status === "connected") {
+      try {
+        const body: Record<string, unknown> = {
+          asset: position.signal.asset,
+          direction: position.signal.direction,
+        };
+        const r = await fetch(`${mt5Url}/close`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body), signal: AbortSignal.timeout(8000),
+        });
+        const d = await r.json() as { ok: boolean; closed: number[]; errors?: Array<{ticket:number;error:string}> };
+        if (!d.ok || !d.closed?.length) {
+          pushToast(`⚠️ MT5 no pudo cerrar ${position.signal.asset}: ${d.errors?.[0]?.error ?? "sin respuesta"}`, "error");
+          return; // No registrar el cierre si MT5 falló
+        }
+      } catch (e) {
+        pushToast(`⚠️ MT5 timeout al cerrar ${position.signal.asset}`, "error");
+        return;
+      }
+    }
+    // Registrar el cierre localmente
     const pnl = position.signal.direction === "LONG"
       ? (exit - position.signal.entry) * position.size
       : (position.signal.entry - exit) * position.size;
     const icon = result === "TP" ? "✅" : result === "SL" ? "❌" : "⟳";
     pushToast(`${icon} ${position.signal.asset} ${position.signal.direction} → ${exitLabel[result]}  ${pnl >= 0 ? "+" : ""}${money(pnl)}`, pnl >= 0 ? "success" : "error");
-        if (mt5Enabled) closeInMT5(position.signal.asset, position.signal.direction);
     setBalance(prev => prev + pnl);
     setOpenPositions(prev => prev.filter(p => p.id !== position.id));
     setRealTrades(prev => {
@@ -3029,8 +3052,10 @@ Rationale from system: ${signal.rationale}`;
       refreshLearning(next);
       return next;
     });
+    // Sincronizar MT5 para reflejar el cierre inmediatamente
+    if (mt5Enabled && mt5Status === "connected") setTimeout(() => void syncMT5State(), 500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mt5Enabled, mt5Status, mt5Url]);
 
   function evaluatePositionsWithCurrentPrices() {
     const pp    = prevPricesRef.current;
@@ -3088,9 +3113,9 @@ Rationale from system: ${signal.rationale}`;
       const hitTp = isLong ? tradable >= pos.signal.takeProfit : tradable <= pos.signal.takeProfit;
       const hitSl = isLong ? tradable <= effectiveSl           : tradable >= effectiveSl;
 
-      if (hitTp)    { closePosition(pos, tradable, "TP");                        return; }
-      if (hitSl)    { closePosition(pos, tradable, trailMoved ? "TRAIL" : "SL"); return; }
-      if (reversal) { closePosition(pos, tradable, "REVERSAL");                  return; }
+      if (hitTp)    { void closePosition(pos, tradable, "TP");                        return; }
+      if (hitSl)    { void closePosition(pos, tradable, trailMoved ? "TRAIL" : "SL"); return; }
+      if (reversal) { void closePosition(pos, tradable, "REVERSAL");                  return; }
 
       if (trailMoved || peak !== pos.peak || trough !== pos.trough) {
         setOpenPositions(prev => prev.map(p =>
@@ -3118,6 +3143,23 @@ Rationale from system: ${signal.rationale}`;
       }
     }
 
+    // ── Guard: no abrir si ya hay posición abierta en este activo ─────────────
+    const existingInAsset = openPositionsRef.current.filter(p => p.signal.asset === targetAsset);
+    if (existingInAsset.length > 0) {
+      if (!autoLabel) pushToast(`⏸ ${targetAsset}: ya hay ${existingInAsset.length} posición abierta`, "warning");
+      return;
+    }
+    // ── Guard MT5: verificar posiciones reales del broker ───────────────────
+    if (mt5Enabled && mt5Status === "connected") {
+      const mt5InAsset = mt5PositionsRef.current.filter(p =>
+        p.symbol.startsWith(targetAsset) || p.asset === targetAsset
+      );
+      if (mt5InAsset.length > 0) {
+        if (!autoLabel) pushToast(`⏸ ${targetAsset}: ${mt5InAsset.length} posición real en MT5`, "warning");
+        return;
+      }
+    }
+
     const signal = generateSignal(mode, targetAsset);
     if (!autoLabel) setLastSignal(signal);
     const decision = await aiDecision(signal);
@@ -3138,7 +3180,33 @@ Rationale from system: ${signal.rationale}`;
     const stopDistance = Math.max(Math.abs(signal.entry - signal.stopLoss), minStop);
     const size = riskUsd / stopDistance;
     const marginUsed = (size * signal.entry) / getLeverage(signal.asset);
-    if (marginUsed > equity * 0.65) { pushToast("⚠️ Margen insuficiente", "warning"); return; }
+    // ── Riesgo de margen total (anti-liquidación) ──────────────────────────
+    const totalMarginUsed = openPositionsRef.current.reduce((a, p) => a + p.marginUsed, 0);
+    const mt5MarginUsed   = mt5Enabled && mt5Balance !== null
+      ? (mt5Balance - (mt5Equity ?? mt5Balance))  // equity < balance = margen en uso
+      : 0;
+    const realEquity = mt5Enabled && mt5Equity !== null ? mt5Equity : equity;
+    const freeMarginPct = realEquity > 0
+      ? ((realEquity - totalMarginUsed - mt5MarginUsed - marginUsed) / realEquity) * 100
+      : 0;
+
+    // Bloquear si el margen libre quedaría por debajo del 30% del equity real
+    if (freeMarginPct < 30) {
+      if (!autoLabel) pushToast(
+        `🛑 Margen libre insuficiente: ${freeMarginPct.toFixed(1)}% — riesgo de liquidación`,
+        "error"
+      );
+      return;
+    }
+    // Warning si el margen libre queda entre 30-50%
+    if (freeMarginPct < 50 && !autoLabel) {
+      pushToast(`⚠️ Margen libre bajo: ${freeMarginPct.toFixed(1)}%`, "warning");
+    }
+    // Bloquear si una sola posición usaría más del 20% del equity real
+    if (marginUsed > realEquity * 0.20) {
+      if (!autoLabel) pushToast("⚠️ Posición demasiado grande (>20% equity)", "warning");
+      return;
+    }
     const multTag = wyckoffMult > 1 ? ` | Wyckoff ×${wyckoffMult.toFixed(2)}` : "";
     setOpenPositions(prev => [...prev, { id: Date.now(), signal, size, marginUsed, openedAt: new Date().toISOString(), peak: signal.entry, trough: signal.entry }]);
     if (!autoLabel) pushToast(`🚀 ${signal.asset} ${signal.direction} @ ${signal.entry.toFixed(2)} | conf ${signal.confidence.toFixed(0)}%${multTag}${signal.aiRationale ? " | " + signal.aiRationale : ""}`, "success");
@@ -3374,13 +3442,29 @@ Rationale from system: ${signal.rationale}`;
   }
 
   useEffect(() => { void syncRealData(); }, []);
+  // Sync de posiciones MT5 cada 1 segundo si hay posiciones abiertas
+  useEffect(() => {
+    if (!mt5Enabled || mt5Status !== "connected") return;
+    const id = window.setInterval(() => {
+      const hasOpenPositions = mt5PositionsRef.current.length > 0 || openPositionsRef.current.length > 0;
+      if (hasOpenPositions) void syncMT5State();
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [mt5Enabled, mt5Status]);
+
+  // AutoScan: genera señales y sincroniza datos de mercado
   useEffect(() => {
     if (!autoScan) return;
     const ms = Math.max(8, scanEverySec) * 1000;
-    const id = window.setInterval(() => { void syncRealData(); void runAutoScan(); }, ms);
+    const id = window.setInterval(() => {
+      void syncRealData();
+      void runAutoScan();
+      // Sync MT5 state también en cada ciclo de scan (aunque no haya posiciones)
+      if (mt5Enabled && mt5Status === "connected") void syncMT5State();
+    }, ms);
     return () => window.clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoScan, scanEverySec]);
+  }, [autoScan, scanEverySec, mt5Enabled, mt5Status]);
 
   function runBacktest() {
     if (!liveReady) { pushToast("Sincronice primero.", "warning"); return; }
@@ -3772,7 +3856,7 @@ Rationale from system: ${signal.rationale}`;
                 {openPositions.length === 0
                   ? <div className="card" style={{ textAlign: "center", padding: "22px", color: "var(--muted)", fontSize: 12 }}>Sin posiciones abiertas</div>
                   : <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      {openPositions.map(p => <LivePositionCard key={p.id} position={p} prices={prices} spreadByAsset={spreadByAsset} now={now} onClose={pos => closePosition(pos, prices[pos.signal.asset], "REVERSAL")} />)}
+                      {openPositions.map(p => <LivePositionCard key={p.id} position={p} prices={prices} spreadByAsset={spreadByAsset} now={now} onClose={pos => void closePosition(pos, prices[pos.signal.asset], "REVERSAL")} />)}
                     </div>
                 }
               </div>
