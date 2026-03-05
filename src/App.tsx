@@ -2126,7 +2126,7 @@ BEHAVIOR RULES FOR CHAT:
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
+          model: groqModel,
           temperature: 0.4, max_tokens: 350,
           messages: [
             { role: "system", content: systemCtx },
@@ -2296,7 +2296,8 @@ export function App() {
   const [volumeShock, setVolumeShock] = useState(0.28);
   const [learning, setLearning] = useLocalStorage<LearningModel>("tl_learning", initialLearning);
   const [apiKey, setApiKey] = useLocalStorage("tl_apiKey", "");
-  const [usingGroq, setUsingGroq] = useState(false);
+  const [usingGroq,   setUsingGroq]   = useState(false);
+  const [groqModel,   setGroqModel]   = useState("llama-3.3-70b-versatile");
   const [riskPct, setRiskPct] = useLocalStorage("tl_riskPct", 1.2);
   const [backtestSize, setBacktestSize] = useState(40);
   const [lastBacktest, setLastBacktest] = useState<BacktestReport | null>(null);
@@ -2417,8 +2418,31 @@ export function App() {
     if (!apiKey.trim() || !usingGroq) { pushToast("Ingrese API Key Groq y active el modo Groq.", "warning"); return; }
     setAiStatus("testing");
     const t0 = Date.now();
-    const GROQ_MODEL = "llama-3.3-70b-versatile";
     try {
+      // Paso 1: listar modelos disponibles en la cuenta
+      const rModels = await fetch("/api/groq", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${apiKey.trim()}` },
+      });
+      if (!rModels.ok) {
+        if (rModels.status === 401) throw new Error("API key inválida (401)");
+        throw new Error(`Error listando modelos: HTTP ${rModels.status}`);
+      }
+      const mData = await rModels.json() as { data: Array<{ id: string }> };
+      const available = mData.data.map((m: { id: string }) => m.id);
+
+      // Paso 2: elegir el mejor modelo disponible
+      const PREFERRED = [
+        "llama-3.3-70b-versatile",
+        "llama3-70b-8192",
+        "llama3-8b-8192",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it",
+      ];
+      const GROQ_MODEL = PREFERRED.find(m => available.includes(m)) ?? available[0];
+      if (!GROQ_MODEL) throw new Error("No hay modelos disponibles en esta cuenta Groq");
+
+      // Paso 3: test con el modelo elegido
       const r = await fetch("/api/groq", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
@@ -2427,11 +2451,9 @@ export function App() {
       if (!r.ok) {
         let detail = "";
         try { const err = await r.json(); detail = err?.error?.message ?? ""; } catch { /* */ }
-        if (r.status === 401) throw new Error(`API key inválida (401)${detail ? ": " + detail : ""}`);
-        if (r.status === 404) throw new Error(`Modelo no encontrado (404): ${GROQ_MODEL}`);
-        if (r.status === 429) throw new Error("Rate limit alcanzado (429) — esperá unos segundos");
         throw new Error(`HTTP ${r.status}${detail ? ": " + detail : ""}`);
       }
+      setGroqModel(GROQ_MODEL);
       setAiLatency(Date.now() - t0); setAiStatus("ok");
       pushToast(`✅ Groq OK — ${GROQ_MODEL} — ${Date.now() - t0}ms`, "success");
     } catch (e) {
@@ -2992,7 +3014,7 @@ Rationale from system: ${signal.rationale}`;
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
-          model: "llama-3.3-70b-versatile", temperature: 0.15, max_tokens: 220,
+          model: groqModel, temperature: 0.15, max_tokens: 220,
           messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMsg }],
         }),
       });
