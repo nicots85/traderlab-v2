@@ -326,6 +326,18 @@ function formatDuration(openedAt: string) {
 
 // ─── Indicators Engine ────────────────────────────────────────────────────────
 
+// ─── Tooltip component ────────────────────────────────────────────────────────
+function Tip({ label, text, children }: { label?: string; text: string; children?: React.ReactNode }) {
+  return (
+    <span className="tip">
+      {children ?? label}
+      <i className="tip-icon">?</i>
+      <span className="tip-box">{text}</span>
+    </span>
+  );
+}
+
+
 function calcRSI(closes: number[], period = 14): number[] {
   if (closes.length < period + 1) return closes.map(() => 50);
   const gains: number[] = []; const losses: number[] = [];
@@ -1046,7 +1058,7 @@ const GLOSSARY: Record<string, string> = {
   "Vol Delta":    "Volume Delta: diferencia entre volumen comprador y vendedor estimado. Positivo = presión de compra dominante.",
   "ATR":          "Average True Range: medida de volatilidad promedio. Se usa para calcular stops y take profits proporcionales al movimiento real del mercado.",
   "Confianza":    "Score interno 0-100% que refleja cuántos factores técnicos confluyen en la misma dirección. Por encima del umbral configurado, la IA evalúa si abrir.",
-  "Win Rate":     "Porcentaje de trades ganadores sobre el total. Por sí solo no indica rentabilidad — importa también el ratio ganancia/pérdida.",
+  <Tip label="Win Rate" text="Porcentaje de operaciones ganadoras. El sistema aprende de este valor para ajustar el tamaño de posición y el piso de confianza." />:     "Porcentaje de trades ganadores sobre el total. Por sí solo no indica rentabilidad — importa también el ratio ganancia/pérdida.",
   "Sharpe":       "Ratio de Sharpe: retorno ajustado por riesgo. >1 es aceptable, >2 es excelente. Mide si el rendimiento justifica la volatilidad asumida.",
   "Profit Factor":"Ratio entre ganancias brutas y pérdidas brutas. >1.5 es saludable. >2 es muy bueno.",
   "Drawdown":     "Caída máxima desde un pico de equity. Mide el peor momento histórico de la curva de capital.",
@@ -1174,7 +1186,7 @@ function OrderFlowPanel({ of: ofData, price }: { of: OrderFlowScore; price: numb
 
       {/* ── CVD multi-ventana ── */}
       <div className="card" style={{ padding: "10px 14px" }}>
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)", marginBottom: 8 }}>CVD Acumulado</div>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)", marginBottom: 8 }}><Tip label="CVD Acumulado" text="Cumulative Volume Delta: diferencia acumulada entre volumen comprador y vendedor. Positivo = más compradores. Ayuda a detectar divergencias." /><//div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
           {[
             { label: "CVD 50v", val: cvd.cvd50, trend: cvd.slope50 },
@@ -1490,9 +1502,9 @@ function LivePositionCard({ position, prices, spreadByAsset, now, onClose }: {
       </div>
       <div>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3, fontSize: 10, color: "var(--muted)" }}>
-          <span>SL {position.signal.stopLoss.toFixed(2)}</span>
+          <span>SL <Tip text="Stop Loss: precio al que se cierra la operación con pérdida limitada." /> {position.signal.stopLoss.toFixed(2)}</span>
           <span>Entrada {position.signal.entry.toFixed(2)}</span>
-          <span>TP {position.signal.takeProfit.toFixed(2)}</span>
+          <span>TP <Tip text="Take Profit: precio objetivo donde se toma la ganancia." /> {position.signal.takeProfit.toFixed(2)}</span>
         </div>
         <div style={{ height: 5, borderRadius: 3, background: "rgba(255,255,255,0.07)", overflow: "hidden" }}>
           <div style={{ height: "100%", width: `${Math.max(0, progress)}%`, background: progress > 70 ? "#10b981" : progress > 30 ? "#f59e0b" : "#ef4444", transition: "width 0.5s ease" }} />
@@ -1506,7 +1518,7 @@ function LivePositionCard({ position, prices, spreadByAsset, now, onClose }: {
           color: position.signal.confidence >= 70 ? "#10b981" : position.signal.confidence >= 58 ? "#f59e0b" : "#ef4444",
           border: `1px solid ${position.signal.confidence >= 70 ? "rgba(16,185,129,0.3)" : position.signal.confidence >= 58 ? "rgba(245,158,11,0.3)" : "rgba(239,68,68,0.2)"}`,
         }}>
-          {position.signal.confidence.toFixed(0)}% conf
+          {position.signal.confidence.toFixed(0)}% conf <Tip text="Confianza calculada por el motor (50-96%). Por encima del piso configurado = abre la operación." />
         </span>
         {/* Lotaje */}
         <span style={{ padding: "2px 7px", borderRadius: 5, background: "rgba(255,255,255,0.05)", fontWeight: 700 }}>
@@ -2088,9 +2100,10 @@ function calcScalpingRisk(trades: ClosedTrade[], balance: number, maxDailyLoss: 
 type ChatMessage = { role: "user" | "ai"; text: string; ts: string };
 
 function AiChatPanel({
-  apiKey, usingGroq, groqModel, openPositions, realTrades, lastSignal, prices, stats,
+  apiKey, usingGroq, groqModel, onGroqCall, canGroqCall, openPositions, realTrades, lastSignal, prices, stats,
 }: {
   apiKey: string; usingGroq: boolean; groqModel: string;
+  onGroqCall: () => void; canGroqCall: () => boolean;
   openPositions: Position[]; realTrades: ClosedTrade[];
   lastSignal: Signal | null; prices: Record<Asset, number>;
   stats: { total: number; winRate: number; pnl: number; profitFactor: number; sharpe: number; maxDrawdown?: number };
@@ -2170,6 +2183,11 @@ BEHAVIOR RULES FOR CHAT:
     }
 
     try {
+      if (!canGroqCall()) {
+        setMessages(prev => [...prev, { role: "ai", text: "⏸ Groq pausado por rate limit — esperá unos segundos.", ts: "" }]);
+        setLoading(false); return;
+      }
+      onGroqCall();
       const r = await fetch("/api/groq", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
@@ -2364,6 +2382,12 @@ export function App() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [autoScan, setAutoScan] = useState(false);
   const [scanEverySec, setScanEverySec] = useState(20);
+  // ── Rate limiter Groq ────────────────────────────────────────────────────
+  const groqCallsRef   = useRef<number[]>([]);   // timestamps de llamadas recientes
+  const groqPausedRef  = useRef(false);           // true = pausado por rate limit
+  const [groqRateInfo, setGroqRateInfo] = useState({ calls: 0, paused: false, pauseUntil: 0 });
+  const GROQ_MAX_RPM   = 25;   // límite conservador (Groq free = 30 rpm)
+  const GROQ_PAUSE_SEC = 15;   // pausa automática cuando se acerca al límite
   const [feedStatus, setFeedStatus] = useState("Esperando feed...");
   const [liveReady, setLiveReady] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -2499,7 +2523,15 @@ export function App() {
         });
         lastStatus = r.status;
         if (r.status === 401) { lastDetail = "API key inválida"; break; }
-        if (r.status === 429) { lastDetail = "Rate limit"; break; }
+        if (r.status === 429) {
+          // Pausa automática de 60s cuando Groq devuelve 429
+          groqPausedRef.current = true;
+          const pauseUntil = Date.now() + 60000;
+          setGroqRateInfo(p => ({ ...p, paused: true, pauseUntil }));
+          setTimeout(() => { groqPausedRef.current = false; setGroqRateInfo(p => ({ ...p, paused: false, pauseUntil: 0 })); }, 60000);
+          lastDetail = "Rate limit 429 — pausa automática 60s";
+          break;
+        }
         if (r.ok) { chosenModel = candidate; break; }
         try { const d = await r.json(); lastDetail = d?.error?.message ?? `HTTP ${r.status}`; } catch { lastDetail = `HTTP ${r.status}`; }
       } catch (fetchErr) {
@@ -2926,13 +2958,46 @@ export function App() {
   }
 
   // ── IA: trader experto con master en estadística ──
+  // ── Rate limiter: controla que no supere GROQ_MAX_RPM ──────────────────────
+  function canCallGroq(): boolean {
+    const now = Date.now();
+    // Si está en pausa manual o automática
+    if (groqPausedRef.current) return false;
+    if (groqRateInfo.pauseUntil > now) return false;
+    // Limpiar llamadas que tienen más de 60 segundos
+    groqCallsRef.current = groqCallsRef.current.filter(t => now - t < 60000);
+    return groqCallsRef.current.length < GROQ_MAX_RPM;
+  }
+
+  function trackGroqCall() {
+    const now = Date.now();
+    groqCallsRef.current.push(now);
+    groqCallsRef.current = groqCallsRef.current.filter(t => now - t < 60000);
+    const calls = groqCallsRef.current.length;
+    // Pausa automática si está a 3 llamadas del límite
+    if (calls >= GROQ_MAX_RPM - 3) {
+      const pauseUntil = now + GROQ_PAUSE_SEC * 1000;
+      setGroqRateInfo({ calls, paused: true, pauseUntil });
+      setTimeout(() => setGroqRateInfo(p => ({ ...p, paused: false, pauseUntil: 0 })), GROQ_PAUSE_SEC * 1000);
+      pushToast(`⏸ Groq pausado ${GROQ_PAUSE_SEC}s — ${calls}/${GROQ_MAX_RPM} rpm`, "warning");
+    } else {
+      setGroqRateInfo({ calls, paused: false, pauseUntil: 0 });
+    }
+  }
+
   async function aiDecision(signal: Signal): Promise<"OPEN" | "SKIP" | "WAIT"> {
     const lrn = learningRef.current;
     if (!usingGroq || !apiKey.trim()) {
-      // Scalping necesita piso más bajo para abrir con mayor frecuencia
       const floor = signal.mode === "scalping"
-        ? Math.max(46, lrn.confidenceFloor - 6)   // scalping más permisivo
-        : Math.max(50, lrn.confidenceFloor - 2);  // intradía moderado
+        ? Math.max(46, lrn.confidenceFloor - 6)
+        : Math.max(50, lrn.confidenceFloor - 2);
+      return signal.confidence >= floor ? "OPEN" : "SKIP";
+    }
+    // Rate limit check — si está pausado, usar decisión local
+    if (!canCallGroq()) {
+      const floor = signal.mode === "scalping"
+        ? Math.max(46, lrn.confidenceFloor - 6)
+        : Math.max(50, lrn.confidenceFloor - 2);
       return signal.confidence >= floor ? "OPEN" : "SKIP";
     }
     try {
@@ -3077,6 +3142,11 @@ RISK CHECK FOR THIS TRADE:
 - EV signal: ${evSign}
 Rationale from system: ${signal.rationale}`;
 
+      if (!canGroqCall()) {
+        setMessages(prev => [...prev, { role: "ai", text: "⏸ Groq pausado por rate limit — esperá unos segundos.", ts: "" }]);
+        setLoading(false); return;
+      }
+      onGroqCall();
       const r = await fetch("/api/groq", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
@@ -3096,7 +3166,13 @@ Rationale from system: ${signal.rationale}`;
 
       const dec = String(parsed.decision ?? "").toUpperCase();
       return dec === "OPEN" ? "OPEN" : dec === "WAIT" ? "WAIT" : "SKIP";
-    } catch {
+    } catch (e) {
+      // Si es 429, activar pausa
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("429")) {
+        groqPausedRef.current = true;
+        setTimeout(() => { groqPausedRef.current = false; }, 60000);
+      }
       const floorCatch = signal.mode === "scalping"
         ? Math.max(48, learningRef.current.confidenceFloor - 4)
         : learningRef.current.confidenceFloor;
@@ -3312,9 +3388,18 @@ Rationale from system: ${signal.rationale}`;
       return;
     }
     const multTag = wyckoffMult > 1 ? ` | Wyckoff ×${wyckoffMult.toFixed(2)}` : "";
-    setOpenPositions(prev => [...prev, { id: Date.now(), signal, size, marginUsed, openedAt: new Date().toISOString(), peak: signal.entry, trough: signal.entry }]);
-    if (!autoLabel) pushToast(`🚀 ${signal.asset} ${signal.direction} @ ${signal.entry.toFixed(2)} | conf ${signal.confidence.toFixed(0)}%${multTag}${signal.aiRationale ? " | " + signal.aiRationale : ""}`, "success");
-    if (mt5Enabled) sendToMT5(signal, size, marginUsed);
+    if (mt5Enabled && mt5Status === "connected") {
+      // MT5 activo: primero ejecutar en el broker, solo agregar al panel si confirma
+      await sendToMT5(signal, size, marginUsed, (ticket, execPrice) => {
+        const entry = execPrice ?? signal.entry;
+        setOpenPositions(prev => [...prev, { id: ticket ?? Date.now(), signal: { ...signal, entry }, size, marginUsed, openedAt: new Date().toISOString(), peak: entry, trough: entry }]);
+        if (!autoLabel) pushToast(`🚀 MT5 #${ticket} ${signal.asset} ${signal.direction} @ ${entry.toFixed(2)} | conf ${signal.confidence.toFixed(0)}%${multTag}`, "success");
+      });
+    } else {
+      // Sin MT5: panel simulado
+      setOpenPositions(prev => [...prev, { id: Date.now(), signal, size, marginUsed, openedAt: new Date().toISOString(), peak: signal.entry, trough: signal.entry }]);
+      if (!autoLabel) pushToast(`🚀 ${signal.asset} ${signal.direction} @ ${signal.entry.toFixed(2)} | conf ${signal.confidence.toFixed(0)}%${multTag}${signal.aiRationale ? " | " + signal.aiRationale : ""}`, "success");
+    }
   }
 
   // ── MT5: test de conexión ────────────────────────────────────────────────
@@ -3410,7 +3495,7 @@ Rationale from system: ${signal.rationale}`;
   }
 
   // ── MT5: enviar señal de apertura ─────────────────────────────────────────
-  async function sendToMT5(signal: Signal, size: number, marginUsed: number) {
+  async function sendToMT5(signal: Signal, size: number, marginUsed: number, onConfirm?: (ticket: number, price: number) => void) {
     if (!mt5Enabled || mt5Status !== "connected") return;
     try {
       const r = await fetch(`${mt5Url}/open`, {
@@ -3424,8 +3509,11 @@ Rationale from system: ${signal.rationale}`;
         signal: AbortSignal.timeout(8000),
       });
       const d = await r.json() as { ok: boolean; ticket?: number; price?: number; error?: string };
-      if (d.ok && d.ticket) pushToast(`📡 MT5 #${d.ticket} ejecutado @ ${d.price?.toFixed(2)}`, "success");
-      else pushToast(`⚠ MT5 rechazó: ${d.error ?? "error"}`, "error");
+      if (d.ok && d.ticket) {
+        onConfirm?.(d.ticket, d.price ?? signal.entry);
+      } else {
+        pushToast(`⚠ MT5 rechazó: ${d.error ?? "error"}`, "error");
+      }
     } catch { pushToast("MT5: timeout al enviar señal", "error"); }
   }
 
@@ -3646,15 +3734,16 @@ Rationale from system: ${signal.rationale}`;
       <ToastList toasts={toasts} onRemove={removeToast} />
 
       {/* Nav */}
-      <nav style={{ position: "sticky", top: 0, zIndex: 100, background: "rgba(8,9,16,0.93)", backdropFilter: "blur(14px)", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", padding: "0 20px", height: 54, gap: 4 }}>
+      <nav style={{ position: "sticky", top: 0, zIndex: 100, background: "rgba(10,11,16,0.96)", backdropFilter: "blur(16px)", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", padding: "0 24px", height: 52, gap: 4 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginRight: 20 }}>
           <span style={{ fontSize: 17 }}>⚡</span>
           <span style={{ fontWeight: 800, fontSize: 14, letterSpacing: "-0.02em" }}>TraderLab</span>
           <span style={{ fontSize: 11, color: "var(--muted)", background: "rgba(255,255,255,0.06)", padding: "2px 5px", borderRadius: 4, fontWeight: 600 }}>v5</span>
         </div>
-        <div style={{ display: "flex", gap: 2, flex: 1, flexWrap: "nowrap", overflowX: "auto" }}>
+        <div className="nav-tabs" style={{ flex: 1 }}>
           {NAV.map(t => (
-            <button key={t.id} onClick={() => setAppTab(t.id)} style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", borderRadius: 7, border: "none", cursor: "pointer", fontWeight: 600, fontSize: 12, background: appTab === t.id ? "rgba(255,255,255,0.1)" : "transparent", color: appTab === t.id ? "var(--text)" : "var(--muted)", transition: "all 0.13s", whiteSpace: "nowrap", flexShrink: 0 }}>
+            <button key={t.id} onClick={() => setAppTab(t.id)}
+              className={`nav-tab${appTab === t.id ? " active" : ""}`}>
               {t.icon} {t.label}
               {t.id === "trading" && openPositions.length > 0 && <span style={{ background: "#10b981", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: "50%", width: 15, height: 15, display: "flex", alignItems: "center", justifyContent: "center" }}>{openPositions.length}</span>}
             </button>
@@ -3662,6 +3751,21 @@ Rationale from system: ${signal.rationale}`;
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <AiBadge status={aiStatus} onTest={testAiConnection} latency={aiLatency} />
+          {usingGroq && (
+            <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 8px", borderRadius: 6,
+              background: groqRateInfo.paused ? "rgba(239,68,68,0.12)" : groqRateInfo.calls >= GROQ_MAX_RPM - 5 ? "rgba(245,158,11,0.12)" : "rgba(16,185,129,0.08)",
+              border: `1px solid ${groqRateInfo.paused ? "rgba(239,68,68,0.3)" : groqRateInfo.calls >= GROQ_MAX_RPM - 5 ? "rgba(245,158,11,0.3)" : "rgba(16,185,129,0.2)"}`,
+              fontSize: 10, fontWeight: 700,
+              color: groqRateInfo.paused ? "#ef4444" : groqRateInfo.calls >= GROQ_MAX_RPM - 5 ? "#f59e0b" : "#10b981",
+              cursor: "pointer", title: "Click para pausar/reanudar Groq manualmente" }}
+              onClick={() => {
+                groqPausedRef.current = !groqPausedRef.current;
+                setGroqRateInfo(p => ({ ...p, paused: groqPausedRef.current, pauseUntil: 0 }));
+                pushToast(groqPausedRef.current ? "⏸ Groq pausado manualmente" : "▶ Groq reanudado", "info");
+              }}>
+              {groqRateInfo.paused ? "⏸" : "⚡"} {groqRateInfo.calls}/{GROQ_MAX_RPM} rpm
+            </div>
+          )}
           <div style={{ fontSize: 10, color: liveReady ? "#10b981" : "#6b7280", display: "flex", alignItems: "center", gap: 4 }}>
             <span style={{ width: 5, height: 5, borderRadius: "50%", background: liveReady ? "#10b981" : "#6b7280", animation: liveReady ? "pulse 2s infinite" : "none", display: "inline-block" }} />
             {feedStatus}
@@ -3677,7 +3781,7 @@ Rationale from system: ${signal.rationale}`;
             { label: "Balance",
               value: mt5Enabled && mt5Balance !== null ? `$${mt5Balance.toFixed(2)}` : money(balance),
               color: "var(--text)" },
-            { label: "Patrimonio",
+            { label: <Tip label="Patrimonio" text="Equity: balance + PnL flotante de posiciones abiertas. Cuando hay posiciones, puede ser diferente al balance." />,
               value: mt5Enabled && mt5Equity !== null ? `$${mt5Equity.toFixed(2)}` : money(equity),
               color: mt5Enabled && mt5Equity !== null && mt5Balance !== null
                 ? (mt5Equity >= mt5Balance ? "#10b981" : "#ef4444")
@@ -3693,7 +3797,7 @@ Rationale from system: ${signal.rationale}`;
             { label: "Factor ganancia", value: stats.profitFactor.toFixed(2), color: stats.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
             { label: "Sharpe", value: stats.sharpe.toFixed(2), color: stats.sharpe >= 1 ? "#10b981" : "var(--text)" },
             { label: "Trades reales", value: realTrades.length, color: "var(--muted)" },
-            { label: mt5Enabled && mt5Margin !== null ? "Margen usado" : "Margen usado",
+            { label: mt5Enabled && mt5Margin !== null ? <Tip label="Margen usado" text="Dinero bloqueado como garantía por las posiciones abiertas. Calculado como: (lotes × precio × contract_size) / apalancamiento." /> : "Margen usado",
               value: mt5Enabled && mt5Margin !== null ? `$${mt5Margin.toFixed(2)}` : money(openPositions.reduce((a,p)=>a+p.marginUsed,0)),
               color: "var(--muted)" },
             { label: mt5Enabled && mt5FreeMargin !== null ? "Margen libre" : "Posiciones",
@@ -3713,13 +3817,12 @@ Rationale from system: ${signal.rationale}`;
           {realTrades.length >= 2 && (
             <div style={{ flex: "1 1 200px", minWidth: 200, maxWidth: 340, alignSelf: "stretch", display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
               <span style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 3, display: "block" }}>Curva de equity</span>
-              <EquityCurve trades={realTrades} height={50} />
             </div>
           )}
         </div>
       </div>
 
-      <main style={{ maxWidth: 1440, margin: "0 auto", padding: "18px 20px" }}>
+      <main className="main-wrap" style={{ maxWidth: 1440, margin: "0 auto", padding: "20px 24px" }}>
 
         {/* ━━━━━━━━━ TRADING ━━━━━━━━━ */}
         {appTab === "trading" && (
@@ -4008,6 +4111,7 @@ Rationale from system: ${signal.rationale}`;
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <AiChatPanel
                 apiKey={apiKey} usingGroq={usingGroq} groqModel={groqModel}
+                onGroqCall={trackGroqCall} canGroqCall={canCallGroq}
                 openPositions={openPositions} realTrades={realTrades}
                 lastSignal={lastSignal} prices={prices} stats={stats}
               />
@@ -4202,6 +4306,7 @@ Rationale from system: ${signal.rationale}`;
                   { label: "Margen libre",          value: mt5FreeMargin !== null ? `$${mt5FreeMargin.toFixed(2)}` : "N/D",    ok: mt5FreeMargin === null || mt5FreeMargin > 0 },
                   { label: "Bridge conectado",      value: mt5Status === "connected" ? "✅ Sí" : "❌ No",                     ok: mt5Status === "connected" },
                   { label: "IA Groq",               value: aiStatus === "ok" ? `✅ ${groqModel}` : aiStatus,                  ok: aiStatus === "ok" },
+                  { label: "Groq rpm (último min)", value: `${groqRateInfo.calls}/${GROQ_MAX_RPM}${groqRateInfo.paused ? " ⏸ PAUSADO" : ""}`, ok: !groqRateInfo.paused && groqRateInfo.calls < GROQ_MAX_RPM - 5 },
                 ].map(({ label, value, ok }) => (
                   <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "7px 10px", borderRadius: 7,
                     background: ok ? "rgba(16,185,129,0.06)" : "rgba(239,68,68,0.06)",
