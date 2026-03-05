@@ -2088,9 +2088,9 @@ function calcScalpingRisk(trades: ClosedTrade[], balance: number, maxDailyLoss: 
 type ChatMessage = { role: "user" | "ai"; text: string; ts: string };
 
 function AiChatPanel({
-  apiKey, usingGroq, openPositions, realTrades, lastSignal, prices, stats,
+  apiKey, usingGroq, groqModel, openPositions, realTrades, lastSignal, prices, stats,
 }: {
-  apiKey: string; usingGroq: boolean;
+  apiKey: string; usingGroq: boolean; groqModel: string;
   openPositions: Position[]; realTrades: ClosedTrade[];
   lastSignal: Signal | null; prices: Record<Asset, number>;
   stats: { total: number; winRate: number; pnl: number; profitFactor: number; sharpe: number; maxDrawdown?: number };
@@ -2845,18 +2845,18 @@ export function App() {
     const estTpDist = Math.max(mtf.atr * (currentMode === "scalping" ? lrn.scalpingTpAtr : lrn.intradayTpAtr), spread * 2);
     const spreadCostRatio = spread / Math.max(estTpDist, 1e-9);
     const confidence = clamp(
-      50
-      + mtfStrength * 7
-      + (confirmed ? confirmStrength * 16 : -5)
-      + (ind.rsiDivergence !== "none" ? 4 : 0)
+      52                                                          // base ligeramente más alta
+      + mtfStrength * 8
+      + (confirmed ? confirmStrength * 18 : -3)                  // penalización leve si no confirma
+      + (ind.rsiDivergence !== "none" ? 5 : 0)
       + mcScore
       + ofSetupBonus
       - divergencePenalty
-      - (mcConflict ? 15 : 0)
-      + (currentMode === "intradia" && wyckoff.bias !== "neutral" ? 4 : 0)
-      - (currentMode === "scalping" ? spreadPct * 55 : spreadPct * 20)
-      - (spreadCostRatio > 0.4 ? 8 : spreadCostRatio > 0.25 ? 4 : 0),
-      50, 96
+      - (mcConflict ? 8 : 0)                                     // reducido de 15 → 8
+      + (currentMode === "intradia" && wyckoff.bias !== "neutral" ? 5 : 0)
+      - (currentMode === "scalping" ? spreadPct * 30 : spreadPct * 12)  // reducido de 55/20
+      - (spreadCostRatio > 0.5 ? 6 : spreadCostRatio > 0.35 ? 3 : 0),  // umbral más alto
+      46, 96                                                      // mínimo 46 (era 50)
     );
 
     // ── Paso 5: Sizing — Wyckoff como multiplicador solo en intradía ──────────
@@ -2931,8 +2931,8 @@ export function App() {
     if (!usingGroq || !apiKey.trim()) {
       // Scalping necesita piso más bajo para abrir con mayor frecuencia
       const floor = signal.mode === "scalping"
-        ? Math.max(48, lrn.confidenceFloor - 4)
-        : lrn.confidenceFloor;
+        ? Math.max(46, lrn.confidenceFloor - 6)   // scalping más permisivo
+        : Math.max(50, lrn.confidenceFloor - 2);  // intradía moderado
       return signal.confidence >= floor ? "OPEN" : "SKIP";
     }
     try {
@@ -3254,7 +3254,13 @@ Rationale from system: ${signal.rationale}`;
 
     const signal = generateSignal(mode, targetAsset);
     if (!autoLabel) setLastSignal(signal);
-    const decision = await aiDecision(signal);
+    let decision: string;
+    try {
+      decision = await aiDecision(signal);
+    } catch {
+      // Si la IA no está disponible, usar solo la confianza local
+      decision = signal.confidence >= (learningRef.current.confidenceFloor + 5) ? "OPEN" : "SKIP";
+    }
     if (decision !== "OPEN") {
       if (!autoLabel) pushToast(`⏭ ${targetAsset} omitido (${decision}) — conf ${signal.confidence.toFixed(0)}% | ${signal.aiRationale ?? "confianza insuficiente"}`, "warning");
       return;
@@ -3281,29 +3287,28 @@ Rationale from system: ${signal.rationale}`;
     const marginUsed = (size * cs * signal.entry) / getLeverage(signal.asset);
     // ── Riesgo de margen total (anti-liquidación) ──────────────────────────
     const totalMarginUsed = openPositionsRef.current.reduce((a, p) => a + p.marginUsed, 0);
-    const mt5MarginUsed   = mt5Enabled && mt5Balance !== null
-      ? (mt5Balance - (mt5Equity ?? mt5Balance))  // equity < balance = margen en uso
-      : 0;
-    const realEquity = mt5Enabled && mt5Equity !== null ? mt5Equity : equity;
-    const freeMarginPct = realEquity > 0
-      ? ((realEquity - totalMarginUsed - mt5MarginUsed - marginUsed) / realEquity) * 100
-      : 0;
+    // Usar margen libre real de MT5 si está disponible (fuente de verdad)
+    const realEquity    = (mt5Enabled && mt5Equity    !== null && mt5Equity    > 0) ? mt5Equity    : equity;
+    const realFreeMargin = (mt5Enabled && mt5FreeMargin !== null && mt5FreeMargin > 0) ? mt5FreeMargin : null;
 
-    // Bloquear si el margen libre quedaría por debajo del 30% del equity real
-    if (freeMarginPct < 30) {
-      if (!autoLabel) pushToast(
-        `🛑 Margen libre insuficiente: ${freeMarginPct.toFixed(1)}% — riesgo de liquidación`,
-        "error"
-      );
+    // Si tenemos margen libre real de MT5, usarlo directamente
+    const freeMarginPct = realFreeMargin !== null && realEquity > 0
+      ? (realFreeMargin / realEquity) * 100
+      : realEquity > 0
+        ? ((realEquity - totalMarginUsed - marginUsed) / realEquity) * 100
+        : 100; // si no hay datos, no bloquear
+
+    // Bloquear solo si el margen libre real baja del 20% (umbral de liquidación inminente)
+    if (freeMarginPct < 20) {
+      pushToast(`🛑 Margen libre crítico: ${freeMarginPct.toFixed(1)}% — operación bloqueada`, "error");
       return;
     }
-    // Warning si el margen libre queda entre 30-50%
-    if (freeMarginPct < 50 && !autoLabel) {
+    if (freeMarginPct < 40) {
       pushToast(`⚠️ Margen libre bajo: ${freeMarginPct.toFixed(1)}%`, "warning");
     }
-    // Bloquear si una sola posición usaría más del 20% del equity real
-    if (marginUsed > realEquity * 0.20) {
-      if (!autoLabel) pushToast("⚠️ Posición demasiado grande (>20% equity)", "warning");
+    // Bloquear solo si la posición usaría más del 40% del equity (era 20%, muy restrictivo)
+    if (marginUsed > realEquity * 0.40) {
+      pushToast(`⚠️ Posición demasiado grande: $${marginUsed.toFixed(0)} vs equity $${realEquity.toFixed(0)}`, "warning");
       return;
     }
     const multTag = wyckoffMult > 1 ? ` | Wyckoff ×${wyckoffMult.toFixed(2)}` : "";
@@ -3550,9 +3555,13 @@ Rationale from system: ${signal.rationale}`;
 
   async function runAutoScan() {
     // Auto scan: prueba ambos modos para todos los activos
-    // Scalping primero (más frecuente), luego intradía
+    let opened = 0; let skipped = 0;
+    const prevLen = openPositionsRef.current.length;
     for (const a of assets) await createSignalAndExecute("scalping",  a, true);
     for (const a of assets) await createSignalAndExecute("intradia", a, true);
+    opened = openPositionsRef.current.length - prevLen;
+    // Solo mostrar resumen si hubo cambios relevantes
+    if (opened > 0) pushToast(`🤖 AutoScan: ${opened} operación(es) abierta(s)`, "success");
   }
 
   useEffect(() => { void syncRealData(); }, []);
@@ -3997,7 +4006,7 @@ Rationale from system: ${signal.rationale}`;
             {/* Der */}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <AiChatPanel
-                apiKey={apiKey} usingGroq={usingGroq}
+                apiKey={apiKey} usingGroq={usingGroq} groqModel={groqModel}
                 openPositions={openPositions} realTrades={realTrades}
                 lastSignal={lastSignal} prices={prices} stats={stats}
               />
