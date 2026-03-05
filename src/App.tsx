@@ -88,7 +88,7 @@ type ScalpingRisk = {
   streak: number;
 };
 
-type AppTab = "trading" | "backtest" | "configuracion";
+type AppTab = "trading" | "backtest" | "aprendizaje" | "configuracion";
 
 // ── Wyckoff ──
 type WyckoffPhase = "A" | "B" | "C" | "D" | "E" | "unknown";
@@ -3637,6 +3637,7 @@ Rationale from system: ${signal.rationale}`;
   const NAV = [
     { id: "trading" as AppTab, label: "Trading", icon: "📈" },
     { id: "backtest" as AppTab, label: "Backtest", icon: "🔬" },
+    { id: "aprendizaje" as AppTab, label: "Aprendizaje", icon: "🧠" },
     { id: "configuracion" as AppTab, label: "Config", icon: "⚙️" },
   ];
 
@@ -3651,9 +3652,9 @@ Rationale from system: ${signal.rationale}`;
           <span style={{ fontWeight: 800, fontSize: 14, letterSpacing: "-0.02em" }}>TraderLab</span>
           <span style={{ fontSize: 11, color: "var(--muted)", background: "rgba(255,255,255,0.06)", padding: "2px 5px", borderRadius: 4, fontWeight: 600 }}>v5</span>
         </div>
-        <div style={{ display: "flex", gap: 2, flex: 1 }}>
+        <div style={{ display: "flex", gap: 2, flex: 1, flexWrap: "nowrap", overflowX: "auto" }}>
           {NAV.map(t => (
-            <button key={t.id} onClick={() => setAppTab(t.id)} style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 12px", borderRadius: 7, border: "none", cursor: "pointer", fontWeight: 600, fontSize: 12, background: appTab === t.id ? "rgba(255,255,255,0.1)" : "transparent", color: appTab === t.id ? "var(--text)" : "var(--muted)", transition: "all 0.13s" }}>
+            <button key={t.id} onClick={() => setAppTab(t.id)} style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", borderRadius: 7, border: "none", cursor: "pointer", fontWeight: 600, fontSize: 12, background: appTab === t.id ? "rgba(255,255,255,0.1)" : "transparent", color: appTab === t.id ? "var(--text)" : "var(--muted)", transition: "all 0.13s", whiteSpace: "nowrap", flexShrink: 0 }}>
               {t.icon} {t.label}
               {t.id === "trading" && openPositions.length > 0 && <span style={{ background: "#10b981", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: "50%", width: 15, height: 15, display: "flex", alignItems: "center", justifyContent: "center" }}>{openPositions.length}</span>}
             </button>
@@ -4081,6 +4082,138 @@ Rationale from system: ${signal.rationale}`;
           <BacktestTab liveReady={liveReady} backtestSize={backtestSize} setBacktestSize={setBacktestSize}
             riskPct={riskPct} setRiskPct={setRiskPct} runBacktest={runBacktest}
             lastBacktest={lastBacktest} backtestTrades={backtestTrades} />
+        )}
+
+        {/* ━━━━━━━━━ APRENDIZAJE ━━━━━━━━━ */}
+        {appTab === "aprendizaje" && (
+          <div style={{ maxWidth: 860, display: "flex", flexDirection: "column", gap: 14 }}>
+
+            {/* ── Parámetros adaptativos editables ── */}
+            <div className="card">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                <p style={{ fontWeight: 700, fontSize: 14, margin: 0 }}>🧠 Parámetros adaptativos</p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>
+                    Se ajustan automáticamente con cada trade. Podés editarlos manualmente.
+                  </span>
+                  <button onClick={() => { setLearning(initialLearning); learningRef.current = initialLearning; pushToast("🧠 Aprendizaje reseteado", "info"); }}
+                    style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.08)", color: "#ef4444", fontSize: 11, cursor: "pointer", fontWeight: 700 }}>
+                    Reset
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                {/* riskScale */}
+                {[
+                  { key: "riskScale",       label: "Escala de riesgo",     min: 0.3,  max: 2.5,  step: 0.05, desc: "Multiplica el riesgo por operación. >1 = más agresivo, <1 = defensivo." },
+                  { key: "confidenceFloor", label: "Piso de confianza (%)", min: 40,   max: 80,   step: 1,    desc: "Confianza mínima para abrir una operación. Más alto = menos trades." },
+                  { key: "scalpingTpAtr",   label: "TP Scalping (×ATR)",   min: 0.8,  max: 3.5,  step: 0.05, desc: "Distancia del take profit en scalping medida en ATR." },
+                  { key: "intradayTpAtr",   label: "TP Intradía (×ATR)",   min: 1.5,  max: 8.0,  step: 0.1,  desc: "Distancia del take profit en intradía medida en ATR." },
+                  { key: "atrTrailMult",    label: "Buffer trailing (×ATR)", min: 0.1, max: 1.2,  step: 0.05, desc: "Buffer debajo del swing para el trailing stop. Más chico = stop más ajustado." },
+                ].map(({ key, label, min, max, step, desc }) => {
+                  const val = learning[key as keyof LearningModel] as number;
+                  const pct = ((val - min) / (max - min)) * 100;
+                  return (
+                    <div key={key} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.07)" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                        <span style={{ fontWeight: 700, fontSize: 12 }}>{label}</span>
+                        <span style={{ fontWeight: 800, fontSize: 15, color: "#6366f1" }}>{val.toFixed(2)}</span>
+                      </div>
+                      <input type="range" min={min} max={max} step={step} value={val}
+                        onChange={e => {
+                          const next = { ...learning, [key]: Number(e.target.value) };
+                          setLearning(next); learningRef.current = next;
+                        }}
+                        style={{ width: "100%", accentColor: "#6366f1", margin: "6px 0" }}
+                      />
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", marginBottom: 6 }}>
+                        <span>{min}</span><span>{max}</span>
+                      </div>
+                      <p style={{ fontSize: 10, color: "var(--muted)", margin: 0, lineHeight: 1.4 }}>{desc}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* ── Cómo aprende el bot ── */}
+            <div className="card">
+              <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>📐 Lógica de aprendizaje automático</p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 12 }}>
+                {[
+                  { param: "Escala de riesgo", formula: `0.8 + WR×0.6 + exp×0.03`, range: "0.7 – 1.5", effect: "Con WR 60%: riskScale=1.16. Con WR 30%: riskScale=0.98." },
+                  { param: "Piso confianza",   formula: `52 + (0.5−WR)×16`,         range: "48 – 62",  effect: "Con WR 40%: floor=53.6. Con WR 60%: floor=50.4. Solo aplica con ≥10 trades." },
+                  { param: "TP Scalping",      formula: `1.2 + WR×0.4`,             range: "1.15 – 1.8", effect: "Con WR 55%: TP=1.42×ATR. Con WR 30%: TP=1.32×ATR." },
+                  { param: "TP Intradía",      formula: `3.0 + WR×1.5`,             range: "2.8 – 5.0", effect: "Con WR 55%: TP=3.83×ATR. Con WR 30%: TP=3.45×ATR." },
+                  { param: "Buffer trailing",  formula: `0.25 + WR×0.3`,            range: "0.2 – 0.6", effect: "Con WR 55%: buffer=0.42×ATR. Con WR 30%: buffer=0.34×ATR." },
+                  { param: "Hour Edge",        formula: "avg(PnL por hora del día)",  range: "libre",    effect: "Registra qué horas son rentables. No bloquea, solo informa." },
+                ].map(({ param, formula, range, effect }) => (
+                  <div key={param} style={{ background: "rgba(255,255,255,0.02)", borderRadius: 8, padding: "10px 12px", border: "1px solid rgba(255,255,255,0.06)" }}>
+                    <div style={{ fontWeight: 700, color: "#a5b4fc", fontSize: 12, marginBottom: 4 }}>{param}</div>
+                    <div style={{ fontFamily: "monospace", fontSize: 11, color: "#6366f1", marginBottom: 4 }}>{formula}</div>
+                    <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 3 }}>Rango: {range}</div>
+                    <div style={{ fontSize: 11, color: "var(--text)" }}>{effect}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Hour Edge ── */}
+            {Object.keys(learning.hourEdge).length > 0 && (
+              <div className="card">
+                <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>🕐 Rendimiento por hora (Hour Edge)</p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {Array.from({ length: 24 }, (_, h) => {
+                    const edge = learning.hourEdge[h];
+                    if (edge === undefined) return (
+                      <div key={h} style={{ width: 44, textAlign: "center", padding: "6px 4px", borderRadius: 6, background: "rgba(255,255,255,0.03)", fontSize: 10, color: "var(--muted)" }}>
+                        <div style={{ fontWeight: 700 }}>{h}h</div>
+                        <div>—</div>
+                      </div>
+                    );
+                    return (
+                      <div key={h} style={{ width: 44, textAlign: "center", padding: "6px 4px", borderRadius: 6,
+                        background: edge > 0 ? "rgba(16,185,129,0.12)" : "rgba(239,68,68,0.1)",
+                        border: `1px solid ${edge > 0 ? "rgba(16,185,129,0.25)" : "rgba(239,68,68,0.2)"}`,
+                        fontSize: 10 }}>
+                        <div style={{ fontWeight: 700, color: "var(--muted)" }}>{h}h</div>
+                        <div style={{ fontWeight: 800, color: edge > 0 ? "#10b981" : "#ef4444" }}>{edge > 0 ? "+" : ""}{edge.toFixed(1)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 10, margin: "10px 0 0" }}>
+                  P&L promedio por hora de cierre. Verde = hora rentable históricamente. El bot no bloquea horas malas, solo te informa.
+                </p>
+              </div>
+            )}
+
+            {/* ── Diagnóstico de por qué no abre trades ── */}
+            <div className="card">
+              <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>🔍 Diagnóstico en tiempo real</p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 12 }}>
+                {[
+                  { label: "Win rate actual",      value: `${stats.winRate.toFixed(1)}%`,                                      ok: stats.winRate >= 40 },
+                  { label: "Trades reales",         value: String(realTrades.filter(t => t.source === "real").length),          ok: realTrades.length >= 5 },
+                  { label: "Piso confianza actual", value: `${learning.confidenceFloor.toFixed(0)}%`,                          ok: learning.confidenceFloor <= 58 },
+                  { label: "Escala riesgo",         value: `${learning.riskScale.toFixed(2)}×`,                               ok: learning.riskScale >= 0.8 },
+                  { label: "Equity usado",          value: mt5Equity !== null ? `$${mt5Equity.toFixed(2)} (MT5 real)` : `$${equity.toFixed(2)} (simulado)`, ok: mt5Equity !== null },
+                  { label: "Margen libre",          value: mt5FreeMargin !== null ? `$${mt5FreeMargin.toFixed(2)}` : "N/D",    ok: mt5FreeMargin === null || mt5FreeMargin > 0 },
+                  { label: "Bridge conectado",      value: mt5Status === "connected" ? "✅ Sí" : "❌ No",                     ok: mt5Status === "connected" },
+                  { label: "IA Groq",               value: aiStatus === "ok" ? `✅ ${groqModel}` : aiStatus,                  ok: aiStatus === "ok" },
+                ].map(({ label, value, ok }) => (
+                  <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "7px 10px", borderRadius: 7,
+                    background: ok ? "rgba(16,185,129,0.06)" : "rgba(239,68,68,0.06)",
+                    border: `1px solid ${ok ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)"}` }}>
+                    <span style={{ color: "var(--muted)" }}>{label}</span>
+                    <span style={{ fontWeight: 700, color: ok ? "#10b981" : "#ef4444" }}>{value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+          </div>
         )}
 
         {/* ━━━━━━━━━ CONFIGURACION ━━━━━━━━━ */}
