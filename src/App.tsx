@@ -1498,15 +1498,35 @@ function LivePositionCard({ position, prices, spreadByAsset, now, onClose }: {
           <div style={{ height: "100%", width: `${Math.max(0, progress)}%`, background: progress > 70 ? "#10b981" : progress > 30 ? "#f59e0b" : "#ef4444", transition: "width 0.5s ease" }} />
         </div>
       </div>
-      <div style={{ display: "flex", gap: 16, fontSize: 10, color: "var(--muted)", marginTop: 6 }}>
-        <span>Tam: {position.size.toFixed(4)}</span>
+      <div style={{ display: "flex", gap: 8, fontSize: 10, color: "var(--muted)", marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+        {/* Confianza — prominente con color */}
+        <span style={{
+          padding: "2px 8px", borderRadius: 5, fontWeight: 800, fontSize: 11,
+          background: position.signal.confidence >= 70 ? "rgba(16,185,129,0.15)" : position.signal.confidence >= 58 ? "rgba(245,158,11,0.15)" : "rgba(239,68,68,0.12)",
+          color: position.signal.confidence >= 70 ? "#10b981" : position.signal.confidence >= 58 ? "#f59e0b" : "#ef4444",
+          border: `1px solid ${position.signal.confidence >= 70 ? "rgba(16,185,129,0.3)" : position.signal.confidence >= 58 ? "rgba(245,158,11,0.3)" : "rgba(239,68,68,0.2)"}`,
+        }}>
+          {position.signal.confidence.toFixed(0)}% conf
+        </span>
+        {/* Lotaje */}
+        <span style={{ padding: "2px 7px", borderRadius: 5, background: "rgba(255,255,255,0.05)", fontWeight: 700 }}>
+          {position.size.toFixed(3)} lotes
+        </span>
+        {/* Margen */}
         <span>Margen: {money(position.marginUsed)}</span>
-        <span>Conf: {position.signal.confidence.toFixed(0)}%</span>
+        {/* Modo */}
         <span style={{ padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700,
           background: position.signal.mode === "scalping" ? "rgba(99,102,241,0.2)" : "rgba(245,158,11,0.2)",
           color: position.signal.mode === "scalping" ? "#a5b4fc" : "#f59e0b" }}>
           {position.signal.mode === "scalping" ? "SCALP" : "INTRADÍA"}
         </span>
+        {/* Rationale resumido */}
+        {position.signal.rationale && (
+          <span style={{ fontSize: 10, color: "var(--muted)", fontStyle: "italic", maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+            title={position.signal.rationale}>
+            {position.signal.rationale.slice(0, 60)}{position.signal.rationale.length > 60 ? "…" : ""}
+          </span>
+        )}
         {position.signal.mode === "intradia" && position.signal.wyckoff.bias !== "neutral" && (
           <span style={{ color: position.signal.wyckoff.bias === "accumulation" ? "#10b981" : "#ef4444" }}>
             Wyckoff: {position.signal.wyckoff.bias === "accumulation" ? "Acum" : "Dist"} F{position.signal.wyckoff.phase}
@@ -1878,19 +1898,40 @@ function analyzeOrderFlow(candles: Candle[], price: number, vwap: number, atr: n
     controlScore < -20 ? "bears" : "contested";
 
   // ── Setup de trading ──────────────────────────────────────────────────────
-  // LONG: toros en control + CVD alcista + precio sobre POC/VAH + sin divergencia bajista
-  const longSetup =
-    controlScore > 18
-    && cvd.trend !== "bearish"
-    && price >= profile.val   // al menos dentro del value area
-    && !cvd.divergence;
+  // Detectar zonas extremas (sobrecompra / sobreventa)
+  // En extremos el setup se INVIERTE: no seguimos el momentum, anticipamos el rebote
+  const rsiVal   = closes.length >= 14
+    ? (() => {
+        let g = 0, l = 0;
+        for (let i = closes.length - 14; i < closes.length; i++) {
+          const d = closes[i] - closes[i - 1];
+          if (d > 0) g += d; else l -= d;
+        }
+        const rs = g / Math.max(l, 1e-9);
+        return 100 - 100 / (1 + rs);
+      })()
+    : 50;
 
-  // SHORT: osos en control + CVD bajista + precio bajo POC/VAL + sin divergencia alcista
+  const isOversold   = rsiVal < 28 && price < profile.val;   // debajo del value area y RSI extremo
+  const isOverbought = rsiVal > 72 && price > profile.vah;   // encima del value area y RSI extremo
+  const hasCvdDivBull = cvd.divergence && cvd.trend === "bearish" && controlScore < 0;  // precio cae pero CVD se recupera
+  const hasCvdDivBear = cvd.divergence && cvd.trend === "bullish" && controlScore > 0;  // precio sube pero CVD se debilita
+
+  // LONG setup: momentum alcista normal O reversión desde sobreventa
+  const longSetup =
+    // Caso 1: momentum — toros en control con confirmación
+    (controlScore > 18 && cvd.trend !== "bearish" && price >= profile.val && !cvd.divergence)
+    ||
+    // Caso 2: mean reversion — sobreventa con divergencia CVD alcista o absorción
+    (isOversold && (hasCvdDivBull || buyAbsorptions >= 2) && controlScore > -40);
+
+  // SHORT setup: momentum bajista normal O reversión desde sobrecompra
   const shortSetup =
-    controlScore < -18
-    && cvd.trend !== "bullish"
-    && price <= profile.vah
-    && !cvd.divergence;
+    // Caso 1: momentum — osos en control con confirmación
+    (controlScore < -18 && cvd.trend !== "bullish" && price <= profile.vah && !cvd.divergence)
+    ||
+    // Caso 2: mean reversion — sobrecompra con divergencia CVD bajista o absorción
+    (isOverbought && (hasCvdDivBear || sellAbsorptions >= 2) && controlScore < 40);
 
   const setupStrength = clamp(Math.abs(controlScore) / 100, 0, 1);
 
@@ -2525,7 +2566,10 @@ export function App() {
     return acc + (p.signal.direction === "LONG" ? eff - p.signal.entry : p.signal.entry - eff) * p.size;
   }, 0), [openPositions, prices, spreadByAsset]);
 
-  const equity = balance + unrealized;
+  // Equity real: usar mt5Equity del broker si está conectado, sino el simulado
+  const equity = (mt5Enabled && mt5Equity !== null && mt5Equity > 0)
+    ? mt5Equity
+    : balance + unrealized;
   const riskMetrics = useMemo(() => calcRiskMetrics(realTrades, balance, 5), [realTrades, balance]);
 
   const currentIndicators = indicatorsMap[asset] ?? null;
@@ -2671,9 +2715,17 @@ export function App() {
     // ── Dirección primaria: jerarquía OF > MC > MTF ───────────────────────
     let mtfDir: Direction;
     if (currentMode === "scalping" && of) {
-      if      (of.control === "bulls" && of.longSetup)  mtfDir = "LONG";
-      else if (of.control === "bears" && of.shortSetup) mtfDir = "SHORT";
-      else if (mc && mc.bias !== "neutral")              mtfDir = mc.bias === "bull" ? "LONG" : "SHORT";
+      // Prioridad 1: mean reversion desde extremo — adelantarse al rebote
+      const isOversold   = of.narrative.includes("bajo VAL") || of.narrative.includes("aceptación bajista");
+      const isOverbought = of.narrative.includes("sobre VAH") || of.narrative.includes("aceptación alcista");
+      if (of.longSetup && isOversold && of.cvd.divergence) {
+        mtfDir = "LONG";  // rebote desde sobreventa con divergencia
+      } else if (of.shortSetup && isOverbought && of.cvd.divergence) {
+        mtfDir = "SHORT"; // rebote desde sobrecompra con divergencia
+      // Prioridad 2: momentum con control claro
+      } else if (of.control === "bulls" && of.longSetup)  mtfDir = "LONG";
+      else if   (of.control === "bears" && of.shortSetup) mtfDir = "SHORT";
+      else if   (mc && mc.bias !== "neutral")              mtfDir = mc.bias === "bull" ? "LONG" : "SHORT";
       else mtfDir = (mtf.htf + mtf.ltf + mtf.exec) >= 0 ? "LONG" : "SHORT";
     } else {
       mtfDir = (mtf.htf + mtf.ltf + mtf.exec) >= 0 ? "LONG" : "SHORT";
@@ -2884,7 +2936,7 @@ export function App() {
     try {
       // ── Métricas de gestión de riesgo para el prompt ────────────────────────
       const lrnSnap     = learningRef.current;
-      const equitySnap  = balance + unrealized;
+      const equitySnap  = (mt5Enabled && mt5Equity !== null && mt5Equity > 0) ? mt5Equity : balance + unrealized;
       const initialCap  = 100; // capital inicial fijo
       const riskPerTrade = riskPct / 100;
       const openCount   = openPositionsRef.current.length;
