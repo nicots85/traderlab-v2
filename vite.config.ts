@@ -1,19 +1,17 @@
-import path from "path";
-import { fileURLToPath } from "url";
-import tailwindcss from "@tailwindcss/vite";
-import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
-import { viteSingleFile } from "vite-plugin-singlefile";
+import react from "@vitejs/plugin-react";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss(), viteSingleFile()],
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "src"),
+  plugins: [react()],
+  server: {
+    proxy: {
+      // En dev local, proxea /api/groq directamente a Groq
+      // (en producción lo maneja la serverless function de Vercel)
+      "/api/groq": {
+        target: "https://api.groq.com",
+        changeOrigin: true,
+        rewrite: () => "/openai/v1/chat/completions",
+      },
     },
   },
 });
