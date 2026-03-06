@@ -2465,6 +2465,12 @@ export function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Sync inicial al montar — para que liveReady=true desde el arranque
+  useEffect(() => {
+    void syncRealData();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     const envKey = import.meta.env.VITE_GROQ_API_KEY as string | undefined;
     if (envKey && !apiKey) { setApiKey(envKey); setUsingGroq(true); }
@@ -3433,7 +3439,11 @@ Rationale from system: ${signal.rationale}`;
   }
 
   async function createSignalAndExecute(mode: Mode, targetAsset: Asset, autoLabel = false) {
-    if (!liveReady) { pushToast("El feed aún no está listo. Sincronice primero.", "warning"); return; }
+    if (!liveReady) {
+      pushToast("⟳ Sincronizando datos antes de generar señal...", "info");
+      await syncRealData();
+      if (!liveReady) { pushToast("⚠ Sin datos — verificá el bridge MT5 o la conexión a internet.", "warning"); return; }
+    }
     if (circuitOpenRef.current) {
       if (!autoLabel) pushToast("🔴 Circuit breaker activo — límite de pérdida diaria alcanzado. Reactivá el autoScan manualmente cuando estés listo.", "error");
       return;
@@ -3741,13 +3751,58 @@ Rationale from system: ${signal.rationale}`;
 
   async function syncRealData() {
     setIsSyncing(true);
-    // Bridge requerido — sin él no hay datos
     const usingBridge = mt5Enabled && mt5Status === "connected";
+
+    // ── Sin bridge: usar Binance REST público como fallback ──────────────────
     if (!usingBridge) {
-      setFeedStatus("⚠ MT5 Bridge no activo — conectá el bridge en Configuración");
-      setLiveReady(false);
+      try {
+        // Mapa de símbolos Binance para los activos soportados
+        const BINANCE_MAP: Partial<Record<Asset, string>> = {
+          BTCUSD: "BTCUSDT", ETHUSD: "ETHUSDT",
+          XAUUSD: "XAUUSDT", XAGUSD: "XAGUSDT",
+        };
+        const priceEntries = await Promise.allSettled(
+          assets.map(async (a) => {
+            const sym = BINANCE_MAP[a];
+            if (!sym) return [a, 0] as [Asset, number];
+            const r = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`,
+              { signal: AbortSignal.timeout(5000) });
+            const d = await r.json() as { price: string };
+            return [a, parseFloat(d.price)] as [Asset, number];
+          })
+        );
+        const newPrices: Partial<Record<Asset, number>> = {};
+        priceEntries.forEach(r => { if (r.status === "fulfilled") newPrices[r.value[0]] = r.value[1]; });
+        if (Object.values(newPrices).some(v => v && v > 0)) {
+          setPrices(prev => ({ ...prev, ...newPrices }));
+          // Klines 1m para series básicas
+          await Promise.allSettled(assets.map(async (a) => {
+            const sym = BINANCE_MAP[a]; if (!sym) return;
+            const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=${sym}&interval=1m&limit=100`,
+              { signal: AbortSignal.timeout(6000) });
+            const klines = await r.json() as number[][];
+            const closes = klines.map(k => parseFloat(String(k[4])));
+            setSeries(prev => ({ ...prev, [a]: closes }));
+            const candles5m = klines.filter((_,i) => i % 5 === 0).map(k => ({
+              t: k[0], o: parseFloat(String(k[1])), h: parseFloat(String(k[2])),
+              l: parseFloat(String(k[3])), c: parseFloat(String(k[4])), v: parseFloat(String(k[5])),
+            }));
+            setCandles(prev => ({ ...prev, [a]: candles5m }));
+          }));
+          const timeStr = new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });
+          setFeedStatus(`📊 ${timeStr} — Binance REST (sin bridge)`);
+          setLiveReady(true);
+          pushToast("📊 Datos de Binance — modo simulado (sin MT5 bridge)", "info");
+        } else {
+          setFeedStatus("⚠ Sin datos — verificá conexión");
+          setLiveReady(false);
+        }
+      } catch {
+        setFeedStatus("⚠ Binance no disponible — activá el bridge MT5");
+        setLiveReady(false);
+        pushToast("Sin datos disponibles. Activá el bridge MT5 para operar.", "warning");
+      }
       setIsSyncing(false);
-      pushToast("Bridge MT5 desconectado. Activá y conectá el bridge para recibir datos.", "warning");
       return;
     }
     try {
@@ -3857,10 +3912,12 @@ Rationale from system: ${signal.rationale}`;
     if (!autoScan) return;
     const ms = Math.max(8, scanEverySec) * 1000;
     const id = window.setInterval(() => {
-      void syncRealData();
-      void runAutoScan();
-      // Sync MT5 state también en cada ciclo de scan (aunque no haya posiciones)
-      if (mt5Enabled && mt5Status === "connected") void syncMT5State();
+      void (async () => {
+        // CRÍTICO: sync primero, luego scan — sin datos frescos no tiene sentido scanear
+        await syncRealData();
+        await runAutoScan();
+        if (mt5Enabled && mt5Status === "connected") void syncMT5State();
+      })();
     }, ms);
     return () => window.clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
