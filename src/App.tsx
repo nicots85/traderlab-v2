@@ -3096,7 +3096,11 @@ export function App() {
         : "insuficiente data";
       const consecLoss = calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain).streak;
       const ruinPct    = riskSnap.ruinProb.toFixed(1);
-      const evSign     = parseFloat(expectedValue) >= 0 ? "POSITIVE ✓" : "NEGATIVE ✗";
+      // Con pocos trades, el EV histórico no es representativo — usar RR del motor
+      const fewTrades  = stats.total < 15;
+      const evSign     = fewTrades
+        ? "N/A (insufficient history — use RR and confidence)"
+        : parseFloat(expectedValue) >= 0 ? "POSITIVE ✓" : "NEGATIVE ✗";
 
       const systemPrompt = `You are an algorithmic trading system managing a REAL funded account.
 
@@ -3105,6 +3109,8 @@ IDENTITY AND MANDATE:
 - The initial capital ($${initialCap}) is the absolute floor — if equity approaches it, you stop trading.
 - Your mandate: GROW capital with controlled risk. Not preserve it at all costs, not gamble it.
 - You are NOT risk-averse — you are RISK-CALIBRATED. Edge × frequency = profit.
+
+${fewTrades ? "⚠ COLD START MODE (< 15 real trades): Statistical metrics (EV, Kelly) are NOT reliable yet. Base decision primarily on RR ratio and signal confidence score. DO NOT skip valid setups due to negative EV when sample is too small." : ""}
 
 ACCOUNT STATE RIGHT NOW:
 - Equity: $${equitySnap.toFixed(2)} USDT | Initial capital: $${initialCap} USDT
@@ -3486,17 +3492,44 @@ Rationale from system: ${signal.rationale}`;
         return;
       }
     }
-    let decision: string;
-    try {
-      decision = await aiDecision(signal);
-    } catch {
-      // Si la IA no está disponible, usar solo la confianza local
-      decision = signal.confidence >= (learningRef.current.confidenceFloor + 5) ? "OPEN" : "SKIP";
-    }
-    if (decision !== "OPEN") {
-      if (!autoLabel) pushToast(`⏭ ${targetAsset} omitido (${decision}) — conf ${signal.confidence.toFixed(0)}% | ${signal.aiRationale ?? "confianza insuficiente"}`, "warning");
+    // ── Decisión primaria: motor cuantitativo local ─────────────────────────
+    // El motor local es el ÚNICO gatekeeper. Groq enriquece pero no bloquea.
+    const lrnSnap = learningRef.current;
+    const floor   = mode === "scalping"
+      ? Math.max(46, lrnSnap.confidenceFloor - 4)
+      : Math.max(50, lrnSnap.confidenceFloor);
+    const rrActual = Math.abs(signal.tp2 - signal.entry) /
+                     Math.max(Math.abs(signal.entry - signal.stopLoss), 1e-9);
+
+    if (signal.confidence < floor) {
+      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — conf ${signal.confidence.toFixed(0)}% < piso ${floor.toFixed(0)}% | ${signal.rationale.slice(0,60)}`, "warning");
       return;
     }
+    if (rrActual < 1.5) {
+      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — RR ${rrActual.toFixed(2)} < 1.5 mínimo`, "warning");
+      return;
+    }
+
+    // ── Groq como enricher (async, no bloquea) ───────────────────────────────
+    // Corre en paralelo: si responde antes de ejecutar, ajusta rationale.
+    // Solo puede VETAR si detecta contradicción estructural fuerte (modo intradía).
+    let aiVeto = false;
+    if (usingGroq && apiKey.trim() && canCallGroq()) {
+      try {
+        trackGroqCall();
+        const groqResult = await Promise.race([
+          aiDecision(signal),
+          new Promise<"TIMEOUT">((res) => setTimeout(() => res("TIMEOUT"), 4000)),
+        ]);
+        if (groqResult === "SKIP" && mode === "intradia") {
+          // Veto estructural solo en intradía — scalping no se veta
+          aiVeto = true;
+          if (!autoLabel) pushToast(`🤖 Groq vetó ${targetAsset} intradía — ${signal.aiRationale ?? "contradicción macro"}`, "warning");
+        }
+        // WAIT → no veta, solo registra
+      } catch { /* si falla Groq, continuar */ }
+    }
+    if (aiVeto) return;
     const lrn = learningRef.current;
     const wyckoffMult = (signal as Signal & { _wyckoffMult?: number })._wyckoffMult ?? 1.0;
     // Ajustar sizing por riesgo de ruina en scalping
