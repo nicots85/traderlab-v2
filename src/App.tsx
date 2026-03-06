@@ -3486,19 +3486,42 @@ Rationale from system: ${signal.rationale}`;
       if (!autoLabel) pushToast(`⚡ ${targetAsset} ${signal.direction}: correlado con posición abierta — skip`, "warning");
       return;
     }
-    // ── Guard sesión: scalping SOLO en NY (13:00–20:59 UTC) ──────────────────
-    // NY es la sesión con mayor liquidez, menor spread y menor slippage en PrimeXBT
-    // Para operar en otra sesión: activar override en Config
+    // ── Guard sesión por tipo de activo ──────────────────────────────────────
     if (mode === "scalping" && !sessionOverride) {
-      const now    = new Date();
-      const hour   = now.getUTCHours();
-      const dow    = now.getUTCDay(); // 0=dom, 6=sab
+      const now       = new Date();
+      const hour      = now.getUTCHours();
+      const dow       = now.getUTCDay();
       const isWeekend = dow === 0 || dow === 6;
-      // NY: 13:00–20:59 UTC (9am-5pm EST aprox)
-      const isNY = !isWeekend && hour >= 13 && hour < 21;
-      if (!isNY) {
-        const sessionName = isWeekend ? "OFF (finde)" : hour < 7 ? "Asia" : hour < 13 ? "London" : "transición NY→Asia";
-        if (!autoLabel) pushToast(`🗽 Scalping solo en NY (13-21 UTC). Ahora: ${sessionName}. Activá override en Config para operar.`, "warning");
+
+      // Crypto (BTC/ETH y similares): líquido 24/7
+      //   Solo bloquear 02:00–06:59 UTC (mínimo global de liquidez, spread pico)
+      //   = 23:00–03:59 ART
+      const isCrypto  = ["BTCUSD","ETHUSD","BNBUSD","SOLUSD","XRPUSD","ADAUSD",
+                          "DOTUSD","LTCUSD","DOGEUSD","AVAXUSD","LINKUSD","MATICUSD"].includes(targetAsset);
+
+      // Metales y Forex: requieren mercado institucional activo
+      //   London + NY: 07:00–20:59 UTC = 04:00–17:59 ART
+      const isMetal   = ["XAUUSD","XAGUSD"].includes(targetAsset);
+      const isForex   = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD"].includes(targetAsset);
+
+      let blocked = false; let sessionReason = "";
+      if (isWeekend) {
+        blocked = true; sessionReason = "finde semana — mercado cerrado";
+      } else if (isCrypto) {
+        // Solo bloquear la "hora muerta" global
+        if (hour >= 2 && hour < 7) { blocked = true; sessionReason = "02–07 UTC (mínimo liquidez crypto)"; }
+      } else if (isMetal || isForex) {
+        if (hour < 7 || hour >= 21) { blocked = true; sessionReason = "fuera de London+NY (07–21 UTC)"; }
+      } else {
+        // Default: NY completa + 2h post
+        if (hour < 7 || hour >= 23) { blocked = true; sessionReason = "fuera de horario activo"; }
+      }
+
+      if (blocked) {
+        if (!autoLabel) pushToast(
+          `⏸ ${targetAsset} scalp bloqueado: ${sessionReason}. Activá override en Config para forzar.`,
+          "warning"
+        );
         return;
       }
     }
@@ -3753,56 +3776,12 @@ Rationale from system: ${signal.rationale}`;
     setIsSyncing(true);
     const usingBridge = mt5Enabled && mt5Status === "connected";
 
-    // ── Sin bridge: usar Binance REST público como fallback ──────────────────
+    // Sin bridge: no operar
     if (!usingBridge) {
-      try {
-        // Mapa de símbolos Binance para los activos soportados
-        const BINANCE_MAP: Partial<Record<Asset, string>> = {
-          BTCUSD: "BTCUSDT", ETHUSD: "ETHUSDT",
-          XAUUSD: "XAUUSDT", XAGUSD: "XAGUSDT",
-        };
-        const priceEntries = await Promise.allSettled(
-          assets.map(async (a) => {
-            const sym = BINANCE_MAP[a];
-            if (!sym) return [a, 0] as [Asset, number];
-            const r = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`,
-              { signal: AbortSignal.timeout(5000) });
-            const d = await r.json() as { price: string };
-            return [a, parseFloat(d.price)] as [Asset, number];
-          })
-        );
-        const newPrices: Partial<Record<Asset, number>> = {};
-        priceEntries.forEach(r => { if (r.status === "fulfilled") newPrices[r.value[0]] = r.value[1]; });
-        if (Object.values(newPrices).some(v => v && v > 0)) {
-          setPrices(prev => ({ ...prev, ...newPrices }));
-          // Klines 1m para series básicas
-          await Promise.allSettled(assets.map(async (a) => {
-            const sym = BINANCE_MAP[a]; if (!sym) return;
-            const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=${sym}&interval=1m&limit=100`,
-              { signal: AbortSignal.timeout(6000) });
-            const klines = await r.json() as number[][];
-            const closes = klines.map(k => parseFloat(String(k[4])));
-            setSeries(prev => ({ ...prev, [a]: closes }));
-            const candles5m = klines.filter((_,i) => i % 5 === 0).map(k => ({
-              t: k[0], o: parseFloat(String(k[1])), h: parseFloat(String(k[2])),
-              l: parseFloat(String(k[3])), c: parseFloat(String(k[4])), v: parseFloat(String(k[5])),
-            }));
-            setCandles(prev => ({ ...prev, [a]: candles5m }));
-          }));
-          const timeStr = new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });
-          setFeedStatus(`📊 ${timeStr} — Binance REST (sin bridge)`);
-          setLiveReady(true);
-          pushToast("📊 Datos de Binance — modo simulado (sin MT5 bridge)", "info");
-        } else {
-          setFeedStatus("⚠ Sin datos — verificá conexión");
-          setLiveReady(false);
-        }
-      } catch {
-        setFeedStatus("⚠ Binance no disponible — activá el bridge MT5");
-        setLiveReady(false);
-        pushToast("Sin datos disponibles. Activá el bridge MT5 para operar.", "warning");
-      }
+      setFeedStatus("⚠ MT5 Bridge no conectado — activá el bridge en Configuración");
+      setLiveReady(false);
       setIsSyncing(false);
+      if (!liveReady) pushToast("Bridge MT5 desconectado. Conectá el bridge para operar.", "warning");
       return;
     }
     try {
@@ -3886,13 +3865,10 @@ Rationale from system: ${signal.rationale}`;
   }
 
   async function runAutoScan() {
-    // Auto scan: prueba ambos modos para todos los activos
-    let opened = 0; let skipped = 0;
     const prevLen = openPositionsRef.current.length;
-    for (const a of assets) await createSignalAndExecute("scalping",  a, true);
-    for (const a of assets) await createSignalAndExecute("intradia", a, true);
-    opened = openPositionsRef.current.length - prevLen;
-    // Solo mostrar resumen si hubo cambios relevantes
+    for (const a of assets) await createSignalAndExecute("scalping",  a, false); // false = mostrar toasts
+    for (const a of assets) await createSignalAndExecute("intradia", a, false);
+    const opened = openPositionsRef.current.length - prevLen;
     if (opened > 0) pushToast(`🤖 AutoScan: ${opened} operación(es) abierta(s)`, "success");
   }
 
