@@ -129,8 +129,10 @@ type Indicators = {
 
 type Signal = {
   asset: Asset; mode: Mode; direction: Direction;
-  entry: number; stopLoss: number; takeProfit: number;
-  confidence: number; spreadPct: number; atr: number;
+  entry: number; stopLoss: number;
+  takeProfit: number;   // TP1 (alias para compatibilidad)
+  tp1: number; tp2: number; tp3?: number; // TPs escalonados
+  confidence: number; spreadPct: number; spreadCostUsd: number; atr: number;
   mtf: { htf: number; ltf: number; exec: number };
   indicators: Indicators;
   wyckoff: WyckoffAnalysis;
@@ -158,6 +160,10 @@ type MT5Position = {
 type Position = {
   id: number; signal: Signal; size: number; marginUsed: number;
   openedAt: string; peak: number; trough: number;
+  partialDone?: boolean;   // legacy — reemplazado por tpHit
+  tp1Hit?: boolean;        // scalp: TP1 tocado → SL a BE, esperar TP2
+  tp2Hit?: boolean;        // scalp: TP2 tocado → cierre
+  tp3Hit?: boolean;        // intradía: TP3 tocado → cierre final
 };
 
 type ClosedTrade = {
@@ -167,10 +173,15 @@ type ClosedTrade = {
   source: "real" | "backtest";
 };
 
+type AssetEdge = {
+  wins: number; total: number; pnl: number;
+  byHour: Record<number, number>;
+};
 type LearningModel = {
   riskScale: number; confidenceFloor: number;
   scalpingTpAtr: number; intradayTpAtr: number;
   atrTrailMult: number; hourEdge: Record<number, number>;
+  assetEdge: Partial<Record<string, AssetEdge>>;
 };
 
 type BacktestReport = {
@@ -215,8 +226,10 @@ const volStep: Record<Asset, number> = {
 // BTC ~95000 usd: ATR 1m mínimo = 50 usd
 
 const initialLearning: LearningModel = {
-  riskScale: 1, confidenceFloor: 52, scalpingTpAtr: 1.35,
-  intradayTpAtr: 3.5, atrTrailMult: 0.35, hourEdge: {},
+  riskScale: 1, confidenceFloor: 52,
+  scalpingTpAtr: 2.4,
+  intradayTpAtr: 5.0,
+  atrTrailMult: 0.35, hourEdge: {}, assetEdge: {},
 };
 
 const exitLabel: Record<ExitReason, string> = {
@@ -2382,6 +2395,14 @@ export function App() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [autoScan, setAutoScan] = useState(false);
   const [scanEverySec, setScanEverySec] = useState(20);
+  // ── Circuit breaker ──────────────────────────────────────────────────────
+  const [circuitOpen, setCircuitOpen] = useState(false);   // true = pausado por pérdida diaria
+  const [sessionOverride, setSessionOverride] = useState(false); // true = ignorar filtro sesión manual
+  const dailyPnlRef     = useRef<{ date: string; pnl: number }>({ date: "", pnl: 0 });
+  const circuitOpenRef  = useRef(false);
+  const mt5EquityRef    = useRef<number | null>(null);
+  const equityRef       = useRef<number>(100);
+  const MAX_DAILY_LOSS_PCT = 0.03;   // 3% equity máxima pérdida diaria
   // ── Rate limiter Groq ────────────────────────────────────────────────────
   const groqCallsRef   = useRef<number[]>([]);   // timestamps de llamadas recientes
   const groqPausedRef  = useRef(false);           // true = pausado por rate limit
@@ -2650,15 +2671,23 @@ export function App() {
     // Con pocos trades (<10) el modelo no ajusta el piso para no bloquearse
     const minTrades = real.length;
     const floorAdjust = minTrades >= 10 ? clamp(52 + (0.5 - wr) * 16, 48, 62) : 52;
+    // ── AssetEdge: rendimiento acumulado por activo+modo ─────────────────────
+    const assetEdge: Partial<Record<string, AssetEdge>> = { ...learningRef.current.assetEdge };
+    real.forEach(t => {
+      const key = `${t.asset}_${t.mode}`;
+      if (!assetEdge[key]) assetEdge[key] = { wins: 0, total: 0, pnl: 0, byHour: {} };
+      const ae = assetEdge[key]!;
+      ae.total++; if (t.pnl > 0) ae.wins++; ae.pnl += t.pnl;
+      const h = new Date(t.closedAt).getHours();
+      ae.byHour[h] = (ae.byHour[h] ?? 0) + t.pnl;
+    });
     setLearning({
       riskScale: clamp(0.8 + wr * 0.6 + Math.max(exp, 0) * 0.03, 0.7, 1.5),
       confidenceFloor: floorAdjust,
-      scalpingTpAtr: clamp(1.2 + wr * 0.4, 1.15, 1.8),
-      intradayTpAtr: clamp(3.0 + wr * 1.5, 2.8, 5.0),
-      // atrTrailMult ya no se usa para trailing (es estructural), lo mantenemos
-      // como parámetro de buffer del swing stop
+      scalpingTpAtr: clamp(2.0 + wr * 0.8, 1.8, 3.2),
+      intradayTpAtr: clamp(4.5 + wr * 1.5, 4.0, 7.0),
       atrTrailMult: clamp(0.25 + wr * 0.3, 0.2, 0.6),
-      hourEdge,
+      hourEdge, assetEdge,
     });
   }
 
@@ -2917,20 +2946,41 @@ export function App() {
     }
     const stopLoss = structuralSl;
 
-    // ── TP1: VAH/VAL del perfil de volumen (scalping) o múltiplo ATR (intradía)
-    // ── TP2: nivel de liquidez siguiente (trailing en scalping)
-    let takeProfit: number;
-    if (currentMode === "scalping" && mc) {
-      // TP hacia el nivel de liquidez opuesto en el perfil de volumen
-      takeProfit = direction === "LONG"
-        ? Math.max(mc.vah, entry + baseAtr * lrn.scalpingTpAtr)
-        : Math.min(mc.val, entry - baseAtr * lrn.scalpingTpAtr);
+    // ── TPs escalonados: scalping = TP1 + TP2, intradía = TP1 + TP2 + TP3 ─────
+    // Scalping: TP1 = 1.2×ATR (rápido, asegurar), TP2 = 2.4×ATR (completo)
+    // Intradía: TP1 = 2.0×ATR, TP2 = 4.0×ATR, TP3 = 6.0×ATR (extensión)
+    let tp1: number, tp2: number, tp3: number | undefined;
+    const dir = direction;
+
+    if (currentMode === "scalping") {
+      const tp1Dist = baseAtr * 1.2;
+      const tp2Dist = baseAtr * lrn.scalpingTpAtr; // 2.4×ATR por defecto
+      // Anclar al perfil de volumen si está disponible
+      const mcVah = mc?.vah ?? entry + tp2Dist;
+      const mcVal = mc?.val ?? entry - tp2Dist;
+      tp1 = dir === "LONG"
+        ? entry + tp1Dist
+        : entry - tp1Dist;
+      tp2 = dir === "LONG"
+        ? Math.max(mcVah, entry + tp2Dist)
+        : Math.min(mcVal, entry - tp2Dist);
     } else {
-      const tpMult = Math.max(lrn.intradayTpAtr * 1.8, 4.0);
-      takeProfit = direction === "LONG"
-        ? entry + baseAtr * tpMult
-        : entry - baseAtr * tpMult;
+      // Intradía: niveles 2×, 4× y 6× ATR
+      const t1m = lrn.intradayTpAtr * 0.4;  // ~2×ATR
+      const t2m = lrn.intradayTpAtr;          // ~5×ATR
+      const t3m = lrn.intradayTpAtr * 1.6;  // ~8×ATR
+      tp1 = dir === "LONG" ? entry + baseAtr * t1m : entry - baseAtr * t1m;
+      tp2 = dir === "LONG" ? entry + baseAtr * t2m : entry - baseAtr * t2m;
+      tp3 = dir === "LONG" ? entry + baseAtr * t3m : entry - baseAtr * t3m;
     }
+    const takeProfit = tp2; // alias principal = TP final
+
+    // ── Costo real del spread (en USD) — CfD: sin comisión, solo spread ──────
+    // Spread real viene del bridge MT5 cuando está conectado, sino se estima
+    const realSpreadPct = mt5SpreadMap[currentAsset]?.spread_pct ?? spreadPct;
+    const contractSz    = contractSize[currentAsset] ?? 1;
+    const lotSize       = 1; // referencia 1 lote para el costo unitario
+    const spreadCostUsd = (realSpreadPct / 100) * entry * contractSz * lotSize;
 
     // ── Paso 6: Rationale ─────────────────────────────────────────────────────
     const mtfCtx = `HTF ${mtf.htf.toFixed(2)} / LTF ${mtf.ltf.toFixed(2)} / Exec ${mtf.exec.toFixed(2)}`;
@@ -2949,10 +2999,21 @@ export function App() {
       ? `${controlLabel} ${direction} | CVD${cvdArrow} FP:${of?.footprintScore.toFixed(0)??"?"} | ${confirmCtx}${mcCtx}`
       : `${direction} | ${mtfCtx} | ${confirmCtx}${wyckoffCtx}${mcCtx}`;
 
+    // ── Bonus/penalidad por historial de asset+modo ─────────────────────────
+    const aeKey = `${currentAsset}_${currentMode}`;
+    const ae    = learningRef.current.assetEdge[aeKey];
+    let aeBonus = 0;
+    if (ae && ae.total >= 5) {
+      const aeWr = ae.wins / ae.total;
+      aeBonus = clamp((aeWr - 0.5) * 20, -8, 8); // ±8 puntos según historial del activo
+    }
+    const finalConfidence = clamp(confidence + aeBonus, 40, 96);
+
     return {
-      asset: currentAsset, mode: currentMode, direction, entry, stopLoss, takeProfit,
-      confidence, spreadPct, atr: baseAtr, mtf, indicators: ind, wyckoff, rationale,
-      // Adjuntar mult para usarlo en createSignalAndExecute
+      asset: currentAsset, mode: currentMode, direction, entry, stopLoss,
+      takeProfit, tp1, tp2, tp3,
+      confidence: finalConfidence, spreadPct, spreadCostUsd, atr: baseAtr, mtf,
+      indicators: ind, wyckoff, rationale,
       ...(currentMode === "intradia" ? { _wyckoffMult: wyckoffMult } : {}),
     } as Signal & { _wyckoffMult?: number };
   }
@@ -3220,6 +3281,20 @@ Rationale from system: ${signal.rationale}`;
       refreshLearning(next);
       return next;
     });
+    // ── Circuit breaker: acumula P&L del día ────────────────────────────────
+    {
+      const today = new Date().toISOString().slice(0, 10);
+      if (dailyPnlRef.current.date !== today) dailyPnlRef.current = { date: today, pnl: 0 };
+      dailyPnlRef.current.pnl += pnl;
+      const eq = mt5EquityRef.current ?? 1000;
+      const lossPct = Math.abs(Math.min(dailyPnlRef.current.pnl, 0)) / eq;
+      if (lossPct >= MAX_DAILY_LOSS_PCT && !circuitOpenRef.current) {
+        circuitOpenRef.current = true;
+        setCircuitOpen(true);
+        setAutoScan(false);
+        pushToast(`🔴 Circuit breaker: pérdida diaria ${(lossPct * 100).toFixed(1)}% — autoScan pausado hasta que lo reactivés`, "error");
+      }
+    }
     // Sincronizar MT5 para reflejar el cierre inmediatamente
     if (mt5Enabled && mt5Status === "connected") setTimeout(() => void syncMT5State(), 500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3268,27 +3343,83 @@ Rationale from system: ${signal.rationale}`;
       const trailMoved  = isLong ? newSl > currentSl : newSl < currentSl;
       const effectiveSl = newSl;
 
-      // ── Reversión: solo intradía con ganancia minima 1×ATR ────────────────
+      // ── Breakeven: mover SL a entrada cuando ganancia ≥ 50% del TP ──────────
+      const tpDist      = Math.abs(pos.signal.takeProfit - pos.signal.entry);
+      const profitDist  = isLong ? tradable - pos.signal.entry : pos.signal.entry - tradable;
+      const profitRatio = tpDist > 0 ? profitDist / tpDist : 0;
+      const bePrice     = pos.signal.entry + (isLong ? 1 : -1) * (pos.signal.atr * 0.1); // entry + pequeño buffer
+      const shouldBE    = profitRatio >= 0.5 && (isLong ? newSl < bePrice : newSl > bePrice);
+      if (shouldBE) {
+        newSl = bePrice; // SL a breakeven
+      }
+
+      // ── Lógica multi-TP ─────────────────────────────────────────────────────
+      const tp1 = pos.signal.tp1 ?? pos.signal.takeProfit;
+      const tp2 = pos.signal.tp2 ?? pos.signal.takeProfit;
+      const tp3 = pos.signal.tp3;
+      const beBuffer = pos.signal.entry + (isLong ? 1 : -1) * pos.signal.atr * 0.1;
+
+      const hitTp1 = !pos.tp1Hit && (isLong ? tradable >= tp1 : tradable <= tp1);
+      const hitTp2 = pos.tp1Hit && !pos.tp2Hit && (isLong ? tradable >= tp2 : tradable <= tp2);
+      const hitTp3 = tp3 !== undefined && pos.tp2Hit && !pos.tp3Hit && (isLong ? tradable >= tp3 : tradable <= tp3);
+
+      if (pos.signal.mode === "scalping") {
+        if (hitTp2) {
+          void closePosition(pos, tradable, "TP"); return;
+        }
+        if (hitTp1) {
+          // Scalp TP1 tocado: mover SL a BE y esperar TP2
+          const nextSl = isLong ? Math.max(newSl, beBuffer) : Math.min(newSl, beBuffer);
+          setOpenPositions(prev => prev.map(p =>
+            p.id === pos.id ? { ...p, tp1Hit: true, signal: { ...p.signal, stopLoss: nextSl } } : p
+          ));
+          pushToast(`🎯 ${pos.signal.asset} TP1 → SL movido a BE, esperando TP2`, "success");
+          return;
+        }
+      } else {
+        // Intradía: TP1 → BE, TP2 → SL a TP1, TP3 → cierre
+        if (hitTp3) {
+          void closePosition(pos, tradable, "TP"); return;
+        }
+        if (hitTp2 && tp3 !== undefined) {
+          // Mover SL a TP1 para asegurar mínimo ese profit
+          const lockSl = tp1;
+          setOpenPositions(prev => prev.map(p =>
+            p.id === pos.id ? { ...p, tp2Hit: true, signal: { ...p.signal, stopLoss: lockSl } } : p
+          ));
+          pushToast(`🎯 ${pos.signal.asset} TP2 → SL asegurado en TP1, esperando TP3`, "success");
+          return;
+        }
+        if (hitTp2 && tp3 === undefined) {
+          void closePosition(pos, tradable, "TP"); return;
+        }
+        if (hitTp1 && !pos.tp1Hit) {
+          const nextSl = isLong ? Math.max(newSl, beBuffer) : Math.min(newSl, beBuffer);
+          setOpenPositions(prev => prev.map(p =>
+            p.id === pos.id ? { ...p, tp1Hit: true, signal: { ...p.signal, stopLoss: nextSl } } : p
+          ));
+          pushToast(`🎯 ${pos.signal.asset} TP1 → SL a BE, esperando TP2/TP3`, "success");
+          return;
+        }
+      }
+
+      // ── Reversión: solo intradía con ganancia minima 1×ATR ─────────────────
       const vals         = sv[pos.signal.asset] ?? [];
       const maFast       = avg(vals.slice(-(pos.signal.mode === "scalping" ? 5 : 10)));
       const maSlow       = avg(vals.slice(-(pos.signal.mode === "scalping" ? 10 : 20)));
-      const profitDist   = isLong ? tradable - pos.signal.entry : pos.signal.entry - tradable;
       const hasMinProfit = profitDist >= pos.signal.atr * 1.0;
       const maCross      = isLong ? maFast < maSlow : maFast > maSlow;
-      const reversal     = pos.signal.mode === "intradia" && hasMinProfit && maCross;
+      const reversal     = pos.signal.mode === "intradia" && hasMinProfit && maCross && pos.tp1Hit;
 
-      // ── Cierre ───────────────────────────────────────────────────────────
-      const hitTp = isLong ? tradable >= pos.signal.takeProfit : tradable <= pos.signal.takeProfit;
-      const hitSl = isLong ? tradable <= effectiveSl           : tradable >= effectiveSl;
-
-      if (hitTp)    { void closePosition(pos, tradable, "TP");                        return; }
+      // ── SL ──────────────────────────────────────────────────────────────────
+      const hitSl = isLong ? tradable <= effectiveSl : tradable >= effectiveSl;
       if (hitSl)    { void closePosition(pos, tradable, trailMoved ? "TRAIL" : "SL"); return; }
       if (reversal) { void closePosition(pos, tradable, "REVERSAL");                  return; }
 
-      if (trailMoved || peak !== pos.peak || trough !== pos.trough) {
+      if (trailMoved || shouldBE || peak !== pos.peak || trough !== pos.trough) {
         setOpenPositions(prev => prev.map(p =>
           p.id === pos.id
-            ? { ...p, peak, trough, signal: { ...p.signal, stopLoss: effectiveSl } }
+            ? { ...p, peak, trough, signal: { ...p.signal, stopLoss: newSl } }
             : p
         ));
       }
@@ -3297,6 +3428,10 @@ Rationale from system: ${signal.rationale}`;
 
   async function createSignalAndExecute(mode: Mode, targetAsset: Asset, autoLabel = false) {
     if (!liveReady) { pushToast("El feed aún no está listo. Sincronice primero.", "warning"); return; }
+    if (circuitOpenRef.current) {
+      if (!autoLabel) pushToast("🔴 Circuit breaker activo — límite de pérdida diaria alcanzado. Reactivá el autoScan manualmente cuando estés listo.", "error");
+      return;
+    }
 
     // ── Verificar límites diarios antes de generar señal ─────────────────────
     if (mode === "scalping") {
@@ -3330,6 +3465,27 @@ Rationale from system: ${signal.rationale}`;
 
     const signal = generateSignal(mode, targetAsset);
     if (!autoLabel) setLastSignal(signal);
+    // ── Guard correlación ────────────────────────────────────────────────────
+    if (hasCorrConflict(targetAsset, signal.direction, openPositionsRef.current)) {
+      if (!autoLabel) pushToast(`⚡ ${targetAsset} ${signal.direction}: correlado con posición abierta — skip`, "warning");
+      return;
+    }
+    // ── Guard sesión: scalping SOLO en NY (13:00–20:59 UTC) ──────────────────
+    // NY es la sesión con mayor liquidez, menor spread y menor slippage en PrimeXBT
+    // Para operar en otra sesión: activar override en Config
+    if (mode === "scalping" && !sessionOverride) {
+      const now    = new Date();
+      const hour   = now.getUTCHours();
+      const dow    = now.getUTCDay(); // 0=dom, 6=sab
+      const isWeekend = dow === 0 || dow === 6;
+      // NY: 13:00–20:59 UTC (9am-5pm EST aprox)
+      const isNY = !isWeekend && hour >= 13 && hour < 21;
+      if (!isNY) {
+        const sessionName = isWeekend ? "OFF (finde)" : hour < 7 ? "Asia" : hour < 13 ? "London" : "transición NY→Asia";
+        if (!autoLabel) pushToast(`🗽 Scalping solo en NY (13-21 UTC). Ahora: ${sessionName}. Activá override en Config para operar.`, "warning");
+        return;
+      }
+    }
     let decision: string;
     try {
       decision = await aiDecision(signal);
@@ -3708,7 +3864,11 @@ Rationale from system: ${signal.rationale}`;
       }
       const riskUsd = Math.max(0.5, equityBt * (riskPct / 100));
       const size = riskUsd / Math.max(sd, entry * 0.0003);
-      const pnl = dir === "LONG" ? (exit - entry) * size : (entry - exit) * size;
+      // Costos reales: spread estimado 0.06% + comisión 0.02% ida y vuelta
+      const costPct   = mode === "scalping" ? 0.0010 : 0.0006; // scalping más caro por mayor spread relativo
+      const tradeCost = entry * size * costPct;
+      const rawPnl    = dir === "LONG" ? (exit - entry) * size : (entry - exit) * size;
+      const pnl       = rawPnl - tradeCost;
       equityBt += pnl;
       simulated.push({ id: Date.now() + i, asset: sa, mode, direction: dir, entry, exit, pnl, pnlPct: (pnl / Math.max((size * entry) / getLeverage(sa), 0.01)) * 100, result, openedAt: new Date(Date.now() - 60000 * 30).toISOString(), closedAt: new Date().toISOString(), source: "backtest" });
       returns.push(pnl);
@@ -3764,6 +3924,14 @@ Rationale from system: ${signal.rationale}`;
                 pushToast(groqPausedRef.current ? "⏸ Groq pausado manualmente" : "▶ Groq reanudado", "info");
               }}>
               {groqRateInfo.paused ? "⏸" : "⚡"} {groqRateInfo.calls}/{GROQ_MAX_RPM} rpm
+            </div>
+          )}
+          {circuitOpen && (
+            <div style={{ padding: "3px 10px", borderRadius: 6, background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.35)", fontSize: 11, fontWeight: 800, color: "#ef4444",
+              cursor: "pointer" }}
+              title="Click para resetear el circuit breaker manualmente"
+              onClick={() => { circuitOpenRef.current = false; setCircuitOpen(false); pushToast("🟢 Circuit breaker reseteado manualmente", "info"); }}>
+              🔴 CIRCUIT BREAKER — click para resetear
             </div>
           )}
           <div style={{ fontSize: 10, color: liveReady ? "#10b981" : "#6b7280", display: "flex", alignItems: "center", gap: 4 }}>
@@ -4010,10 +4178,31 @@ Rationale from system: ${signal.rationale}`;
                     <span style={{ fontSize: 10, color: lastSignal.confidence >= 70 ? "#10b981" : "#f59e0b", fontWeight: 700 }}>Conf: {lastSignal.confidence.toFixed(0)}%</span>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginBottom: 8 }}>
-                    {[["Entrada", lastSignal.entry.toFixed(2)], ["Stop Loss", lastSignal.stopLoss.toFixed(2)], ["Take Profit", lastSignal.takeProfit.toFixed(2)]].map(([k, v]) => (
-                      <div key={k} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 6, padding: "5px 8px", textAlign: "center" }}>
-                        <p style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{k}</p>
-                        <p style={{ fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: k === "Stop Loss" ? "#ef4444" : k === "Take Profit" ? "#10b981" : "var(--text)" }}>{v}</p>
+                    {/* Entrada + SL */}
+                    {[["Entrada", lastSignal.entry.toFixed(2), "var(--text)"], ["Stop Loss", lastSignal.stopLoss.toFixed(2), "#ef4444"]].map(([k, v, c]) => (
+                      <div key={k as string} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 6, padding: "5px 8px", textAlign: "center" }}>
+                        <p style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{k}</p>
+                        <p style={{ fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: c as string }}>{v}</p>
+                      </div>
+                    ))}
+                    {/* RR calculado */}
+                    <div style={{ background: "rgba(99,102,241,0.08)", borderRadius: 6, padding: "5px 8px", textAlign: "center" }}>
+                      <p style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.07em" }}>RR</p>
+                      <p style={{ fontWeight: 800, fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: "#818cf8" }}>
+                        {(Math.abs(lastSignal.tp2 - lastSignal.entry) / Math.max(Math.abs(lastSignal.entry - lastSignal.stopLoss), 0.001)).toFixed(2)}×
+                      </p>
+                    </div>
+                  </div>
+                  {/* TPs escalonados */}
+                  <div style={{ display: "grid", gridTemplateColumns: lastSignal.tp3 ? "1fr 1fr 1fr" : "1fr 1fr", gap: 5, marginBottom: 8 }}>
+                    {[
+                      { label: lastSignal.mode === "scalping" ? "TP1 (rápido)" : "TP1", val: lastSignal.tp1, color: "#10b981" },
+                      { label: lastSignal.mode === "scalping" ? "TP2 (objetivo)" : "TP2", val: lastSignal.tp2, color: "#059669" },
+                      ...(lastSignal.tp3 ? [{ label: "TP3 (extensión)", val: lastSignal.tp3, color: "#047857" }] : []),
+                    ].map(({ label, val, color }) => (
+                      <div key={label} style={{ background: "rgba(16,185,129,0.06)", borderRadius: 6, padding: "5px 8px", textAlign: "center", border: "1px solid rgba(16,185,129,0.15)" }}>
+                        <p style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase" }}>{label}</p>
+                        <p style={{ fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", fontSize: 11.5, color }}>{val.toFixed(2)}</p>
                       </div>
                     ))}
                   </div>
@@ -4293,6 +4482,54 @@ Rationale from system: ${signal.rationale}`;
               </div>
             )}
 
+            {/* ── Rendimiento por activo + modo ── */}
+            {Object.keys(learning.assetEdge ?? {}).length > 0 && (
+              <div className="card">
+                <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>📊 Performance por activo y modo</p>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr>
+                        {["Activo", "Modo", "Trades", "Win %", "P&L", "Mejor hora", "Confianza adj."].map(h => (
+                          <th key={h} style={{ textAlign: "left", padding: "6px 10px", fontSize: 10, textTransform: "uppercase",
+                            letterSpacing: "0.08em", color: "var(--muted)", borderBottom: "1px solid var(--border)" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(learning.assetEdge ?? {}).sort((a, b) => (b[1]?.pnl ?? 0) - (a[1]?.pnl ?? 0)).map(([key, ae]) => {
+                        if (!ae) return null;
+                        const [asset, mode] = key.split("_");
+                        const wr = ae.total > 0 ? (ae.wins / ae.total * 100) : 0;
+                        const bestH = Object.entries(ae.byHour).sort((a, b) => b[1] - a[1])[0];
+                        const aeBonus = ae.total >= 5 ? clamp((wr / 100 - 0.5) * 20, -8, 8) : 0;
+                        return (
+                          <tr key={key}>
+                            <td style={{ padding: "7px 10px", fontWeight: 700 }}>{asset}</td>
+                            <td style={{ padding: "7px 10px", color: mode === "scalping" ? "#818cf8" : "#f59e0b" }}>{mode}</td>
+                            <td style={{ padding: "7px 10px" }}>{ae.total}</td>
+                            <td style={{ padding: "7px 10px", color: wr >= 50 ? "#10b981" : "#ef4444", fontWeight: 700 }}>{wr.toFixed(1)}%</td>
+                            <td style={{ padding: "7px 10px", color: ae.pnl >= 0 ? "#10b981" : "#ef4444", fontWeight: 700 }}>
+                              {ae.pnl >= 0 ? "+" : ""}{ae.pnl.toFixed(2)}
+                            </td>
+                            <td style={{ padding: "7px 10px", color: "var(--muted)" }}>
+                              {bestH ? `${bestH[0]}h (+${bestH[1].toFixed(2)})` : "—"}
+                            </td>
+                            <td style={{ padding: "7px 10px", color: aeBonus > 0 ? "#10b981" : aeBonus < 0 ? "#ef4444" : "var(--muted)", fontWeight: 700 }}>
+                              {ae.total >= 5 ? `${aeBonus >= 0 ? "+" : ""}${aeBonus.toFixed(1)} pts` : "< 5 trades"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
+                  Con ≥5 trades por activo+modo, el bot ajusta la confianza de señales futuras (±8 puntos).
+                </p>
+              </div>
+            )}
+
             {/* ── Diagnóstico de por qué no abre trades ── */}
             <div className="card">
               <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>🔍 Diagnóstico en tiempo real</p>
@@ -4307,6 +4544,7 @@ Rationale from system: ${signal.rationale}`;
                   { label: "Bridge conectado",      value: mt5Status === "connected" ? "✅ Sí" : "❌ No",                     ok: mt5Status === "connected" },
                   { label: "IA Groq",               value: aiStatus === "ok" ? `✅ ${groqModel}` : aiStatus,                  ok: aiStatus === "ok" },
                   { label: "Groq rpm (último min)", value: `${groqRateInfo.calls}/${GROQ_MAX_RPM}${groqRateInfo.paused ? " ⏸ PAUSADO" : ""}`, ok: !groqRateInfo.paused && groqRateInfo.calls < GROQ_MAX_RPM - 5 },
+                  { label: "Circuit breaker",      value: circuitOpen ? `🔴 ACTIVO — P&L diario: $${dailyPnlRef.current.pnl.toFixed(2)}` : `✅ OK — P&L hoy: $${dailyPnlRef.current.pnl.toFixed(2)}`, ok: !circuitOpen },
                 ].map(({ label, value, ok }) => (
                   <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "7px 10px", borderRadius: 7,
                     background: ok ? "rgba(16,185,129,0.06)" : "rgba(239,68,68,0.06)",
@@ -4361,6 +4599,28 @@ Rationale from system: ${signal.rationale}`;
                 <span style={{ fontSize: 11, color: "var(--muted)" }}>{autoScan ? `cada ${scanEverySec}s` : "inactivo"}</span>
               </div>
               <input className="inp" type="number" min={8} max={300} value={scanEverySec} onChange={e => setScanEverySec(Number(e.target.value))} style={{ width: 110 }} />
+              <div style={{ marginTop: 14, padding: "10px 12px", borderRadius: 8,
+                background: sessionOverride ? "rgba(245,158,11,0.08)" : "rgba(255,255,255,0.03)",
+                border: `1px solid ${sessionOverride ? "rgba(245,158,11,0.3)" : "rgba(255,255,255,0.07)"}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 12, color: sessionOverride ? "#f59e0b" : "var(--text)" }}>
+                      🗽 Override sesión NY
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                      {sessionOverride
+                        ? "⚠ Scalping habilitado en cualquier horario — spread puede ser alto"
+                        : "Scalping solo en sesión NY (13:00–20:59 UTC) — menor spread"}
+                    </div>
+                  </div>
+                  <button onClick={() => setSessionOverride(p => !p)}
+                    style={{ padding: "5px 12px", borderRadius: 16, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 11,
+                      background: sessionOverride ? "#f59e0b" : "rgba(255,255,255,0.07)",
+                      color: sessionOverride ? "#fff" : "var(--muted)" }}>
+                    {sessionOverride ? "● ON" : "○ OFF"}
+                  </button>
+                </div>
+              </div>
             </div>
             {/* ── Panel MT5 Bridge ─────────────────────────────────────────────── */}
             <div className="card" style={{ border: mt5Status === "connected" ? "1px solid rgba(16,185,129,0.35)" : "1px solid var(--border)" }}>
