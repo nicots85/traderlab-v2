@@ -2698,7 +2698,13 @@ export function App() {
   }
 
   function getMtfScore(a: Asset, mode: Mode = "intradia") {
-    const vals = series[a];
+    const vals = series[a] ?? [];
+    // Sin datos suficientes → scores neutros (0) — señal con confianza base ~52
+    const minLen = mode === "scalping" ? 13 : 20;
+    if (!vals || vals.length < minLen) {
+      const atrFallback = Math.max(getAssetMinAtr(a) ?? prices[a] * 0.001, prices[a] * 0.001);
+      return { htf: 0, ltf: 0, exec: 0, atr: atrFallback, hasRealTF: false };
+    }
     const atr = Math.max(calcAtrFromSeries(vals, 20), getAssetMinAtr(a) ?? prices[a] * 0.001);
 
     if (mode === "scalping") {
@@ -2752,8 +2758,98 @@ export function App() {
     };
   }
 
+
+  // ─── Perfil de sesión: detecta horario y ajusta parámetros automáticamente ───
+  // NY semana  → todos los activos, parámetros normales
+  // Fuera NY   → solo crypto, SL/TP más conservadores
+  // Finde      → solo crypto, parámetros especiales anti-pump
+  function getSessionProfile() {
+    const now       = new Date();
+    const hour      = now.getUTCHours();
+    const dow       = now.getUTCDay(); // 0=dom, 6=sab
+    const isWeekend = dow === 0 || dow === 6;
+    const isNY      = !isWeekend && hour >= 13 && hour < 21;
+    const isLondon  = !isWeekend && hour >= 7  && hour < 13;
+    const isAsia    = hour >= 0  && hour < 7;
+
+    if (isWeekend) return {
+      name:         "Finde — Crypto",
+      emoji:        "🪙",
+      label:        `Finde semana ${now.toLocaleString("es", { weekday: "short" }).toUpperCase()} ${hour.toString().padStart(2,"0")}:${now.getUTCMinutes().toString().padStart(2,"0")} UTC`,
+      isCryptoOnly: true,
+      slMult:       1.0,   // SL más ajustado — crypto finde impulsos rápidos
+      tp1Mult:      1.0,   // TP1 rápido para asegurar
+      tp2Mult:      2.2,   // TP2 moderado (finde = reversiones repentinas)
+      confAdjust:   -2,    // piso levemente más permisivo
+      spreadTol:    1.25,  // tolerar 25% más spread (liquidez menor)
+      maxPositions: 2,     // máximo 2 posiciones crypto simultáneas
+      description:  "Mercados cerrados salvo crypto. Bot especializado BTC/ETH.",
+    };
+
+    if (isNY) return {
+      name:         "NY",
+      emoji:        "🗽",
+      label:        `NY ${hour.toString().padStart(2,"0")}:${now.getUTCMinutes().toString().padStart(2,"0")} UTC`,
+      isCryptoOnly: false,
+      slMult:       1.2,
+      tp1Mult:      1.2,
+      tp2Mult:      2.4,
+      confAdjust:   0,
+      spreadTol:    1.0,
+      maxPositions: 3,
+      description:  "Sesión principal. Todos los activos activos.",
+    };
+
+    if (isLondon) return {
+      name:         "London",
+      emoji:        "🏦",
+      label:        `London ${hour.toString().padStart(2,"0")}:${now.getUTCMinutes().toString().padStart(2,"0")} UTC`,
+      isCryptoOnly: false,
+      slMult:       1.1,
+      tp1Mult:      1.1,
+      tp2Mult:      2.2,
+      confAdjust:   0,
+      spreadTol:    1.1,
+      maxPositions: 3,
+      description:  "Sesión London. Oro y crypto activos.",
+    };
+
+    if (isAsia) return {
+      name:         "Asia — Crypto",
+      emoji:        "🌏",
+      label:        `Asia ${hour.toString().padStart(2,"0")}:${now.getUTCMinutes().toString().padStart(2,"0")} UTC`,
+      isCryptoOnly: true,
+      slMult:       0.9,   // Asia = rango lateral → SL ajustado
+      tp1Mult:      0.9,
+      tp2Mult:      1.8,
+      confAdjust:   -3,    // más permisivo, señales menos limpias
+      spreadTol:    1.3,
+      maxPositions: 2,
+      description:  "Sesión Asia. Solo crypto. Rangos laterales frecuentes.",
+    };
+
+    // Post-NY (21-00 UTC)
+    return {
+      name:         "Post-NY — Crypto",
+      emoji:        "🌙",
+      label:        `Post-NY ${hour.toString().padStart(2,"0")}:${now.getUTCMinutes().toString().padStart(2,"0")} UTC`,
+      isCryptoOnly: true,
+      slMult:       1.0,
+      tp1Mult:      1.0,
+      tp2Mult:      2.0,
+      confAdjust:   -2,
+      spreadTol:    1.2,
+      maxPositions: 2,
+      description:  "Post cierre NY. Crypto activo con impulsos. Metales cerrados.",
+    };
+  }
+
   function generateSignal(currentMode: Mode, currentAsset: Asset): Signal {
     const price = prices[currentAsset];
+    if (!price || price <= 0) {
+      // Sin precio → señal nula (nunca debe llegar acá con bridge conectado)
+      console.warn(`[TraderLab] generateSignal: sin precio para ${currentAsset}`);
+    }
     const spreadPct = getSpreadPct(currentAsset, volumeShock);
     const spread = (spreadPct / 100) * price;
     const mtf = getMtfScore(currentAsset, currentMode);
@@ -2932,7 +3028,11 @@ export function App() {
     const entry = direction === "LONG" ? price + spread / 2 : price - spread / 2;
     const baseAtr = mtf.atr;
     // ── SL: bajo/sobre el swing más reciente + buffer ATR ───────────────────
-    const slMult = currentMode === "scalping" ? 1.2 : 3.0;
+    // Multiplicadores ajustados por sesión (crypto finde vs NY institucional)
+    const prof    = getSessionProfile();
+    const slMult  = currentMode === "scalping" ? prof.slMult  : 3.0;
+    const tp1Mult = currentMode === "scalping" ? prof.tp1Mult : 2.0;
+    const tp2Mult = currentMode === "scalping" ? prof.tp2Mult : 5.0;
     // Para scalping: buscar swing low/high reciente en las últimas 8 velas
     const recentC = candles[currentAsset]?.slice(-8) ?? [];
     let structuralSl: number;
@@ -2959,8 +3059,8 @@ export function App() {
     const dir = direction;
 
     if (currentMode === "scalping") {
-      const tp1Dist = baseAtr * 1.2;
-      const tp2Dist = baseAtr * lrn.scalpingTpAtr; // 2.4×ATR por defecto
+      const tp1Dist = baseAtr * tp1Mult;   // varía por sesión (finde: 1.0, NY: 1.2)
+      const tp2Dist = baseAtr * tp2Mult;   // varía por sesión (finde: 2.2, NY: 2.4)
       // Anclar al perfil de volumen si está disponible
       const mcVah = mc?.vah ?? entry + tp2Dist;
       const mcVal = mc?.val ?? entry - tp2Dist;
@@ -3013,7 +3113,9 @@ export function App() {
       const aeWr = ae.wins / ae.total;
       aeBonus = clamp((aeWr - 0.5) * 20, -8, 8); // ±8 puntos según historial del activo
     }
-    const finalConfidence = clamp(confidence + aeBonus, 40, 96);
+    // Sanitizar: si algo se volvió NaN (ej. ema de array vacío), usar base 52
+    const safeConf = isNaN(confidence) || !isFinite(confidence) ? 52 : confidence;
+    const finalConfidence = clamp(safeConf + aeBonus, 40, 96);
 
     return {
       asset: currentAsset, mode: currentMode, direction, entry, stopLoss,
@@ -3481,58 +3583,76 @@ Rationale from system: ${signal.rationale}`;
 
     const signal = generateSignal(mode, targetAsset);
     if (!autoLabel) setLastSignal(signal);
+
+    // ── DEBUG: log completo de la señal para diagnosticar por qué no abre ───
+    {
+      const rrDbg = Math.abs(signal.tp2 - signal.entry) /
+                    Math.max(Math.abs(signal.entry - signal.stopLoss), 1e-9);
+      const lrnDbg = learningRef.current;
+      const floorDbg = mode === "scalping"
+        ? Math.max(46, lrnDbg.confidenceFloor - 4)
+        : Math.max(50, lrnDbg.confidenceFloor);
+      console.log(`[TraderLab] ${targetAsset} ${mode} | price=${signal.entry.toFixed(2)} | conf=${signal.confidence.toFixed(1)}% (floor=${floorDbg}) | RR=${rrDbg.toFixed(2)} | SL=${signal.stopLoss.toFixed(2)} | TP1=${signal.tp1.toFixed(2)} TP2=${signal.tp2.toFixed(2)} | ${signal.rationale.slice(0,80)}`);
+    }
+
     // ── Guard correlación ────────────────────────────────────────────────────
     if (hasCorrConflict(targetAsset, signal.direction, openPositionsRef.current)) {
       if (!autoLabel) pushToast(`⚡ ${targetAsset} ${signal.direction}: correlado con posición abierta — skip`, "warning");
       return;
     }
-    // ── Guard sesión por tipo de activo ──────────────────────────────────────
+    // ── Guard sesión basado en perfil ────────────────────────────────────────
     if (mode === "scalping" && !sessionOverride) {
-      const now       = new Date();
-      const hour      = now.getUTCHours();
-      const dow       = now.getUTCDay();
-      const isWeekend = dow === 0 || dow === 6;
+      const sessionProf = getSessionProfile();
+      const hour        = new Date().getUTCHours();
+      const isCryptoAsset = ["BTCUSD","ETHUSD"].includes(targetAsset);
+      const isMetalAsset  = ["XAUUSD","XAGUSD"].includes(targetAsset);
 
-      // Crypto (BTC/ETH y similares): líquido 24/7
-      //   Solo bloquear 02:00–06:59 UTC (mínimo global de liquidez, spread pico)
-      //   = 23:00–03:59 ART
-      const isCrypto  = ["BTCUSD","ETHUSD","BNBUSD","SOLUSD","XRPUSD","ADAUSD",
-                          "DOTUSD","LTCUSD","DOGEUSD","AVAXUSD","LINKUSD","MATICUSD"].includes(targetAsset);
-
-      // Metales y Forex: requieren mercado institucional activo
-      //   London + NY: 07:00–20:59 UTC = 04:00–17:59 ART
-      const isMetal   = ["XAUUSD","XAGUSD"].includes(targetAsset);
-      const isForex   = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD"].includes(targetAsset);
-
-      let blocked = false; let sessionReason = "";
-      if (isWeekend) {
-        blocked = true; sessionReason = "finde semana — mercado cerrado";
-      } else if (isCrypto) {
-        // Solo bloquear la "hora muerta" global
-        if (hour >= 2 && hour < 7) { blocked = true; sessionReason = "02–07 UTC (mínimo liquidez crypto)"; }
-      } else if (isMetal || isForex) {
-        if (hour < 7 || hour >= 21) { blocked = true; sessionReason = "fuera de London+NY (07–21 UTC)"; }
-      } else {
-        // Default: NY completa + 2h post
-        if (hour < 7 || hour >= 23) { blocked = true; sessionReason = "fuera de horario activo"; }
-      }
-
-      if (blocked) {
+      // Fuera de NY: solo crypto
+      if (sessionProf.isCryptoOnly && !isCryptoAsset) {
         if (!autoLabel) pushToast(
-          `⏸ ${targetAsset} scalp bloqueado: ${sessionReason}. Activá override en Config para forzar.`,
+          `${sessionProf.emoji} ${sessionProf.name}: ${targetAsset} bloqueado (solo crypto fuera de NY)`,
+          "warning"
+        );
+        return;
+      }
+      // Hora muerta global crypto (02-07 UTC) — única excepción para crypto
+      if (isCryptoAsset && hour >= 2 && hour < 7) {
+        if (!autoLabel) pushToast(`⏸ ${targetAsset}: hora muerta 02-07 UTC`, "warning");
+        return;
+      }
+      // Metales fuera de horario institucional
+      if (isMetalAsset && !["NY","London"].includes(sessionProf.name)) {
+        if (!autoLabel) pushToast(
+          `⏸ ${targetAsset}: metales solo en NY/London (ahora ${sessionProf.name})`,
           "warning"
         );
         return;
       }
     }
     // ── Decisión primaria: motor cuantitativo local ─────────────────────────
-    // El motor local es el ÚNICO gatekeeper. Groq enriquece pero no bloquea.
     const lrnSnap = learningRef.current;
+    const prof    = getSessionProfile();
+    // Fuera de NY (finde/Asia/post-NY): piso más permisivo (señales menos limpias)
     const floor   = mode === "scalping"
-      ? Math.max(46, lrnSnap.confidenceFloor - 4)
+      ? Math.max(44, lrnSnap.confidenceFloor - 4 + prof.confAdjust)
       : Math.max(50, lrnSnap.confidenceFloor);
     const rrActual = Math.abs(signal.tp2 - signal.entry) /
                      Math.max(Math.abs(signal.entry - signal.stopLoss), 1e-9);
+
+    // Log diagnóstico siempre visible (consola del navegador → F12)
+    console.log(
+      `[SIGNAL] ${targetAsset} ${mode} | price=${signal.entry.toFixed(2)}` +
+      ` | conf=${signal.confidence.toFixed(1)}% (piso=${floor})` +
+      ` | RR=${rrActual.toFixed(2)} | SL=${signal.stopLoss.toFixed(2)}` +
+      ` | TP1=${signal.tp1?.toFixed(2)} TP2=${signal.tp2?.toFixed(2)}` +
+      ` | ${signal.rationale?.slice(0,60)}`
+    );
+
+    if (isNaN(signal.confidence) || isNaN(rrActual)) {
+      console.error(`[TraderLab] NaN detectado — conf=${signal.confidence} RR=${rrActual} para ${targetAsset}`);
+      if (!autoLabel) pushToast(`⚠ ${targetAsset}: señal inválida (NaN) — verificá el bridge`, "error");
+      return;
+    }
 
     if (signal.confidence < floor) {
       if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — conf ${signal.confidence.toFixed(0)}% < piso ${floor.toFixed(0)}% | ${signal.rationale.slice(0,60)}`, "warning");
@@ -3865,11 +3985,32 @@ Rationale from system: ${signal.rationale}`;
   }
 
   async function runAutoScan() {
+    const prof = getSessionProfile();
+    const CRYPTO_ASSETS: Asset[] = ["BTCUSD", "ETHUSD"];
+    const ALL_ASSETS    = assets;
+
+    // Fuera de NY (finde, Asia, Post-NY) → solo crypto
+    const scanAssets = prof.isCryptoOnly
+      ? ALL_ASSETS.filter(a => CRYPTO_ASSETS.includes(a))
+      : ALL_ASSETS;
+
+    if (prof.isCryptoOnly && scanAssets.length === 0) {
+      pushToast(`${prof.emoji} ${prof.name}: sin activos crypto disponibles en el bridge`, "warning");
+      return;
+    }
+
     const prevLen = openPositionsRef.current.length;
-    for (const a of assets) await createSignalAndExecute("scalping",  a, false); // false = mostrar toasts
-    for (const a of assets) await createSignalAndExecute("intradia", a, false);
+
+    // Scalping: siempre (crypto 24/7 salvo hora muerta 02-07 UTC)
+    for (const a of scanAssets) await createSignalAndExecute("scalping", a, false);
+
+    // Intradía: solo en sesiones institucionales (NY + London)
+    if (!prof.isCryptoOnly) {
+      for (const a of scanAssets) await createSignalAndExecute("intradia", a, false);
+    }
+
     const opened = openPositionsRef.current.length - prevLen;
-    if (opened > 0) pushToast(`🤖 AutoScan: ${opened} operación(es) abierta(s)`, "success");
+    if (opened > 0) pushToast(`🤖 ${prof.emoji} ${prof.name}: ${opened} operación(es) abierta(s)`, "success");
   }
 
   useEffect(() => { void syncRealData(); }, []);
@@ -4004,6 +4145,34 @@ Rationale from system: ${signal.rationale}`;
             <span style={{ width: 5, height: 5, borderRadius: "50%", background: liveReady ? "#10b981" : "#6b7280", animation: liveReady ? "pulse 2s infinite" : "none", display: "inline-block" }} />
             {feedStatus}
           </div>
+          {/* Badge sesión activa */}
+          {(() => {
+            const sp = getSessionProfile();
+            const bgMap: Record<string,string> = {
+              "NY":             "rgba(16,185,129,0.15)",
+              "London":         "rgba(59,130,246,0.15)",
+              "Finde — Crypto": "rgba(168,85,247,0.15)",
+              "Asia — Crypto":  "rgba(245,158,11,0.15)",
+              "Post-NY — Crypto":"rgba(99,102,241,0.15)",
+            };
+            const colorMap: Record<string,string> = {
+              "NY":             "#10b981",
+              "London":         "#3b82f6",
+              "Finde — Crypto": "#a855f7",
+              "Asia — Crypto":  "#f59e0b",
+              "Post-NY — Crypto":"#818cf8",
+            };
+            const bg    = bgMap[sp.name]    ?? "rgba(99,102,241,0.12)";
+            const color = colorMap[sp.name] ?? "#a5b4fc";
+            return (
+              <div style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20,
+                background: bg, color, border: `1px solid ${color}40`, whiteSpace: "nowrap" }}
+                title={sp.description}>
+                {sp.emoji} {sp.name}
+                {sp.isCryptoOnly && <span style={{ marginLeft: 5, opacity: 0.8 }}>BTC·ETH</span>}
+              </div>
+            );
+          })()}
         </div>
       </nav>
 
@@ -4241,7 +4410,33 @@ Rationale from system: ${signal.rationale}`;
                 <div className="card" style={{ borderLeft: `3px solid ${lastSignal.direction === "LONG" ? "#10b981" : "#ef4444"}`, padding: "10px 12px" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                     <p className="label">Última señal</p>
-                    <span style={{ fontSize: 10, color: lastSignal.confidence >= 70 ? "#10b981" : "#f59e0b", fontWeight: 700 }}>Conf: {lastSignal.confidence.toFixed(0)}%</span>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      {/* Diagnóstico inline de por qué abre/no abre */}
+                      {(() => {
+                        const lrn = learningRef.current;
+                        const floor = lastSignal.mode === "scalping"
+                          ? Math.max(46, lrn.confidenceFloor - 4)
+                          : Math.max(50, lrn.confidenceFloor);
+                        const rr = Math.abs(lastSignal.tp2 - lastSignal.entry) /
+                                   Math.max(Math.abs(lastSignal.entry - lastSignal.stopLoss), 1e-9);
+                        const confOk = lastSignal.confidence >= floor;
+                        const rrOk   = rr >= 1.5;
+                        return (
+                          <div style={{ fontSize: 10, display: "flex", gap: 5 }}>
+                            <span style={{ padding: "2px 6px", borderRadius: 4, fontWeight: 700,
+                              background: confOk ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
+                              color: confOk ? "#10b981" : "#ef4444" }}>
+                              conf {lastSignal.confidence.toFixed(0)}% {confOk ? "✓" : `✗ (piso ${floor})`}
+                            </span>
+                            <span style={{ padding: "2px 6px", borderRadius: 4, fontWeight: 700,
+                              background: rrOk ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
+                              color: rrOk ? "#10b981" : "#ef4444" }}>
+                              RR {rr.toFixed(2)} {rrOk ? "✓" : "✗"}
+                            </span>
+                          </div>
+                        );
+                      })()}
+                    </div>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginBottom: 8 }}>
                     {/* Entrada + SL */}
@@ -4599,6 +4794,69 @@ Rationale from system: ${signal.rationale}`;
             {/* ── Diagnóstico de por qué no abre trades ── */}
             <div className="card">
               <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>🔍 Diagnóstico en tiempo real</p>
+
+              {/* Señal en vivo para debug */}
+              {(() => {
+                const dbgAsset = asset;
+                const dbgSeries = series[dbgAsset] ?? [];
+                const dbgCandles = candles[dbgAsset] ?? [];
+                const dbgC5m = candles5m[dbgAsset] ?? [];
+                const dbgC15m = candles15m[dbgAsset] ?? [];
+                const dbgPrice = prices[dbgAsset] ?? 0;
+                const lrn = learningRef.current;
+                const floor = tab === "scalping"
+                  ? Math.max(46, lrn.confidenceFloor - 4)
+                  : Math.max(50, lrn.confidenceFloor);
+                return (
+                  <div style={{ marginBottom: 12, padding: "10px 12px", borderRadius: 8,
+                    background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)",
+                    fontSize: 11, fontFamily: "'JetBrains Mono',monospace" }}>
+                    <div style={{ fontWeight: 700, color: "#a5b4fc", marginBottom: 6, fontFamily: "inherit" }}>
+                      📡 Datos bridge — {dbgAsset}
+                    </div>
+                    {[
+                      ["Precio",       dbgPrice > 0 ? `${dbgPrice.toFixed(2)} ✓` : "⚠ SIN PRECIO",  dbgPrice > 0],
+                      ["Series 1m",    `${dbgSeries.length} velas ${dbgSeries.length >= 20 ? "✓" : "⚠ pocas (<20)"}`, dbgSeries.length >= 20],
+                      ["Candles 1m",   `${dbgCandles.length} velas ${dbgCandles.length >= 5 ? "✓" : "⚠ pocas"}`, dbgCandles.length >= 5],
+                      ["Candles 5m",   `${dbgC5m.length} velas ${dbgC5m.length >= 13 ? "✓" : "⚠ /candles_mtf falla?"}`, dbgC5m.length >= 13],
+                      ["Candles 15m",  `${dbgC15m.length} velas ${dbgC15m.length >= 21 ? "✓" : "⚠ /candles_mtf falla?"}`, dbgC15m.length >= 21],
+                      ["liveReady",    liveReady ? "true ✓" : "false ⚠ — sincronizá bridge", liveReady],
+                      ["Sesión",       (() => { const p = getSessionProfile(); return `${p.emoji} ${p.name} | SL×${p.slMult} TP2×${p.tp2Mult}`; })(), true],
+                      ["Piso conf",    `${floor}%`, true],
+                      ["Spread",       `${getSpreadPct(dbgAsset, volumeShock).toFixed(3)}%`, true],
+                    ].map(([k, v, ok]) => (
+                      <div key={k as string} style={{ display: "flex", justifyContent: "space-between",
+                        padding: "3px 0", borderBottom: "1px solid rgba(255,255,255,0.05)",
+                        color: ok ? "var(--text-2)" : "#f59e0b" }}>
+                        <span style={{ color: "var(--muted)" }}>{k as string}</span>
+                        <span style={{ fontWeight: ok ? 500 : 700 }}>{v as string}</span>
+                      </div>
+                    ))}
+                    {lastSignal && lastSignal.asset === dbgAsset && (() => {
+                      const rr = Math.abs(lastSignal.tp2 - lastSignal.entry) /
+                                 Math.max(Math.abs(lastSignal.entry - lastSignal.stopLoss), 1e-9);
+                      return (
+                        <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+                          <div style={{ color: "#a5b4fc", fontWeight: 700, marginBottom: 4 }}>Última señal generada:</div>
+                          {[
+                            ["Confianza", `${lastSignal.confidence.toFixed(1)}% (piso ${floor}%)`, lastSignal.confidence >= floor],
+                            ["RR",        `${rr.toFixed(2)} (mín 1.5)`, rr >= 1.5],
+                            ["Dirección", lastSignal.direction, true],
+                            ["ATR",       lastSignal.atr.toFixed(4), lastSignal.atr > 0],
+                          ].map(([k, v, ok]) => (
+                            <div key={k as string} style={{ display: "flex", justifyContent: "space-between",
+                              padding: "2px 0", color: ok ? "#10b981" : "#ef4444", fontWeight: 700 }}>
+                              <span style={{ color: "var(--muted)", fontWeight: 400 }}>{k as string}</span>
+                              <span>{v as string}</span>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                );
+              })()}
+
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 12 }}>
                 {[
                   { label: "Win rate actual",      value: `${stats.winRate.toFixed(1)}%`,                                      ok: stats.winRate >= 40 },
