@@ -2442,16 +2442,22 @@ export function App() {
   const mt5PositionsRef   = useRef(mt5Positions);
   const learningRef = useRef(learning);
   const volumeShockRef = useRef(volumeShock);
-  const seriesRef = useRef(series);
-  const candlesRef = useRef(candles);  // ref para usar en setInterval sin stale closure
+  const seriesRef     = useRef(series);
+  const candlesRef    = useRef(candles);    // refs para evitar stale closure en setInterval
+  const pricesRef     = useRef(prices);
+  const candles5mRef  = useRef(candles5m);
+  const candles15mRef = useRef(candles15m);
 
   useEffect(() => { openPositionsRef.current  = openPositions;  }, [openPositions]);
   useEffect(() => { mt5PositionsRef.current   = mt5Positions;   }, [mt5Positions]);
   useEffect(() => { prevPricesRef.current = prices; }, [prices]);
   useEffect(() => { learningRef.current = learning; }, [learning]);
   useEffect(() => { volumeShockRef.current = volumeShock; }, [volumeShock]);
-  useEffect(() => { seriesRef.current = series; }, [series]);
-  useEffect(() => { candlesRef.current = candles; }, [candles]);
+  useEffect(() => { seriesRef.current   = series;    }, [series]);
+  useEffect(() => { candlesRef.current   = candles;   }, [candles]);
+  useEffect(() => { pricesRef.current    = prices;    }, [prices]);
+  useEffect(() => { candles5mRef.current = candles5m; }, [candles5m]);
+  useEffect(() => { candles15mRef.current= candles15m;}, [candles15m]);
 
   // Tick cada segundo
   useEffect(() => {
@@ -2698,21 +2704,25 @@ export function App() {
   }
 
   function getMtfScore(a: Asset, mode: Mode = "intradia") {
-    const vals = series[a] ?? [];
-    // Sin datos suficientes → scores neutros (0) — señal con confianza base ~52
+    // Usar refs para evitar stale closure (datos del render anterior)
+    const vals  = seriesRef.current[a]    ?? [];
+    const c5m   = candles5mRef.current[a] ?? [];
+    const c15m  = candles15mRef.current[a]?? [];
+    const px    = pricesRef.current[a]    ?? prices[a] ?? 0;
+
     const minLen = mode === "scalping" ? 13 : 20;
     if (!vals || vals.length < minLen) {
-      const atrFallback = Math.max(getAssetMinAtr(a) ?? prices[a] * 0.001, prices[a] * 0.001);
+      const atrFallback = Math.max(getAssetMinAtr(a) ?? px * 0.001, px * 0.001);
       return { htf: 0, ltf: 0, exec: 0, atr: atrFallback, hasRealTF: false };
     }
-    const atr = Math.max(calcAtrFromSeries(vals, 20), getAssetMinAtr(a) ?? prices[a] * 0.001);
+    const atr = Math.max(calcAtrFromSeries(vals, 20), getAssetMinAtr(a) ?? px * 0.001);
 
     if (mode === "scalping") {
       // ── MTF REAL: usa velas 5m y 15m si vienen del bridge ──────────────────
       // Con bridge: HTF = EMA8/21 sobre velas 15m reales, LTF = EMA5/13 sobre 5m reales
       // Sin bridge: sintético (velas 1m agrupadas) — menos preciso
-      const real15m = candles15m[a];
-      const real5m  = candles5m[a];
+      const real15m = c15m;
+      const real5m  = c5m;
       const hasReal = real15m?.length >= 21 && real5m?.length >= 13;
 
       let htf: number, ltf: number;
@@ -2845,15 +2855,22 @@ export function App() {
   }
 
   function generateSignal(currentMode: Mode, currentAsset: Asset): Signal {
-    const price = prices[currentAsset];
+    // Leer SIEMPRE de refs (no del closure state) para evitar stale data
+    // Los refs se actualizan sincrónicamente en cada render via useEffect
+    const _prices    = pricesRef.current;
+    const _series    = seriesRef.current;
+    const _candles   = candlesRef.current;
+    const _c5m       = candles5mRef.current;
+    const _c15m      = candles15mRef.current;
+
+    const price = _prices[currentAsset];
     if (!price || price <= 0) {
-      // Sin precio → señal nula (nunca debe llegar acá con bridge conectado)
-      console.warn(`[TraderLab] generateSignal: sin precio para ${currentAsset}`);
+      console.warn(`[TraderLab] generateSignal: sin precio para ${currentAsset} — bridge ok?`);
     }
     const spreadPct = getSpreadPct(currentAsset, volumeShock);
     const spread = (spreadPct / 100) * price;
     const mtf = getMtfScore(currentAsset, currentMode);
-    const ind = indicatorsMap[currentAsset] ?? computeIndicators(candles[currentAsset] ?? []);
+    const ind = indicatorsMap[currentAsset] ?? computeIndicators(_candles[currentAsset] ?? []);
     // Wyckoff: solo en intradía, solo del wyckoffMap (calculado desde velas 4H/1D reales)
     // En scalping: se omite completamente — Order Flow es la autoridad
     const wyckoff = currentMode === "intradia"
@@ -2869,12 +2886,12 @@ export function App() {
 
     // ── Scalping: dirección determinada por control de mercado ────────────────
     // En scalping: Order Flow es la autoridad. MTF confirma, no dicta.
-    const price0 = series[currentAsset]?.[series[currentAsset].length-1] ?? 0;
+    const price0 = _series[currentAsset]?.[_series[currentAsset].length-1] ?? 0;
     const of = currentMode === "scalping"
-      ? analyzeOrderFlow(candles[currentAsset] ?? [], price0, ind.vwap, mtf.atr)
+      ? analyzeOrderFlow(_candles[currentAsset] ?? [], price0, ind.vwap, mtf.atr)
       : null;
     const mc = currentMode === "scalping"
-      ? (marketControlMap[currentAsset] ?? analyzeMarketControl(candles[currentAsset] ?? [], ind, mtf.atr))
+      ? (marketControlMap[currentAsset] ?? analyzeMarketControl(_candles[currentAsset] ?? [], ind, mtf.atr))
       : null;
 
     // ── Dirección primaria: jerarquía OF > MC > MTF ───────────────────────
@@ -3034,7 +3051,7 @@ export function App() {
     const tp1Mult = currentMode === "scalping" ? prof.tp1Mult : 2.0;
     const tp2Mult = currentMode === "scalping" ? prof.tp2Mult : 5.0;
     // Para scalping: buscar swing low/high reciente en las últimas 8 velas
-    const recentC = candles[currentAsset]?.slice(-8) ?? [];
+    const recentC = _candles[currentAsset]?.slice(-8) ?? [];
     let structuralSl: number;
     if (currentMode === "scalping" && recentC.length >= 3) {
       const swingLow  = Math.min(...recentC.map(c => c.l));
@@ -3538,6 +3555,25 @@ Rationale from system: ${signal.rationale}`;
         ));
       }
     });
+  }
+
+
+  // ─── Guard de correlación: evitar doble riesgo en activos correlacionados ──
+  // BTC/ETH correlación ~0.85 — no abrir mismo lado simultáneamente
+  // XAU/XAG correlación ~0.80 — idem
+  const CORR_GROUPS: Asset[][] = [
+    ["BTCUSD", "ETHUSD"],
+    ["XAUUSD", "XAGUSD"],
+  ];
+  function hasCorrConflict(asset: Asset, direction: Direction, positions: Position[]): boolean {
+    if (positions.length === 0) return false;
+    const group = CORR_GROUPS.find(g => g.includes(asset));
+    if (!group) return false;
+    return positions.some(p =>
+      group.includes(p.signal.asset) &&
+      p.signal.asset !== asset &&
+      p.signal.direction === direction
+    );
   }
 
   async function createSignalAndExecute(mode: Mode, targetAsset: Asset, autoLabel = false) {
