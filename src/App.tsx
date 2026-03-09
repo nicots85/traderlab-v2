@@ -134,6 +134,12 @@ type Signal = {
   tp1: number; tp2: number; tp3?: number; // TPs escalonados
   confidence: number; spreadPct: number; spreadCostUsd: number; atr: number;
   mtf: { htf: number; ltf: number; exec: number };
+  // ── Sistema de anticipación de giro ──────────────────────
+  reversalScore: number;       // 0-9: intensidad del agotamiento detectado
+  reversalDir: Direction;      // dirección del giro anticipado
+  isReversalSetup: boolean;    // true si score >= 5
+  wyckoffSizeMult: number;     // multiplicador de size por contexto Wyckoff
+  isPyramidAdd?: boolean;      // true si es un add sobre posición existente;
   indicators: Indicators;
   wyckoff: WyckoffAnalysis;
   rationale: string;
@@ -164,6 +170,9 @@ type Position = {
   tp1Hit?: boolean;        // scalp: TP1 tocado → SL a BE, esperar TP2
   tp2Hit?: boolean;        // scalp: TP2 tocado → cierre
   tp3Hit?: boolean;        // intradía: TP3 tocado → cierre final
+  pyramidCount?: number;   // cuántos adds ya se hicieron sobre esta posición
+  parentId?: number;       // si es un add, id de la posición original
+  isPyramidAdd?: boolean;  // true si es un add de pyramiding
 };
 
 type ClosedTrade = {
@@ -2183,7 +2192,51 @@ BEHAVIOR RULES FOR CHAT:
 - When asked why a trade opened/closed, reference the actual signal data
 - When asked if should open/close, apply the decision framework: EV positive + RR ≥ 1.5 + DD < 5% = lean OPEN
 - Never say "it's just paper trading" — treat everything as real capital
-- Max 220 words per response. Be precise and actionable.`;
+- Max 220 words per response. Be precise and actionable.
+
+PERFORMANCE BY ASSET:
+${["BTCUSD","ETHUSD","XAUUSD","XAGUSD"].map(a => {
+  const at = realTrades.filter(t => t.asset === a);
+  if (!at.length) return `  ${a}: sin trades`;
+  const wr = (at.filter(t=>t.pnl>0).length/at.length*100).toFixed(0);
+  const pnl = at.reduce((s,t)=>s+t.pnl,0).toFixed(3);
+  const avgR = (at.reduce((s,t)=>s+t.pnl,0)/at.length).toFixed(3);
+  return \`  \${a}: \${at.length} trades | WR \${wr}% | PnL \$\${pnl} | avg \$\${avgR}/trade\`;
+}).join("\n")}
+
+PERFORMANCE BY SESSION:
+${["NY","London","Asia","Post-NY","Weekend"].map(sess => {
+  const st = realTrades.filter(t => (t as ClosedTrade & {session?:string}).session === sess);
+  if (!st.length) return \`  \${sess}: sin trades\`;
+  const wr = (st.filter(t=>t.pnl>0).length/st.length*100).toFixed(0);
+  const pnl = st.reduce((s,t)=>s+t.pnl,0).toFixed(3);
+  return \`  \${sess}: \${st.length} trades | WR \${wr}% | PnL \$\${pnl}\`;
+}).join("\n")}
+
+PERFORMANCE BY MODE:
+${["scalping","intradia"].map(m => {
+  const mt = realTrades.filter(t => t.mode === m);
+  if (!mt.length) return \`  \${m}: sin trades\`;
+  const wr = (mt.filter(t=>t.pnl>0).length/mt.length*100).toFixed(0);
+  const pnl = mt.reduce((s,t)=>s+t.pnl,0).toFixed(3);
+  const avgRR = mt.filter(t=>(t as ClosedTrade & {rr?:number}).rr).length
+    ? (mt.reduce((s,t)=>s+((t as ClosedTrade & {rr?:number}).rr??0),0)/mt.length).toFixed(2) : "N/A";
+  return \`  \${m}: \${mt.length} trades | WR \${wr}% | PnL \$\${pnl} | avg RR \${avgRR}\`;
+}).join("\n")}
+
+BEST/WORST TRADES:
+${realTrades.length ? (() => {
+  const sorted = [...realTrades].sort((a,b)=>b.pnl-a.pnl);
+  const best  = sorted[0];
+  const worst = sorted[sorted.length-1];
+  return \`  Best:  \${best.asset} \${best.direction} \${best.mode} | +\$\${best.pnl.toFixed(3)}\n  Worst: \${worst.asset} \${worst.direction} \${worst.mode} | \$\${worst.pnl.toFixed(3)}\`;
+})() : "  No trades yet"}
+
+REVERSAL SETUPS DETECTED (last 10 trades):
+${realTrades.slice(0,10).filter(t=>(t as ClosedTrade & {isReversalSetup?:boolean}).isReversalSetup).length
+  ? realTrades.slice(0,10).filter(t=>(t as ClosedTrade & {isReversalSetup?:boolean}).isReversalSetup)
+      .map(t=>\`  \${t.asset} \${t.direction} | \${t.result} | \$\${t.pnl.toFixed(3)}\`).join("\n")
+  : "  Ninguno en últimos 10 trades"}`;
 
     if (!usingGroq || !apiKey.trim()) {
       setMessages(prev => [...prev, {
@@ -2769,6 +2822,7 @@ export function App() {
   }
 
 
+
   // ─── Perfil de sesión: detecta horario y ajusta parámetros automáticamente ───
   // NY semana  → todos los activos, parámetros normales
   // Fuera NY   → solo crypto, SL/TP más conservadores
@@ -2854,6 +2908,148 @@ export function App() {
     };
   }
 
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DETECTOR DE GIRO ANTICIPADO — combina 3 señales de agotamiento
+  // Filosofía: el mercado avisa ANTES del giro con divergencias, climax y absorción
+  // Wyckoff en 4H/1D es contexto/amplificador, no filtro
+  // ═══════════════════════════════════════════════════════════════════════════
+  function detectReversalSetup(
+    candles: Candle[],
+    of: ReturnType<typeof analyzeOrderFlow> | null,
+    wyckoff: WyckoffAnalysis | null,
+    direction: Direction,  // dirección actual de la tendencia (la que estamos contra)
+    atr: number,
+  ): { score: number; reversalDir: Direction; components: Record<string, number> } {
+
+    const reversalDir: Direction = direction === "LONG" ? "SHORT" : "LONG";
+    // Giramos contra la tendencia actual — buscamos agotamiento del movimiento vigente
+    // reversalDir = dirección del giro que anticipamos
+
+    let scoreA = 0, scoreB = 0, scoreC = 0;
+    const components: Record<string, number> = {};
+
+    // ── A) CVD DIVERGENCIA con intensidad ─────────────────────────────────
+    if (of) {
+      const { cvd } = of;
+      const priceChange10 = candles.length >= 10
+        ? candles[candles.length-1].c - candles[candles.length-10].c : 0;
+
+      // Divergencia alcista (reversal a LONG): precio baja pero CVD sube
+      // Divergencia bajista (reversal a SHORT): precio sube pero CVD baja
+      const isBullishDiv = priceChange10 < -atr * 0.3 && cvd.slope10 > 0;
+      const isBearishDiv = priceChange10 >  atr * 0.3 && cvd.slope10 < 0;
+      const hasDivergence = reversalDir === "LONG" ? isBullishDiv : isBearishDiv;
+
+      if (hasDivergence) {
+        // Intensidad: ratio entre movimiento del precio y movimiento del CVD
+        const divIntensity = Math.abs(cvd.slope10) / Math.max(Math.abs(cvd.slope50) * 0.1, 1e-9);
+        scoreA = divIntensity > 2.0 ? 3 : divIntensity > 1.0 ? 2 : 1;
+      }
+      components.cvdDiv = scoreA;
+    }
+
+    // ── B) CLIMAX DE VOLUMEN ───────────────────────────────────────────────
+    if (candles.length >= 20) {
+      const recent   = candles.slice(-20);
+      const lastCandle = candles[candles.length - 1];
+      const avgVol   = recent.slice(0, -1).reduce((s, c) => s + c.v, 0) / 19;
+      const volRatio = lastCandle.v / Math.max(avgVol, 1e-9);
+
+      // Climax: volumen alto pero precio no avanza (vela con mucha mecha)
+      const body    = Math.abs(lastCandle.c - lastCandle.o);
+      const range   = Math.max(lastCandle.h - lastCandle.l, atr * 0.1);
+      const wickPct = 1 - (body / range);  // % del rango que son mechas
+
+      // Reversal LONG: climax de venta = vela bajista con vol alto + mecha inferior grande
+      // Reversal SHORT: climax de compra = vela alcista con vol alto + mecha superior grande
+      const isSellingClimax  = lastCandle.c < lastCandle.o && volRatio > 1.8 && wickPct > 0.35;
+      const isBuyingClimax   = lastCandle.c > lastCandle.o && volRatio > 1.8 && wickPct > 0.35;
+      const hasClimax = reversalDir === "LONG" ? isSellingClimax : isBuyingClimax;
+
+      if (hasClimax) {
+        scoreB = volRatio > 3.0 ? 3 : volRatio > 2.2 ? 2 : 1;
+      }
+      components.volClimax = scoreB;
+    }
+
+    // ── C) ABSORCIÓN EN ORDER BOOK (FP extremo sin movimiento) ────────────
+    if (of) {
+      const { absorptionScore, controlScore } = of;
+      // FP extremo en una dirección pero precio absorbe sin moverse = alguien grande compra/vende
+      // Absorción alcista: mucha presión vendedora (FP negativo) pero precio no cae
+      // Absorción bajista: mucha presión compradora (FP positivo) pero precio no sube
+      const priceChange5 = candles.length >= 5
+        ? candles[candles.length-1].c - candles[candles.length-5].c : 0;
+
+      const bullishAbsorption = controlScore < -15 && Math.abs(priceChange5) < atr * 0.15;
+      const bearishAbsorption = controlScore >  15 && Math.abs(priceChange5) < atr * 0.15;
+      const hasAbsorption = reversalDir === "LONG" ? bullishAbsorption : bearishAbsorption;
+
+      if (hasAbsorption) {
+        scoreC = absorptionScore > 60 ? 3 : absorptionScore > 35 ? 2 : 1;
+      }
+      components.absorption = scoreC;
+    }
+
+    // ── Multiplicador Wyckoff ──────────────────────────────────────────────
+    // Wyckoff alineado con el giro = amplifica. Opuesto = reduce.
+    // NO bloquea nada. Solo contexto macro.
+    let wyckoffBonus = 0;
+    if (wyckoff) {
+      const phase = wyckoff.phase;
+      const bias  = wyckoff.bias;
+      const aligned = (reversalDir === "LONG" && (bias === "bullish" || phase === "C" || phase === "D"))
+                   || (reversalDir === "SHORT" && (bias === "bearish" || phase === "C" || phase === "D"));
+      const opposed = (reversalDir === "LONG"  && bias === "bearish")
+                   || (reversalDir === "SHORT" && bias === "bullish");
+      wyckoffBonus = aligned ? 1 : (opposed ? -1 : 0);
+    }
+    components.wyckoffBonus = wyckoffBonus;
+
+    const rawScore = scoreA + scoreB + scoreC;
+    const score    = clamp(rawScore + wyckoffBonus, 0, 9);
+
+    return { score, reversalDir, components };
+  }
+
+  // ── Calcular wyckoffSizeMult para scalping y intradía ────────────────────
+  function getWyckoffSizeMult(wyckoff: WyckoffAnalysis | null, direction: Direction): number {
+    if (!wyckoff) return 1.0;
+    const { phase, bias, events } = wyckoff;
+
+    // Spring (fase C acumulación) o Upthrust (fase C distribución) = máxima convicción de giro
+    const hasSpring    = events?.some(e => e.type === "spring")   ?? false;
+    const hasUpthrust  = events?.some(e => e.type === "upthrust") ?? false;
+    const hasSOS       = events?.some(e => e.type === "SOS")      ?? false;
+    const hasSOW       = events?.some(e => e.type === "SOW")      ?? false;
+
+    // Fase C con evento confirmado: tamaño máximo (1.5×)
+    if (phase === "C") {
+      if (direction === "LONG"  && (hasSpring   || bias === "bullish")) return 1.5;
+      if (direction === "SHORT" && (hasUpthrust || bias === "bearish")) return 1.5;
+    }
+    // Fase D/E en tendencia: tamaño ampliado (1.3×) — tendencia confirmada con SOS/SOW
+    if (phase === "D" || phase === "E") {
+      if (direction === "LONG"  && (bias === "bullish" || hasSOS)) return 1.3;
+      if (direction === "SHORT" && (bias === "bearish" || hasSOW)) return 1.3;
+    }
+    // Fase A/B: mercado en rango, estructura no definida → tamaño reducido
+    if (phase === "A" || phase === "B") return 0.8;
+
+    // Wyckoff contradictorio (tendencia opuesta a dirección) → reducir
+    const opposed = (direction === "LONG"  && bias === "bearish")
+                 || (direction === "SHORT" && bias === "bullish");
+    if (opposed) return 0.6;
+
+    // Alineado pero sin evento confirmado
+    const aligned = (direction === "LONG"  && bias === "bullish")
+                 || (direction === "SHORT" && bias === "bearish");
+    if (aligned) return 1.15;
+
+    return 1.0;
+  }
+
   function generateSignal(currentMode: Mode, currentAsset: Asset): Signal {
     // Leer SIEMPRE de refs (no del closure state) para evitar stale data
     // Los refs se actualizan sincrónicamente en cada render via useEffect
@@ -2894,7 +3090,9 @@ export function App() {
       ? (marketControlMap[currentAsset] ?? analyzeMarketControl(_candles[currentAsset] ?? [], ind, mtf.atr))
       : null;
 
-    // ── Dirección primaria: jerarquía OF > MC > MTF ───────────────────────
+    // ── Detección de giro anticipado ─────────────────────────────────────────
+    // Corre ANTES de decidir dirección — puede sobreescribir el bias del OF/MTF
+    // ── Dirección primaria: OF > MC > MTF (el reversal ajustará después) ───────
     let mtfDir: Direction;
     if (currentMode === "scalping" && of) {
       // Prioridad 1: mean reversion desde extremo — adelantarse al rebote
@@ -3009,6 +3207,22 @@ export function App() {
     // MTF dicta la dirección. Si hay confirmación, refuerza. Sin confirmación, sigue igual.
     const direction = mtfDir;
 
+    // ── Reversal anticipatorio: corre con direction base, puede sobreescribirla ──
+    // detectReversalSetup recibe la dirección ACTUAL de la tendencia para buscar su agotamiento
+    // Si score ≥ 5: alta convicción de giro → sobreescribir dirección
+    // Si score 3-4: señal débil → solo boost de confianza, no cambia dirección
+    const reversalData = detectReversalSetup(
+      _candles[currentAsset] ?? [],
+      of,
+      wyckoff,
+      direction,
+      baseAtr,
+    );
+    // Sobreescribir dirección si hay setup de giro con alta convicción
+    const finalDirection: Direction = reversalData.score >= 5
+      ? reversalData.reversalDir
+      : direction;
+
     // ── Paso 4: Calcular confianza ────────────────────────────────────────────
     // Score de control de mercado para scalping (0-20 puntos adicionales)
     const mcScore    = (of && currentMode === "scalping")
@@ -3073,7 +3287,7 @@ export function App() {
     // Scalping: TP1 = 1.2×ATR (rápido, asegurar), TP2 = 2.4×ATR (completo)
     // Intradía: TP1 = 2.0×ATR, TP2 = 4.0×ATR, TP3 = 6.0×ATR (extensión)
     let tp1: number, tp2: number, tp3: number | undefined;
-    const dir = direction;
+    const dir = finalDirection;
 
     if (currentMode === "scalping") {
       const tp1Dist = baseAtr * tp1Mult;   // varía por sesión (finde: 1.0, NY: 1.2)
@@ -3119,8 +3333,8 @@ export function App() {
       ? ` | OF: ${controlLabel} score=${of.controlScore.toFixed(0)} CVD${cvdArrow} FP=${of.footprintScore.toFixed(0)} Vol=${price>of.profile.poc?"▲POC":"▼POC"}`
       : (mc ? ` | Control: ${mc.dominantSide} (${mc.score.toFixed(0)}) CVD${mc.cvdSlope>=0?"↑":"↓"} POC:${mc.poc.toFixed(2)}` : "");
     const rationale = currentMode === "scalping"
-      ? `${controlLabel} ${direction} | CVD${cvdArrow} FP:${of?.footprintScore.toFixed(0)??"?"} | ${confirmCtx}${mcCtx}`
-      : `${direction} | ${mtfCtx} | ${confirmCtx}${wyckoffCtx}${mcCtx}`;
+      ? `${controlLabel} ${finalDirection} | CVD${cvdArrow} FP:${of?.footprintScore.toFixed(0)??"?"} | ${confirmCtx}${mcCtx}`
+      : `${finalDirection} | ${mtfCtx} | ${confirmCtx}${wyckoffCtx}${mcCtx}`;
 
     // ── Bonus/penalidad por historial de asset+modo ─────────────────────────
     const aeKey = `${currentAsset}_${currentMode}`;
@@ -3134,12 +3348,29 @@ export function App() {
     const safeConf = isNaN(confidence) || !isFinite(confidence) ? 52 : confidence;
     const finalConfidence = clamp(safeConf + aeBonus, 40, 96);
 
+    // ── Reversal setup: detectar agotamiento de la tendencia opuesta ──────────
+    // "finalDirection" es hacia donde va el bot — detectamos agotamiento de ESA dirección
+    // para saber si hay un giro inminente EN CONTRA (reversalDir = opuesto)
+    // También usamos direction=finalDirection para detectar si la tendencia actual está agotada
+    const wyckoffSizeMult = getWyckoffSizeMult(wyckoff, finalDirection);
+
+    // Boost de confianza si el setup tiene score de reversión alto y va a favor
+    // (el bot ya eligió esta dirección — si hay reversal score es señal de convicción)
+    const reversalBoost = reversalData.score >= 7 ? 8
+                        : reversalData.score >= 5 ? 4
+                        : reversalData.score >= 3 ? 1 : 0;
+    const boostedConfidence = clamp(finalConfidence + reversalBoost, 40, 98);
+
     return {
-      asset: currentAsset, mode: currentMode, direction, entry, stopLoss,
+      asset: currentAsset, mode: currentMode, finalDirection, entry, stopLoss,
       takeProfit, tp1, tp2, tp3,
-      confidence: finalConfidence, spreadPct, spreadCostUsd, atr: baseAtr, mtf,
+      confidence: boostedConfidence, spreadPct, spreadCostUsd, atr: baseAtr, mtf,
       indicators: ind, wyckoff, rationale,
-      ...(currentMode === "intradia" ? { _wyckoffMult: wyckoffMult } : {}),
+      reversalScore:     reversalData.score,
+      reversalDir:       reversalData.reversalDir,
+      isReversalSetup:   reversalData.score >= 5,
+      wyckoffSizeMult,
+      isPyramidAdd:      false,
     } as Signal & { _wyckoffMult?: number };
   }
 
@@ -3725,7 +3956,14 @@ Rationale from system: ${signal.rationale}`;
     const riskMult = signal.mode === "scalping"
       ? calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain).sizeMultiplier
       : 1.0;
-    const riskUsd = Math.max(0.5, equity * (riskPct / 100) * lrn.riskScale * wyckoffMult * riskMult);
+    // ── Size ajustado por reversal score y Wyckoff ───────────────────────────
+    // isReversalSetup: entrada anticipatoria → size reducido (más riesgo de timing)
+    // wyckoffSizeMult: amplifica si Wyckoff macro alineado, reduce si opuesto
+    // Los dos pueden combinarse: setup anticipatorio + Wyckoff alineado = 0.75× (prudente pero convicción)
+    const reversalSizeMult = signal.isReversalSetup
+      ? (signal.wyckoffSizeMult > 1.0 ? 0.75 : 0.5)  // Wyckoff alineado → más convicción
+      : signal.wyckoffSizeMult;                         // tendencia → usar mult Wyckoff directo
+    const riskUsd = Math.max(0.5, equity * (riskPct / 100) * lrn.riskScale * wyckoffMult * riskMult * reversalSizeMult);
     // stopDistance mínimo: el mayor entre el SL calculado y 0.3% del precio
     // Evita que ATR pequeño en plata/gold genere sizes irreales
     const minStop = signal.entry * 0.003;
@@ -3771,7 +4009,9 @@ Rationale from system: ${signal.rationale}`;
       await sendToMT5(signal, size, marginUsed, (ticket, execPrice) => {
         const entry = execPrice ?? signal.entry;
         setOpenPositions(prev => [...prev, { id: ticket ?? Date.now(), signal: { ...signal, entry }, size, marginUsed, openedAt: new Date().toISOString(), peak: entry, trough: entry }]);
-        if (!autoLabel) pushToast(`🚀 MT5 #${ticket} ${signal.asset} ${signal.direction} @ ${entry.toFixed(2)} | conf ${signal.confidence.toFixed(0)}%${multTag}`, "success");
+        const reversalTag = signal.isReversalSetup ? ` | 🔄 GIRO score=${signal.reversalScore}` : "";
+        const wyckoffTag  = signal.wyckoffSizeMult !== 1.0 ? ` | Wyckoff×${signal.wyckoffSizeMult.toFixed(1)}` : "";
+        if (!autoLabel) pushToast(`🚀 MT5 #${ticket} ${signal.asset} ${signal.direction} @ ${entry.toFixed(2)} | conf ${signal.confidence.toFixed(0)}%${multTag}${reversalTag}${wyckoffTag}`, "success");
       });
     } else {
       // Sin MT5: panel simulado
@@ -4020,33 +4260,106 @@ Rationale from system: ${signal.rationale}`;
     } finally { setIsSyncing(false); }
   }
 
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PYRAMIDING — agrega lote a posición existente cuando:
+  // 1. TP1 fue alcanzado (posición en breakeven, sin riesgo extra)
+  // 2. Nueva señal en 15m alineada con la dirección existente
+  // 3. CVD confirma (no divergente vs la posición)
+  // Size del add = 0.5× del original. MAX 2 adds por posición.
+  // ═══════════════════════════════════════════════════════════════════════════
+  async function tryPyramidAdd(pos: Position) {
+    if (!pos.tp1Hit) return;                    // solo si TP1 ya tocado
+    if ((pos.pyramidCount ?? 0) >= 2) return;  // máximo 2 adds
+    if (!liveReady) return;
+    if (circuitOpenRef.current) return;
+
+    // Generar señal en 15m para el mismo activo
+    const signal15m = generateSignal("scalping", pos.signal.asset);
+
+    // Condiciones para agregar
+    if (signal15m.direction !== pos.signal.direction) return;  // debe ser misma dirección
+    if (signal15m.confidence < 55) return;                     // confianza mínima más alta para add
+    if (signal15m.indicators?.cvd?.divergence) return;         // sin divergencia CVD
+
+    // No agregar si hay posición correlacionada en la misma dirección
+    const otherPositions = openPositionsRef.current.filter(p => p.id !== pos.id);
+    if (hasCorrConflict(pos.signal.asset, pos.signal.direction, otherPositions)) return;
+
+    const lrn       = learningRef.current;
+    const realEquity = (mt5Enabled && mt5Equity !== null && mt5Equity > 0) ? mt5Equity : equity;
+    const addSize   = pos.size * 0.5;  // 50% del lote original
+    const addMargin = (addSize * (contractSize[pos.signal.asset] ?? 1) * signal15m.entry) /
+                      getLeverage(pos.signal.asset);
+
+    // Guard de margen para el add
+    const totalMarginUsed = openPositionsRef.current.reduce((a, p) => a + p.marginUsed, 0);
+    if ((totalMarginUsed + addMargin) / realEquity > 0.35) return;  // max 35% margen total
+
+    // Crear señal de pyramid con campos propios
+    const pyramidSignal: Signal = {
+      ...signal15m,
+      isPyramidAdd:   true,
+      isReversalSetup: false,
+      wyckoffSizeMult: 1.0,
+    };
+
+    if (mt5Enabled && mt5Status === "connected") {
+      await sendToMT5(pyramidSignal, addSize, addMargin, (ticket, execPrice) => {
+        const addEntry = execPrice ?? pyramidSignal.entry;
+        // Actualizar el pyramidCount de la posición original
+        setOpenPositions(prev => prev.map(p =>
+          p.id === pos.id
+            ? { ...p, pyramidCount: (p.pyramidCount ?? 0) + 1 }
+            : p
+        ));
+        // Agregar la nueva posición add como posición independiente (con ref a padre)
+        setOpenPositions(prev => [...prev, {
+          id: ticket ?? Date.now(),
+          signal: { ...pyramidSignal, entry: addEntry },
+          size: addSize, marginUsed: addMargin,
+          openedAt: new Date().toISOString(),
+          peak: addEntry, trough: addEntry,
+          parentId: pos.id,  // referencia a la posición original
+        }]);
+        pushToast(
+          `📈 PYRAMID +${addSize.toFixed(3)}L ${pos.signal.asset} ${pos.signal.direction}` +
+          ` @ ${addEntry.toFixed(2)} | add #${(pos.pyramidCount ?? 0) + 1}`,
+          "success"
+        );
+      });
+    }
+  }
+
   async function runAutoScan() {
     const prof = getSessionProfile();
     const CRYPTO_ASSETS: Asset[] = ["BTCUSD", "ETHUSD"];
     const ALL_ASSETS    = assets;
 
-    // Fuera de NY (finde, Asia, Post-NY) → solo crypto
     const scanAssets = prof.isCryptoOnly
       ? ALL_ASSETS.filter(a => CRYPTO_ASSETS.includes(a))
       : ALL_ASSETS;
 
-    if (prof.isCryptoOnly && scanAssets.length === 0) {
-      pushToast(`${prof.emoji} ${prof.name}: sin activos crypto disponibles en el bridge`, "warning");
-      return;
-    }
+    if (prof.isCryptoOnly && scanAssets.length === 0) return;
 
     const prevLen = openPositionsRef.current.length;
 
-    // Scalping: siempre (crypto 24/7 salvo hora muerta 02-07 UTC)
+    // ── Scalping nuevas posiciones ──────────────────────────────────────────
     for (const a of scanAssets) await createSignalAndExecute("scalping", a, false);
 
-    // Intradía: solo en sesiones institucionales (NY + London)
+    // ── Intradía: solo sesiones institucionales ─────────────────────────────
     if (!prof.isCryptoOnly) {
       for (const a of scanAssets) await createSignalAndExecute("intradia", a, false);
     }
 
+    // ── Pyramiding: agregar lote a posiciones con TP1 tocado ────────────────
+    const posWithTP1 = openPositionsRef.current.filter(p =>
+      p.tp1Hit && !(p.isPyramidAdd) && (p.pyramidCount ?? 0) < 2
+    );
+    for (const pos of posWithTP1) await tryPyramidAdd(pos);
+
     const opened = openPositionsRef.current.length - prevLen;
-    if (opened > 0) pushToast(`🤖 ${prof.emoji} ${prof.name}: ${opened} operación(es) abierta(s)`, "success");
+    if (opened > 0) pushToast(`🤖 ${prof.emoji} ${prof.name}: ${opened} posición(es) abierta(s)`, "success");
   }
 
   useEffect(() => { void syncRealData(); }, []);
@@ -4847,8 +5160,15 @@ Rationale from system: ${signal.rationale}`;
                   <div style={{ marginBottom: 12, padding: "10px 12px", borderRadius: 8,
                     background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)",
                     fontSize: 11, fontFamily: "'JetBrains Mono',monospace" }}>
-                    <div style={{ fontWeight: 700, color: "#a5b4fc", marginBottom: 6, fontFamily: "inherit" }}>
-                      📡 Datos bridge — {dbgAsset}
+                    <div style={{ fontWeight: 700, color: "#a5b4fc", marginBottom: 6, fontFamily: "inherit", display: "flex", justifyContent: "space-between" }}>
+                      <span>📡 Datos bridge — {dbgAsset}</span>
+                      {lastSignal && lastSignal.asset === dbgAsset && lastSignal.reversalScore >= 3 && (
+                        <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 700,
+                          background: lastSignal.reversalScore >= 7 ? "rgba(16,185,129,0.2)" : lastSignal.reversalScore >= 5 ? "rgba(245,158,11,0.2)" : "rgba(99,102,241,0.15)",
+                          color: lastSignal.reversalScore >= 7 ? "#10b981" : lastSignal.reversalScore >= 5 ? "#f59e0b" : "#a5b4fc" }}>
+                          🔄 Giro {lastSignal.reversalScore}/9
+                        </span>
+                      )}
                     </div>
                     {[
                       ["Precio",       dbgPrice > 0 ? `${dbgPrice.toFixed(2)} ✓` : "⚠ SIN PRECIO",  dbgPrice > 0],
