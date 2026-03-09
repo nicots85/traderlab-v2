@@ -2139,6 +2139,50 @@ function AiChatPanel({
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
+
+  // ─── Helpers de estadísticas para el chat ────────────────────────────────
+  function chatStatsByAsset(trades: ClosedTrade[]): string {
+    return ["BTCUSD","ETHUSD","XAUUSD","XAGUSD"].map(a => {
+      const at = trades.filter(t => t.asset === a);
+      if (!at.length) return "  " + a + ": sin trades";
+      const wr   = (at.filter(t => t.pnl > 0).length / at.length * 100).toFixed(0);
+      const pnl  = at.reduce((s, t) => s + t.pnl, 0).toFixed(3);
+      const avgR = (at.reduce((s, t) => s + t.pnl, 0) / at.length).toFixed(3);
+      return "  " + a + ": " + at.length + " trades | WR " + wr + "% | PnL $" + pnl + " | avg $" + avgR + "/trade";
+    }).join("\n");
+  }
+  function chatStatsBySession(trades: ClosedTrade[]): string {
+    return ["NY","London","Asia","Post-NY","Weekend"].map(sess => {
+      const st = trades.filter(t => (t as ClosedTrade & {session?:string}).session === sess);
+      if (!st.length) return "  " + sess + ": sin trades";
+      const wr  = (st.filter(t => t.pnl > 0).length / st.length * 100).toFixed(0);
+      const pnl = st.reduce((s, t) => s + t.pnl, 0).toFixed(3);
+      return "  " + sess + ": " + st.length + " trades | WR " + wr + "% | PnL $" + pnl;
+    }).join("\n");
+  }
+  function chatStatsByMode(trades: ClosedTrade[]): string {
+    return ["scalping","intradia"].map(m => {
+      const mt = trades.filter(t => t.mode === m);
+      if (!mt.length) return "  " + m + ": sin trades";
+      const wr  = (mt.filter(t => t.pnl > 0).length / mt.length * 100).toFixed(0);
+      const pnl = mt.reduce((s, t) => s + t.pnl, 0).toFixed(3);
+      return "  " + m + ": " + mt.length + " trades | WR " + wr + "% | PnL $" + pnl;
+    }).join("\n");
+  }
+  function chatBestWorst(trades: ClosedTrade[]): string {
+    if (!trades.length) return "  No trades yet";
+    const sorted = [...trades].sort((a, b) => b.pnl - a.pnl);
+    const best  = sorted[0];
+    const worst = sorted[sorted.length - 1];
+    return "  Best:  " + best.asset  + " " + best.direction  + " " + best.mode  + " | +$" + best.pnl.toFixed(3)  + "\n"
+         + "  Worst: " + worst.asset + " " + worst.direction + " " + worst.mode + " | $"  + worst.pnl.toFixed(3);
+  }
+  function chatReversalStats(trades: ClosedTrade[]): string {
+    const rev = trades.slice(0,10).filter(t => (t as ClosedTrade & {isReversalSetup?:boolean}).isReversalSetup);
+    if (!rev.length) return "  Ninguno en últimos 10 trades";
+    return rev.map(t => "  " + t.asset + " " + t.direction + " | " + t.result + " | $" + t.pnl.toFixed(3)).join("\n");
+  }
+
   async function sendMessage() {
     const q = input.trim();
     if (!q || loading) return;
@@ -2195,48 +2239,19 @@ BEHAVIOR RULES FOR CHAT:
 - Max 220 words per response. Be precise and actionable.
 
 PERFORMANCE BY ASSET:
-${["BTCUSD","ETHUSD","XAUUSD","XAGUSD"].map(a => {
-  const at = realTrades.filter(t => t.asset === a);
-  if (!at.length) return `  ${a}: sin trades`;
-  const wr = (at.filter(t=>t.pnl>0).length/at.length*100).toFixed(0);
-  const pnl = at.reduce((s,t)=>s+t.pnl,0).toFixed(3);
-  const avgR = (at.reduce((s,t)=>s+t.pnl,0)/at.length).toFixed(3);
-  return \`  \${a}: \${at.length} trades | WR \${wr}% | PnL \$\${pnl} | avg \$\${avgR}/trade\`;
-}).join("\n")}
+${chatStatsByAsset(realTrades)}
 
 PERFORMANCE BY SESSION:
-${["NY","London","Asia","Post-NY","Weekend"].map(sess => {
-  const st = realTrades.filter(t => (t as ClosedTrade & {session?:string}).session === sess);
-  if (!st.length) return \`  \${sess}: sin trades\`;
-  const wr = (st.filter(t=>t.pnl>0).length/st.length*100).toFixed(0);
-  const pnl = st.reduce((s,t)=>s+t.pnl,0).toFixed(3);
-  return \`  \${sess}: \${st.length} trades | WR \${wr}% | PnL \$\${pnl}\`;
-}).join("\n")}
+${chatStatsBySession(realTrades)}
 
 PERFORMANCE BY MODE:
-${["scalping","intradia"].map(m => {
-  const mt = realTrades.filter(t => t.mode === m);
-  if (!mt.length) return \`  \${m}: sin trades\`;
-  const wr = (mt.filter(t=>t.pnl>0).length/mt.length*100).toFixed(0);
-  const pnl = mt.reduce((s,t)=>s+t.pnl,0).toFixed(3);
-  const avgRR = mt.filter(t=>(t as ClosedTrade & {rr?:number}).rr).length
-    ? (mt.reduce((s,t)=>s+((t as ClosedTrade & {rr?:number}).rr??0),0)/mt.length).toFixed(2) : "N/A";
-  return \`  \${m}: \${mt.length} trades | WR \${wr}% | PnL \$\${pnl} | avg RR \${avgRR}\`;
-}).join("\n")}
+${chatStatsByMode(realTrades)}
 
 BEST/WORST TRADES:
-${realTrades.length ? (() => {
-  const sorted = [...realTrades].sort((a,b)=>b.pnl-a.pnl);
-  const best  = sorted[0];
-  const worst = sorted[sorted.length-1];
-  return \`  Best:  \${best.asset} \${best.direction} \${best.mode} | +\$\${best.pnl.toFixed(3)}\n  Worst: \${worst.asset} \${worst.direction} \${worst.mode} | \$\${worst.pnl.toFixed(3)}\`;
-})() : "  No trades yet"}
+${chatBestWorst(realTrades)}
 
 REVERSAL SETUPS DETECTED (last 10 trades):
-${realTrades.slice(0,10).filter(t=>(t as ClosedTrade & {isReversalSetup?:boolean}).isReversalSetup).length
-  ? realTrades.slice(0,10).filter(t=>(t as ClosedTrade & {isReversalSetup?:boolean}).isReversalSetup)
-      .map(t=>\`  \${t.asset} \${t.direction} | \${t.result} | \$\${t.pnl.toFixed(3)}\`).join("\n")
-  : "  Ninguno en últimos 10 trades"}`;
+${chatReversalStats(realTrades)}`;
 
     if (!usingGroq || !apiKey.trim()) {
       setMessages(prev => [...prev, {
