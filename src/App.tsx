@@ -411,8 +411,8 @@ const leverageByAsset: Record<Asset, number> = {
   BTCUSD: 100, ETHUSD: 100, XAGUSD: 50, XAUUSD: 100,
 };
 // Tamaño mínimo de lote y contract size real del broker (PrimeXBT)
-const // contractSize dinámico desde ASSET_CATALOG
-contractSize: Record<string, number> = Object.fromEntries(
+// contractSize dinámico desde ASSET_CATALOG
+const contractSize: Record<string, number> = Object.fromEntries(
   Object.entries(ASSET_CATALOG).map(([k, v]) => [k, v.contractSize])
 );
 const volMin: Record<string, number> = {
@@ -489,7 +489,26 @@ const CFD_BASE_SPREAD_PCT: Record<Asset, number> = {
 };
 function getAssetLabel(a: Asset)      { return assetLabel[a] ?? a; }
 function getAssetMinAtr(a: Asset): number { return getAssetCatalog(a).minAtr; }
-  
+
+// ─── AiChatPanel — panel de chat con la IA ────────────────────────────────────
+function AiChatPanel({
+  apiKey, usingGroq, groqModel, onGroqCall, canGroqCall,
+  openPositions, realTrades, lastSignal, prices, stats,
+  correlationMatrix, assetIntelligence,
+}: {
+  apiKey: string; usingGroq: boolean; groqModel: string;
+  onGroqCall: () => void; canGroqCall: () => boolean;
+  openPositions: Position[]; realTrades: ClosedTrade[];
+  lastSignal: Signal | null; prices: Record<string, number>;
+  stats: { winRate: number; pnl: number; profitFactor: number; sharpe: number; total: number; expectancy: number; maxDrawdown: number };
+  correlationMatrix: Record<string, Record<string, number>>;
+  assetIntelligence: Record<string, AssetIntelligence>;
+}) {
+  const [messages, setMessages] = React.useState<{role:"user"|"ai"; text:string; ts:string}[]>([]);
+  const [input,    setInput]    = React.useState("");
+  const [loading,  setLoading]  = React.useState(false);
+  const [aiStatus, setAiStatus] = React.useState<string>("idle");
+
   function chatStatsByAsset(trades: ClosedTrade[]): string {
     return ["BTCUSD","ETHUSD","XAUUSD","XAGUSD"].map(a => {
       const at = trades.filter(t => t.asset === a);
@@ -3718,6 +3737,8 @@ Rationale from system: ${signal.rationale}`;
                 onGroqCall={trackGroqCall} canGroqCall={canCallGroq}
                 openPositions={openPositions} realTrades={realTrades}
                 lastSignal={lastSignal} prices={prices} stats={stats}
+                correlationMatrix={correlationMatrix}
+                assetIntelligence={assetIntelligence}
               />
               <div className="card">
                 <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 13 }}>Estadísticas — trades reales</p>
