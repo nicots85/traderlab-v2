@@ -487,8 +487,7 @@ const minAtrByAsset: Record<Asset, number> = {
 const CFD_BASE_SPREAD_PCT: Record<Asset, number> = {
   BTCUSD: 0.00069, ETHUSD: 0.0012, XAUUSD: 0.00006, XAGUSD: 0.00067,
 };
-function getAssetLabel(a: Asset)      { return assetLabel[a] ?? a; }
-function getAssetMinAtr(a: Asset): number { return getAssetCatalog(a).minAtr; }
+
 
 // ─── AiChatPanel — panel de chat con la IA ────────────────────────────────────
 function AiChatPanel({
