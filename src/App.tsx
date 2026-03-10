@@ -1219,6 +1219,13 @@ function BacktestTab({
 
 
 export function App() {
+  // ── Capturar errores de useEffect que no van a ErrorBoundary ────────────
+  React.useEffect(() => {
+    const h = (e: ErrorEvent) => console.error("[TraderLab CRASH]", e.message, "\n", e.error?.stack ?? "");
+    window.addEventListener("error", h);
+    return () => window.removeEventListener("error", h);
+  }, []);
+
   const [assetIntelligence, setAssetIntelligence] = useState<Record<string, AssetIntelligence>>({});
   const [correlationMatrix, setCorrelationMatrix] = useState<Record<string, Record<string, number>>>({});
   const [availableSymbols, setAvailableSymbols] = useState<Array<{name:string;brokerName?:string;category:AssetCategory;spread:number;contractSize:number;digits?:number;volumeMin?:number}>>([]);
@@ -1374,23 +1381,23 @@ export function App() {
   // Solo para modo intradía — no afecta scalping
   useEffect(() => {
     assets.forEach(a => {
-      const c4h = candles4h[a] ?? [];
-      const c1d = candles1d[a] ?? [];
-      // Requiere al menos datos mínimos en alguno de los dos TFs
-      if (c4h.length >= 20 || c1d.length >= 10) {
-        setWyckoffMap(prev => ({ ...prev, [a]: analyzeWyckoff(c4h, c1d) }));
-      } else {
-        // Sin datos reales: Wyckoff neutral hasta que el bridge entregue 4H/1D
-        setWyckoffMap(prev => ({
-          ...prev,
-          [a]: {
-            phase: "unknown", bias: "neutral", events: [],
-            supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
-            narrative: "Esperando velas 4H/1D del bridge MT5...",
-            wyckoffLotMult: 1.0, tf4h: null, tf1d: null,
-          },
-        }));
-      }
+      const c4h = (candles4h[a] ?? []).filter(x => x.c > 0);
+      const c1d = (candles1d[a] ?? []).filter(x => x.c > 0);
+      try {
+        if (c4h.length >= 20 || c1d.length >= 10) {
+          setWyckoffMap(prev => ({ ...prev, [a]: analyzeWyckoff(c4h, c1d) }));
+        } else {
+          setWyckoffMap(prev => ({
+            ...prev,
+            [a]: {
+              phase: "unknown", bias: "neutral", events: [],
+              supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
+              narrative: "Esperando velas 4H/1D del bridge MT5...",
+              wyckoffLotMult: 1.0, tf4h: null, tf1d: null,
+            },
+          }));
+        }
+      } catch(e) { console.error("[Wyckoff]", a, e); }
     });
   }, [candles4h, candles1d]);
 
@@ -4147,6 +4154,7 @@ Rationale from system: ${signal.rationale}`;
 
         {/* ━━━━━━━━━ TRADING ━━━━━━━━━ */}
         {appTab === "trading" && (
+          <ErrorBoundary key="trading-tab">
           <div className="trading-grid">
 
             {/* Izq */}
@@ -4281,9 +4289,9 @@ Rationale from system: ${signal.rationale}`;
                     <button onClick={() => setShowIndicators(p => !p)} style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid rgba(255,255,255,0.1)", background: showIndicators ? "rgba(99,102,241,0.15)" : "transparent", color: showIndicators ? "#a5b4fc" : "var(--muted)", cursor: "pointer", fontWeight: 600 }}>
                       {showIndicators ? "● Indicadores" : "○ Indicadores"}
                     </button>
-                    {lastSignal && lastSignal.asset === asset && (
+                    {lastSignal && lastSignal.asset === asset && lastSignal.mtf && (
                       <div style={{ display: "flex", gap: 6, fontSize: 10, color: "var(--muted)" }}>
-                        {[["HTF", lastSignal.mtf.htf], ["LTF", lastSignal.mtf.ltf], ["Exec", lastSignal.mtf.exec]].map(([k, v]) => (
+                        {([["HTF", lastSignal.mtf.htf ?? 0], ["LTF", lastSignal.mtf.ltf ?? 0], ["Exec", lastSignal.mtf.exec ?? 0]] as [string,number][]).map(([k, v]) => (
                           <span key={k as string}>{k}: <strong style={{ color: (v as number) >= 0 ? "#10b981" : "#ef4444" }}>{(v as number).toFixed(2)}</strong></span>
                         ))}
                       </div>
@@ -4572,6 +4580,7 @@ Rationale from system: ${signal.rationale}`;
               </div>
             </div>
           </div>
+          </ErrorBoundary>
         )}
 
         {/* ━━━━━━━━━ BACKTEST ━━━━━━━━━ */}
