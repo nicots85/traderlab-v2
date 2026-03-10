@@ -1,7 +1,92 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type Asset = "BTCUSD" | "ETHUSD" | "XAGUSD" | "XAUUSD";
+// ─── Categorías de activos ────────────────────────────────────────────────────
+type AssetCategory = "crypto" | "metals" | "forex_major" | "forex_minor" | "indices" | "energy" | "stocks" | "commodities" | "other";
+
+// Asset es dinámico — string para soportar cualquier símbolo MT5
+type Asset = string;
+
+// Activos primarios con parámetros fine-tuned
+const PRIMARY_ASSETS = ["BTCUSD","ETHUSD","XAUUSD","XAGUSD"] as const;
+type PrimaryAsset = typeof PRIMARY_ASSETS[number];
+
+// Catálogo por categoría — activos conocidos con parámetros optimizados
+const ASSET_CATALOG: Record<string, { category: AssetCategory; digits: number; contractSize: number; leverage: number; minAtr: number; spreadPct: number; sessions: string[] }> = {
+  // ── Crypto ────────────────────────────────────────────────────────────────
+  BTCUSD:   { category:"crypto",      digits:2,  contractSize:1,     leverage:100, minAtr:50,    spreadPct:0.012, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  ETHUSD:   { category:"crypto",      digits:2,  contractSize:1,     leverage:100, minAtr:2,     spreadPct:0.015, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  BNBUSD:   { category:"crypto",      digits:2,  contractSize:1,     leverage:50,  minAtr:0.5,   spreadPct:0.020, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  SOLUSD:   { category:"crypto",      digits:3,  contractSize:1,     leverage:50,  minAtr:0.2,   spreadPct:0.020, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  XRPUSD:   { category:"crypto",      digits:5,  contractSize:1,     leverage:50,  minAtr:0.001, spreadPct:0.025, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  ADAUSD:   { category:"crypto",      digits:5,  contractSize:1,     leverage:50,  minAtr:0.001, spreadPct:0.025, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  DOGEUSD:  { category:"crypto",      digits:5,  contractSize:1,     leverage:20,  minAtr:0.0001,spreadPct:0.030, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  LTCUSD:   { category:"crypto",      digits:2,  contractSize:1,     leverage:50,  minAtr:0.1,   spreadPct:0.022, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  AVAXUSD:  { category:"crypto",      digits:3,  contractSize:1,     leverage:50,  minAtr:0.05,  spreadPct:0.025, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  LINKUSD:  { category:"crypto",      digits:4,  contractSize:1,     leverage:50,  minAtr:0.01,  spreadPct:0.025, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  DOTUSD:   { category:"crypto",      digits:4,  contractSize:1,     leverage:50,  minAtr:0.01,  spreadPct:0.025, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  MATICUSD: { category:"crypto",      digits:5,  contractSize:1,     leverage:20,  minAtr:0.001, spreadPct:0.030, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  // ── Metales ───────────────────────────────────────────────────────────────
+  XAUUSD:   { category:"metals",      digits:2,  contractSize:100,   leverage:100, minAtr:0.5,   spreadPct:0.018, sessions:["NY","London"] },
+  XAGUSD:   { category:"metals",      digits:3,  contractSize:5000,  leverage:100, minAtr:0.02,  spreadPct:0.025, sessions:["NY","London"] },
+  XPTUSD:   { category:"metals",      digits:2,  contractSize:100,   leverage:50,  minAtr:1.0,   spreadPct:0.030, sessions:["NY","London"] },
+  // ── Forex Majors ──────────────────────────────────────────────────────────
+  EURUSD:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0003,spreadPct:0.003, sessions:["NY","London"] },
+  GBPUSD:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0004,spreadPct:0.004, sessions:["NY","London"] },
+  USDJPY:   { category:"forex_major", digits:3,  contractSize:100000,leverage:500, minAtr:0.03,  spreadPct:0.003, sessions:["NY","London","Asia"] },
+  USDCHF:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0003,spreadPct:0.004, sessions:["NY","London"] },
+  AUDUSD:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0002,spreadPct:0.004, sessions:["NY","London","Asia"] },
+  USDCAD:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0003,spreadPct:0.004, sessions:["NY","London"] },
+  NZDUSD:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0002,spreadPct:0.005, sessions:["NY","London","Asia"] },
+  // ── Forex Minors ──────────────────────────────────────────────────────────
+  EURGBP:   { category:"forex_minor", digits:5,  contractSize:100000,leverage:200, minAtr:0.0002,spreadPct:0.006, sessions:["London"] },
+  EURJPY:   { category:"forex_minor", digits:3,  contractSize:100000,leverage:200, minAtr:0.03,  spreadPct:0.005, sessions:["NY","London","Asia"] },
+  GBPJPY:   { category:"forex_minor", digits:3,  contractSize:100000,leverage:200, minAtr:0.05,  spreadPct:0.007, sessions:["NY","London"] },
+  AUDJPY:   { category:"forex_minor", digits:3,  contractSize:100000,leverage:200, minAtr:0.03,  spreadPct:0.006, sessions:["Asia","London"] },
+  CADJPY:   { category:"forex_minor", digits:3,  contractSize:100000,leverage:200, minAtr:0.03,  spreadPct:0.007, sessions:["NY","Asia"] },
+  CHFJPY:   { category:"forex_minor", digits:3,  contractSize:100000,leverage:200, minAtr:0.03,  spreadPct:0.007, sessions:["Asia"] },
+  // ── Índices ───────────────────────────────────────────────────────────────
+  US30:     { category:"indices",     digits:2,  contractSize:1,     leverage:100, minAtr:20,    spreadPct:0.010, sessions:["NY"] },
+  US500:    { category:"indices",     digits:2,  contractSize:1,     leverage:100, minAtr:3,     spreadPct:0.008, sessions:["NY"] },
+  USTEC:    { category:"indices",     digits:2,  contractSize:1,     leverage:100, minAtr:15,    spreadPct:0.009, sessions:["NY"] },
+  GER40:    { category:"indices",     digits:2,  contractSize:1,     leverage:100, minAtr:20,    spreadPct:0.010, sessions:["London"] },
+  UK100:    { category:"indices",     digits:2,  contractSize:1,     leverage:100, minAtr:15,    spreadPct:0.010, sessions:["London"] },
+  // ── Energía ───────────────────────────────────────────────────────────────
+  USOIL:    { category:"energy",      digits:3,  contractSize:1000,  leverage:100, minAtr:0.2,   spreadPct:0.015, sessions:["NY","London"] },
+  UKOIL:    { category:"energy",      digits:3,  contractSize:1000,  leverage:100, minAtr:0.2,   spreadPct:0.015, sessions:["NY","London"] },
+  NATGAS:   { category:"energy",      digits:4,  contractSize:10000, leverage:100, minAtr:0.01,  spreadPct:0.020, sessions:["NY"] },
+};
+
+// Helpers para obtener parámetros — fallback genérico para activos desconocidos
+function getAssetCatalog(a: Asset) {
+  return ASSET_CATALOG[a] ?? {
+    category:"other" as AssetCategory, digits:5, contractSize:1, leverage:50,
+    minAtr:0.001, spreadPct:0.030, sessions:["NY","London"]
+  };
+}
+function getAssetCategory(a: Asset): AssetCategory { return getAssetCatalog(a).category; }
+function isCryptoAsset(a: Asset): boolean { return getAssetCategory(a) === "crypto"; }
+function isForexAsset(a: Asset): boolean { return getAssetCategory(a).startsWith("forex"); }
+function isMetalAsset(a: Asset): boolean { return getAssetCategory(a) === "metals"; }
+function isIndexAsset(a: Asset): boolean { return getAssetCategory(a) === "indices"; }
+function isEnergyAsset(a: Asset): boolean { return getAssetCategory(a) === "energy"; }
+
+// Label visual por activo
+function getAssetLabel(a: Asset): string {
+  const labels: Record<string, string> = {
+    BTCUSD:"Bitcoin (BTC)", ETHUSD:"Ethereum (ETH)", BNBUSD:"BNB", SOLUSD:"Solana (SOL)",
+    XRPUSD:"Ripple (XRP)", ADAUSD:"Cardano (ADA)", DOGEUSD:"Dogecoin", LTCUSD:"Litecoin (LTC)",
+    AVAXUSD:"Avalanche (AVAX)", LINKUSD:"Chainlink (LINK)", DOTUSD:"Polkadot (DOT)",
+    XAUUSD:"Oro (XAU)", XAGUSD:"Plata (XAG)", XPTUSD:"Platino (XPT)",
+    EURUSD:"EUR/USD", GBPUSD:"GBP/USD", USDJPY:"USD/JPY", USDCHF:"USD/CHF",
+    AUDUSD:"AUD/USD", USDCAD:"USD/CAD", NZDUSD:"NZD/USD",
+    EURGBP:"EUR/GBP", EURJPY:"EUR/JPY", GBPJPY:"GBP/JPY", AUDJPY:"AUD/JPY",
+    US30:"Dow Jones (US30)", US500:"S&P 500", USTEC:"NASDAQ 100",
+    GER40:"DAX 40", UK100:"FTSE 100",
+    USOIL:"WTI Crude Oil", UKOIL:"Brent Crude", NATGAS:"Natural Gas",
+  };
+  return labels[a] ?? a;
+}
 type Mode = "scalping" | "intradia";
 type Direction = "LONG" | "SHORT";
 type ExitReason = "TP" | "SL" | "TRAIL" | "REVERSAL";
@@ -88,7 +173,7 @@ type ScalpingRisk = {
   streak: number;
 };
 
-type AppTab = "trading" | "backtest" | "aprendizaje" | "configuracion";
+type AppTab = "trading" | "backtest" | "aprendizaje" | "activos" | "configuracion";
 
 // ── Wyckoff ──
 type WyckoffPhase = "A" | "B" | "C" | "D" | "E" | "unknown";
@@ -186,6 +271,112 @@ type AssetEdge = {
   wins: number; total: number; pnl: number;
   byHour: Record<number, number>;
 };
+
+// ─── AssetIntelligence: aprendizaje profundo por activo ────────────────────
+type SessionStat = { trades: number; wins: number; pnl: number; avgSpread: number };
+type ModeStat    = { trades: number; wins: number; pnl: number; avgRR: number };
+type HourlyStat  = { trades: number; wins: number; pnl: number };
+
+type AssetIntelligence = {
+  symbol:          string;
+  category:        AssetCategory;
+  totalTrades:     number;
+  winRate:         number;           // 0-1
+  avgRR:           number;
+  avgPnl:          number;
+  profitFactor:    number;
+  sessionStats:    Record<string, SessionStat>;
+  modeStats:       Record<string, ModeStat>;
+  hourlyStats:     Record<number, HourlyStat>;
+  // Parámetros aprendidos
+  optimalSLMult:   number;           // ATR mult que minimiza SL prematuros
+  optimalTPMult:   number;           // ATR mult que maximiza TP alcanzados
+  avgSpreadPct:    number;           // spread real observado
+  spreadByHour:    Record<number, number>;
+  avgVolatility:   number;           // ATR promedio
+  trendStrength:   number;           // 1=muy trendy, -1=muy mean-reverting
+  bestMode:        string;           // scalping | intradia
+  bestSession:     string;
+  bestHourUTC:     number;
+  // Correlaciones dinámicas (calculadas sobre últimas 200 velas 1m)
+  correlations:    Record<string, number>;   // -1 a +1
+  lastUpdated:     string;
+};
+
+// ─── Motor de correlación — Pearson sobre retornos 1m ─────────────────────
+function calcPearsonCorrelation(a: number[], b: number[]): number {
+  const n = Math.min(a.length, b.length, 200);
+  if (n < 20) return 0;
+  const xa = a.slice(-n); const xb = b.slice(-n);
+  // Retornos logarítmicos
+  const ra = xa.slice(1).map((v, i) => Math.log(v / Math.max(xa[i], 1e-9)));
+  const rb = xb.slice(1).map((v, i) => Math.log(v / Math.max(xb[i], 1e-9)));
+  const n2 = ra.length;
+  const ma = ra.reduce((s, v) => s + v, 0) / n2;
+  const mb = rb.reduce((s, v) => s + v, 0) / n2;
+  const num = ra.reduce((s, v, i) => s + (v - ma) * (rb[i] - mb), 0);
+  const da  = Math.sqrt(ra.reduce((s, v) => s + (v - ma) ** 2, 0));
+  const db  = Math.sqrt(rb.reduce((s, v) => s + (v - mb) ** 2, 0));
+  if (da * db < 1e-12) return 0;
+  return Math.max(-1, Math.min(1, num / (da * db)));
+}
+
+// ── opportunityScore: prioriza qué activos scanear en este momento ─────────
+function calcOpportunityScore(
+  symbol: Asset,
+  intel: AssetIntelligence | undefined,
+  currentSession: string,
+  currentHour: number,
+  openPositionSymbols: Asset[],
+  correlationMatrix: Record<string, Record<string, number>>
+): number {
+  let score = 50; // base
+
+  if (!intel || intel.totalTrades < 3) {
+    // Activo desconocido: score medio, preferir sesiones apropiadas
+    const cat = getAssetCatalog(symbol);
+    if (cat.sessions.includes(currentSession)) score += 10;
+    return score;
+  }
+
+  // ── 1. Performance histórica (30%) ──
+  const pfScore = Math.min(intel.profitFactor * 10, 20); // max 20pts
+  score += pfScore;
+
+  // ── 2. Sesión actual (20%) ──
+  const sessData = intel.sessionStats[currentSession];
+  if (sessData && sessData.trades >= 3) {
+    const sessWR = sessData.wins / sessData.trades;
+    score += (sessWR - 0.4) * 50; // +10 si WR=60%, -10 si WR=20%
+  }
+
+  // ── 3. Hora actual (20%) ──
+  const hourData = intel.hourlyStats[currentHour];
+  if (hourData && hourData.trades >= 2) {
+    const hourWR = hourData.wins / hourData.trades;
+    score += (hourWR - 0.4) * 30;
+  }
+
+  // ── 4. Spread actual vs promedio aprendido (10%) ──
+  const cat = getAssetCatalog(symbol);
+  const spreadRatio = intel.avgSpreadPct > 0 ? cat.spreadPct / intel.avgSpreadPct : 1;
+  score += (1 - spreadRatio) * 10; // spread mejor que promedio = bonus
+
+  // ── 5. Descorrelación de cartera (20%) ──
+  // Bonus por activos que NO correlacionan con las posiciones abiertas
+  if (openPositionSymbols.length > 0) {
+    const corrWithOpen = openPositionSymbols.map(op => {
+      const c = correlationMatrix[symbol]?.[op] ?? 0;
+      return Math.abs(c);
+    });
+    const avgCorr = corrWithOpen.reduce((s, c) => s + c, 0) / corrWithOpen.length;
+    score += (1 - avgCorr) * 20; // descorrelacionado = +20pts
+  } else {
+    score += 10; // sin posiciones abiertas: bonus base
+  }
+
+  return Math.max(0, Math.min(100, score));
+}
 type LearningModel = {
   riskScale: number; confidenceFloor: number;
   scalpingTpAtr: number; intradayTpAtr: number;
@@ -220,13 +411,14 @@ const leverageByAsset: Record<Asset, number> = {
   BTCUSD: 100, ETHUSD: 100, XAGUSD: 50, XAUUSD: 100,
 };
 // Tamaño mínimo de lote y contract size real del broker (PrimeXBT)
-const contractSize: Record<Asset, number> = {
-  BTCUSD: 1, ETHUSD: 1, XAUUSD: 100, XAGUSD: 5000,
-};
-const volMin: Record<Asset, number> = {
+const // contractSize dinámico desde ASSET_CATALOG
+contractSize: Record<string, number> = Object.fromEntries(
+  Object.entries(ASSET_CATALOG).map(([k, v]) => [k, v.contractSize])
+);
+const volMin: Record<string, number> = {
   BTCUSD: 0.001, ETHUSD: 0.01, XAUUSD: 0.01, XAGUSD: 0.01,
 };
-const volStep: Record<Asset, number> = {
+const volStep: Record<string, number> = {
   BTCUSD: 0.001, ETHUSD: 0.01, XAUUSD: 0.01, XAGUSD: 0.01,
 };
 // ATR mínimo por activo — evita sizing explosivo en mercados de bajo precio
@@ -296,1851 +488,8 @@ const CFD_BASE_SPREAD_PCT: Record<Asset, number> = {
   BTCUSD: 0.00069, ETHUSD: 0.0012, XAUUSD: 0.00006, XAGUSD: 0.00067,
 };
 function getAssetLabel(a: Asset)      { return assetLabel[a] ?? a; }
-function getAssetMinAtr(a: Asset)     { return minAtrByAsset[a] ?? 1; }
-function getAssetBaseSpread(a: Asset) { return CFD_BASE_SPREAD_PCT[a] ?? 0.020; }
-function calcCFDSpread(asset: Asset, price: number, shock: number): SpreadSnapshot {
-  const hourUTC = new Date().getUTCHours();
-  const dayUTC  = new Date().getUTCDay();
-  const basePct = getAssetBaseSpread(asset);
-  // Componente volumen: curva no lineal — spread triplica en picos de volatilidad
-  const shockMult  = 1 + Math.pow(Math.max(shock - 0.08, 0) / 0.4, 1.6) * 1.8;
-  const volumePct  = basePct * (shockMult - 1);
-  // Componente sesión UTC
-  let sessionMult = 1.0; let sessionLabel = "NY";
-  const isWeekend = dayUTC === 0 || dayUTC === 6;
-  if      (isWeekend)                        { sessionMult = 1.6;  sessionLabel = "OFF"; }
-  else if (hourUTC >= 13 && hourUTC < 21)    { sessionMult = 1.0;  sessionLabel = "NY"; }
-  else if (hourUTC >= 7  && hourUTC < 16)    { sessionMult = 1.05; sessionLabel = "LONDON"; }
-  else if (hourUTC >= 0  && hourUTC < 7)     { sessionMult = 1.35; sessionLabel = "ASIA"; }
-  else                                        { sessionMult = 1.20; sessionLabel = "OVERLAP"; }
-  // Metales: sesión importa menos (market makers globales)
-  if (asset === "XAUUSD" || asset === "XAGUSD") sessionMult = 1 + (sessionMult - 1) * 0.4;
-  const sessionPct = basePct * (sessionMult - 1);
-  const totalPct   = (basePct + volumePct + sessionPct) * sessionMult;
-  const spread     = totalPct / 100 * price;
-  return {
-    spread, spreadPct: totalPct,
-    bid: price - spread / 2, ask: price + spread / 2,
-    component: { base: basePct/100*price, volume: volumePct/100*price, session: sessionPct/100*price },
-    sessionLabel, isHighVolume: shock > 0.5 || isWeekend,
-  };
-}
-function getSpreadPct(asset: Asset, shock: number, price?: number) {
-  const p = price ?? (asset==="BTCUSD"?95000:asset==="ETHUSD"?3000:asset==="XAUUSD"?3300:32);
-  return calcCFDSpread(asset, p, shock).spreadPct;
-}
-function calcDrawdown(trades: ClosedTrade[]) {
-  let running = 100; let peak = 100; let maxDd = 0;
-  [...trades].reverse().forEach(t => {
-    running += t.pnl;
-    if (running > peak) peak = running;
-    maxDd = Math.max(maxDd, ((peak - running) / peak) * 100);
-  });
-  return maxDd;
-}
-function formatDuration(openedAt: string) {
-  const s = Math.floor((Date.now() - new Date(openedAt).getTime()) / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
-}
-
-// ─── Indicators Engine ────────────────────────────────────────────────────────
-
-// ─── Tooltip component ────────────────────────────────────────────────────────
-function Tip({ label, text, children }: { label?: string; text: string; children?: React.ReactNode }) {
-  return (
-    <span className="tip">
-      {children ?? label}
-      <i className="tip-icon">?</i>
-      <span className="tip-box">{text}</span>
-    </span>
-  );
-}
-
-
-function calcRSI(closes: number[], period = 14): number[] {
-  if (closes.length < period + 1) return closes.map(() => 50);
-  const gains: number[] = []; const losses: number[] = [];
-  for (let i = 1; i < closes.length; i++) {
-    const d = closes[i] - closes[i - 1];
-    gains.push(d > 0 ? d : 0);
-    losses.push(d < 0 ? -d : 0);
-  }
-  const rsiArr: number[] = new Array(period).fill(50);
-  let avgG = avg(gains.slice(0, period));
-  let avgL = avg(losses.slice(0, period));
-  rsiArr.push(avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL));
-  for (let i = period; i < gains.length; i++) {
-    avgG = (avgG * (period - 1) + gains[i]) / period;
-    avgL = (avgL * (period - 1) + losses[i]) / period;
-    rsiArr.push(avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL));
-  }
-  return rsiArr;
-}
-
-function calcStochastic(candles: Candle[], kPeriod = 14, dPeriod = 3): { k: number; d: number } {
-  if (candles.length < kPeriod) return { k: 50, d: 50 };
-  const kArr: number[] = [];
-  for (let i = kPeriod - 1; i < candles.length; i++) {
-    const slice = candles.slice(i - kPeriod + 1, i + 1);
-    const high = Math.max(...slice.map(c => c.h));
-    const low  = Math.min(...slice.map(c => c.l));
-    const range = Math.max(high - low, 1e-9);
-    kArr.push(((candles[i].c - low) / range) * 100);
-  }
-  const dArr: number[] = [];
-  for (let i = dPeriod - 1; i < kArr.length; i++) dArr.push(avg(kArr.slice(i - dPeriod + 1, i + 1)));
-  return { k: kArr[kArr.length - 1], d: dArr.length > 0 ? dArr[dArr.length - 1] : kArr[kArr.length - 1] };
-}
-function calcMAs(closes: number[]): { ma10: number; ma20: number; ma50: number } {
-  return {
-    ma10: closes.length >= 10 ? avg(closes.slice(-10)) : closes[closes.length - 1],
-    ma20: closes.length >= 20 ? avg(closes.slice(-20)) : closes[closes.length - 1],
-    ma50: closes.length >= 50 ? avg(closes.slice(-50)) : avg(closes),
-  };
-}
-function detectRsiDivergence(closes: number[], rsi: number[], lookback = 20): "bullish" | "bearish" | "none" {
-  if (closes.length < lookback) return "none";
-  const priceSlice = closes.slice(-lookback);
-  const rsiSlice = rsi.slice(-lookback);
-  const priceMin = Math.min(...priceSlice); const rsiAtPriceMin = rsiSlice[priceSlice.indexOf(priceMin)];
-  const priceMax = Math.max(...priceSlice); const rsiAtPriceMax = rsiSlice[priceSlice.indexOf(priceMax)];
-  const prevMin = Math.min(...priceSlice.slice(0, -5));
-  const prevRsiMin = rsiSlice[priceSlice.slice(0, -5).indexOf(prevMin)];
-  const prevMax = Math.max(...priceSlice.slice(0, -5));
-  const prevRsiMax = rsiSlice[priceSlice.slice(0, -5).indexOf(prevMax)];
-  // Bullish div: precio hace LL pero RSI hace HL
-  if (priceMin < prevMin && rsiAtPriceMin > prevRsiMin + 2) return "bullish";
-  // Bearish div: precio hace HH pero RSI hace LH
-  if (priceMax > prevMax && rsiAtPriceMax < prevRsiMax - 2) return "bearish";
-  return "none";
-}
-
-function calcVWAP(candles: Candle[]): { vwap: number; upper1: number; lower1: number; upper2: number; lower2: number } {
-  if (!candles.length) return { vwap: 0, upper1: 0, lower1: 0, upper2: 0, lower2: 0 };
-  // VWAP diario: reset en cada sesión (usamos todas las velas disponibles como proxy)
-  let cumTP = 0; let cumVol = 0; const tpVwap: number[] = [];
-  candles.forEach(c => {
-    const tp = (c.h + c.l + c.c) / 3;
-    cumTP += tp * c.v;
-    cumVol += c.v;
-    tpVwap.push(cumVol > 0 ? cumTP / cumVol : tp);
-  });
-  const vwap = tpVwap[tpVwap.length - 1];
-  // Bandas: desviación estándar del precio respecto al VWAP
-  const devs = candles.map((c, i) => ((c.h + c.l + c.c) / 3 - tpVwap[i]) ** 2 * c.v);
-  const variance = avg(devs) / Math.max(avg(candles.map(c => c.v)), 1e-9);
-  const sigma = Math.sqrt(Math.max(variance, 0));
-  return { vwap, upper1: vwap + sigma, lower1: vwap - sigma, upper2: vwap + 2 * sigma, lower2: vwap - 2 * sigma };
-}
-
-function calcBollinger(closes: number[], period = 20, mult = 2): { upper: number; middle: number; lower: number } {
-  const slice = closes.slice(-period);
-  if (slice.length < period) return { upper: closes[closes.length - 1], middle: closes[closes.length - 1], lower: closes[closes.length - 1] };
-  const middle = avg(slice);
-  const sigma = std(slice);
-  return { upper: middle + mult * sigma, middle, lower: middle - mult * sigma };
-}
-
-function calcKeltner(candles: Candle[], period = 20, mult = 1.5): { upper: number; lower: number } {
-  const closes = candles.map(c => c.c);
-  const m = ema(closes.slice(-period), period);
-  const atr = calcAtr(candles, period);
-  return { upper: m + mult * atr, lower: m - mult * atr };
-}
-
-function calcVolumeDelta(candles: Candle[], lookback = 20): { delta: number; pct: number } {
-  const slice = candles.slice(-lookback);
-  let buyVol = 0; let sellVol = 0;
-  slice.forEach(c => {
-    // Aproximación: vela alcista = presión compradora proporcional al cuerpo
-    const body = Math.abs(c.c - c.o);
-    const range = Math.max(c.h - c.l, 1e-9);
-    const buyFrac = c.c >= c.o ? 0.5 + 0.5 * (body / range) : 0.5 - 0.5 * (body / range);
-    buyVol += c.v * buyFrac;
-    sellVol += c.v * (1 - buyFrac);
-  });
-  const total = buyVol + sellVol;
-  return { delta: buyVol - sellVol, pct: total > 0 ? ((buyVol - sellVol) / total) * 100 : 0 };
-}
-
-function detectImbalances(candles: Candle[], lookback = 60): Array<{ idx: number; type: "bullish" | "bearish"; price: number }> {
-  const slice = candles.slice(-lookback);
-  const avgVol = avg(slice.map(c => c.v));
-  const result: Array<{ idx: number; type: "bullish" | "bearish"; price: number }> = [];
-  slice.forEach((c, i) => {
-    const body = Math.abs(c.c - c.o);
-    const range = Math.max(c.h - c.l, 1e-9);
-    const bodyRatio = body / range;
-    const volSpike = c.v > avgVol * 1.5;
-    if (bodyRatio > 0.68 && volSpike) {
-      result.push({
-        idx: candles.length - lookback + i,
-        type: c.c >= c.o ? "bullish" : "bearish",
-        price: (c.h + c.l) / 2,
-      });
-    }
-  });
-  return result.slice(-6); // máximo 6 imbalances visibles
-}
-
-function computeIndicators(candles: Candle[]): Indicators {
-  if (candles.length < 25) {
-    const p = candles[candles.length - 1]?.c ?? 0;
-    return {
-      rsi: 50, rsiDivergence: "none", stochK: 50, stochD: 50, ma5: p, ma10: p, ma20: p, ma50: p, vwap: p,
-      vwapUpperBand1: p, vwapLowerBand1: p, vwapUpperBand2: p, vwapLowerBand2: p,
-      bbUpper: p, bbMiddle: p, bbLower: p, bbSqueeze: false,
-      volumeDelta: 0, volumeDeltaPct: 0, imbalances: [],
-      atr: 0, keltnerUpper: p, keltnerLower: p,
-    };
-  }
-  const closes = candles.map(c => c.c);
-  const lastClose = closes[closes.length - 1] ?? 0;
-  const rsiArr = calcRSI(closes);
-  const rsi = rsiArr[rsiArr.length - 1];
-  const rsiDivergence = detectRsiDivergence(closes, rsiArr);
-  const { k: stochK, d: stochD } = calcStochastic(candles, 14, 3);
-  const mas = calcMAs(closes);
-  const ma5 = closes.length >= 5 ? avg(closes.slice(-5)) : lastClose;
-  const vwapData = calcVWAP(candles);
-  const bb = calcBollinger(closes);
-  const keltner = calcKeltner(candles);
-  const bbSqueeze = bb.upper < keltner.upper && bb.lower > keltner.lower;
-  const { delta, pct } = calcVolumeDelta(candles);
-  const imbalances = detectImbalances(candles);
-  const atr = calcAtr(candles, 14);
-  return {
-    rsi, rsiDivergence, stochK, stochD,
-    ma5, ma10: mas.ma10, ma20: mas.ma20, ma50: mas.ma50,
-    vwap: vwapData.vwap, vwapUpperBand1: vwapData.upper1, vwapLowerBand1: vwapData.lower1,
-    vwapUpperBand2: vwapData.upper2, vwapLowerBand2: vwapData.lower2,
-    bbUpper: bb.upper, bbMiddle: bb.middle, bbLower: bb.lower, bbSqueeze,
-    volumeDelta: delta, volumeDeltaPct: pct,
-    imbalances, atr, keltnerUpper: keltner.upper, keltnerLower: keltner.lower,
-  };
-}
-
-// ─── Wyckoff Engine (solo 4H y 1D — contexto macro para intradía/swing) ────────
-// Wyckoff NO se usa en scalping ni sobre velas 1m sintéticas.
-// El análisis 4H identifica estructura de acumulación/distribución de mediano plazo.
-// El análisis 1D da el sesgo macro (tendencia dominante).
-// Ambos se usan SOLO como contexto informativo en modo intradía — nunca en scalping.
-
-// Wyckoff en un solo TF real (4H o 1D)
-function analyzeWyckoffSingle(candles: Candle[]): WyckoffAnalysis {
-  const empty: WyckoffAnalysis = {
-    phase: "unknown", bias: "neutral", events: [],
-    supportZone: null, resistanceZone: null,
-    volumeClimaxIdx: [], narrative: "Datos insuficientes para análisis Wyckoff.",
-  };
-  if (candles.length < 40) return empty;
-
-  const window = candles.slice(-120); // últimas 120 velas
-  const closes = window.map(c => c.c);
-  const highs = window.map(c => c.h);
-  const lows = window.map(c => c.l);
-  const vols = window.map(c => c.v);
-  const avgVol = avg(vols);
-  const avgRange = avg(window.map(c => c.h - c.l));
-
-  // 1. Detectar climax de volumen (volumen >2x promedio + rango amplio)
-  const climaxIdx: number[] = [];
-  window.forEach((c, i) => {
-    if (c.v > avgVol * 2 && (c.h - c.l) > avgRange * 1.4) climaxIdx.push(i);
-  });
-
-  const events: WyckoffEvent[] = [];
-
-  // 2. Selling Climax (SC): vela bajista de alto volumen en mínimos recientes
-  const priceMin = Math.min(...lows);
-  const scIdx = lows.indexOf(priceMin);
-  if (scIdx >= 0 && window[scIdx].v > avgVol * 1.6 && window[scIdx].c < window[scIdx].o) {
-    events.push({ label: "SC", candleIndex: scIdx, price: lows[scIdx], color: "#10b981" });
-  }
-
-  // 3. Automatic Rally (AR): rally fuerte tras SC
-  if (scIdx >= 0 && scIdx < window.length - 5) {
-    const arSlice = highs.slice(scIdx, scIdx + 15);
-    const arHigh = Math.max(...arSlice);
-    const arIdx = scIdx + arSlice.indexOf(arHigh);
-    if (arHigh > closes[scIdx] * 1.005) {
-      events.push({ label: "AR", candleIndex: arIdx, price: arHigh, color: "#6366f1" });
-    }
-  }
-
-  // 4. Secondary Test (ST): regresa a zona SC con menor volumen
-  const stCandidates = window.slice(scIdx + 5).map((c, i) => ({ c, i: scIdx + 5 + i }))
-    .filter(({ c, i }) => lows[i] < priceMin * 1.006 && c.v < avgVol * 1.2 && i > scIdx + 3);
-  if (stCandidates.length > 0) {
-    const st = stCandidates[0];
-    events.push({ label: "ST", candleIndex: st.i, price: lows[st.i], color: "#f59e0b" });
-  }
-
-  // 5. Spring: falso quiebre por debajo del soporte (fase C acumulación)
-  const supportLevel = priceMin;
-  const springCandidates = window.slice(-30).map((c, i) => ({ c, i: window.length - 30 + i }))
-    .filter(({ c, i }) => lows[i] < supportLevel * 0.998 && closes[i] > supportLevel && c.v > avgVol * 0.8);
-  if (springCandidates.length > 0) {
-    const sp = springCandidates[0];
-    events.push({ label: "Spring", candleIndex: sp.i, price: lows[sp.i], color: "#10b981" });
-  }
-
-  // 6. Buying Climax (BC): vela alcista de alto volumen en máximos (distribución)
-  const priceMax = Math.max(...highs);
-  const bcIdx = highs.indexOf(priceMax);
-  if (bcIdx >= 0 && window[bcIdx].v > avgVol * 1.6 && window[bcIdx].c > window[bcIdx].o && bcIdx > scIdx + 10) {
-    events.push({ label: "BC", candleIndex: bcIdx, price: highs[bcIdx], color: "#ef4444" });
-  }
-
-  // 7. UTAD: falso quiebre por encima de la resistencia (distribución fase C)
-  const resistanceLevel = priceMax;
-  const utadCandidates = window.slice(-30).map((c, i) => ({ c, i: window.length - 30 + i }))
-    .filter(({ c, i }) => highs[i] > resistanceLevel * 1.002 && closes[i] < resistanceLevel && c.v > avgVol * 1.2);
-  if (utadCandidates.length > 0) {
-    const ut = utadCandidates[0];
-    events.push({ label: "UTAD", candleIndex: ut.i, price: highs[ut.i], color: "#ef4444" });
-  }
-
-  // 8. SOS / SOW (Sign of Strength / Weakness): expansión de rango con volumen
-  const sosWCandidates = window.slice(-20).map((c, i) => ({ c, i: window.length - 20 + i }))
-    .filter(({ c }) => c.v > avgVol * 1.5 && (c.h - c.l) > avgRange * 1.3);
-  sosWCandidates.forEach(({ c, i }) => {
-    if (c.c > c.o && c.c > closes[Math.max(0, i - 3)]) {
-      events.push({ label: "SOS", candleIndex: i, price: c.h, color: "#10b981" });
-    } else if (c.c < c.o) {
-      events.push({ label: "SOW", candleIndex: i, price: c.l, color: "#ef4444" });
-    }
-  });
-
-  // 9. LPS / LPSY
-  const lastSosIdx = events.filter(e => e.label === "SOS").slice(-1)[0]?.candleIndex ?? -1;
-  if (lastSosIdx > 0 && lastSosIdx < window.length - 3) {
-    const lpsSlice = window.slice(lastSosIdx).map((c, i) => ({ c, i: lastSosIdx + i }))
-      .filter(({ c, i }) => lows[i] > supportLevel && c.v < avgVol * 0.9);
-    if (lpsSlice.length > 0) {
-      events.push({ label: "LPS", candleIndex: lpsSlice[0].i, price: lows[lpsSlice[0].i], color: "#6366f1" });
-    }
-  }
-
-  // 10. Determinar fase y bias
-  const hasSpring = events.some(e => e.label === "Spring");
-  const hasSOS = events.some(e => e.label === "SOS");
-  const hasUTAD = events.some(e => e.label === "UTAD");
-  const hasSOW = events.some(e => e.label === "SOW");
-  const hasBC = events.some(e => e.label === "BC");
-  const hasSC = events.some(e => e.label === "SC");
-  const hasAR = events.some(e => e.label === "AR");
-
-  let phase: WyckoffPhase = "unknown";
-  let bias: WyckoffBias = "neutral";
-  let narrative = "";
-
-  if (hasSOS && !hasSOW) { phase = "E"; bias = "accumulation"; }
-  else if (hasSpring && hasSOS) { phase = "D"; bias = "accumulation"; }
-  else if (hasSpring) { phase = "C"; bias = "accumulation"; }
-  else if (hasSC && hasAR) { phase = "B"; bias = "neutral"; }
-  else if (hasSC) { phase = "A"; bias = "accumulation"; }
-  else if (hasUTAD && hasSOW) { phase = "D"; bias = "distribution"; }
-  else if (hasUTAD) { phase = "C"; bias = "distribution"; }
-  else if (hasBC && hasAR) { phase = "B"; bias = "distribution"; }
-  else if (hasBC) { phase = "A"; bias = "distribution"; }
-
-  const phaseLabel = phase === "unknown" ? "sin patrón claro" : `Fase ${phase}`;
-  const biasLabel = bias === "accumulation" ? "Acumulación" : bias === "distribution" ? "Distribución" : "Lateral/neutral";
-
-  narrative = `${biasLabel} — ${phaseLabel}. `;
-  if (bias === "accumulation" && phase === "C") narrative += "Spring detectado: posible punto de inflexión alcista.";
-  else if (bias === "accumulation" && phase === "D") narrative += "SOS confirma inicio de tendencia alcista. Buscar LPS para entrada.";
-  else if (bias === "accumulation" && phase === "E") narrative += "Tendencia alcista activa. Operar en retrocesos a VWAP o soportes previos.";
-  else if (bias === "distribution" && phase === "C") narrative += "UTAD detectado: posible trampa alcista antes de caída.";
-  else if (bias === "distribution" && phase === "D") narrative += "SOW confirma debilidad. Buscar LPSY para entrada SHORT.";
-  else if (phase === "B") narrative += "Rango de construcción activo. Esperar resolución de fase C.";
-  else narrative += "Monitorear volumen y estructura de precio.";
-
-  // Zonas de soporte/resistencia
-  const supportZone: [number, number] = [priceMin * 0.998, priceMin * 1.003];
-  const resistanceZone: [number, number] = [priceMax * 0.997, priceMax * 1.002];
-
-  return {
-    phase, bias, events,
-    supportZone: hasSC ? supportZone : null,
-    resistanceZone: hasBC ? resistanceZone : null,
-    volumeClimaxIdx: climaxIdx,
-    narrative,
-  };
-}
-
-// analyzeWyckoff: recibe velas 4H y 1D reales (del bridge).
-// Produce análisis de sesgo macro para intradía/swing.
-// wyckoffLotMult solo se activa cuando 4H y 1D confirman el mismo bias en fase avanzada.
-function analyzeWyckoff(
-  candles4h: Candle[],
-  candles1d: Candle[],
-): WyckoffAnalysis & { wyckoffLotMult: number; tf4h: WyckoffAnalysis | null; tf1d: WyckoffAnalysis | null } {
-  const empty: WyckoffAnalysis & { wyckoffLotMult: number; tf4h: null; tf1d: null } = {
-    phase: "unknown", bias: "neutral", events: [],
-    supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
-    narrative: "Sin velas 4H/1D del bridge. Activá MT5 para contexto macro.",
-    wyckoffLotMult: 1.0, tf4h: null, tf1d: null,
-  };
-
-  const w4h = candles4h.length >= 40 ? analyzeWyckoffSingle(candles4h.slice(-120)) : null;
-  const w1d = candles1d.length >= 20 ? analyzeWyckoffSingle(candles1d.slice(-60))  : null;
-
-  if (!w4h && !w1d) return empty;
-
-  // TF dominante: 1D si tiene señal, sino 4H
-  const dominant = (w1d?.phase !== "unknown" ? w1d : w4h) ?? (w4h ?? empty);
-
-  // Confluencia 4H + 1D en mismo bias
-  const bothBull = w4h?.bias === "accumulation" && w1d?.bias === "accumulation";
-  const bothBear = w4h?.bias === "distribution"  && w1d?.bias === "distribution";
-  const advancedPhases = new Set<WyckoffPhase>(["C", "D", "E"]);
-  const isAdvanced = advancedPhases.has(dominant.phase);
-  const hasKeyEvent = dominant.events.some(e => ["Spring", "UTAD", "SOS", "SOW", "LPS"].includes(e.label));
-
-  let wyckoffLotMult = 1.0;
-  if ((bothBull || bothBear) && isAdvanced && hasKeyEvent) {
-    wyckoffLotMult = 1.35; // confluencia real 4H+1D en fase clave
-  } else if ((bothBull || bothBear) && isAdvanced) {
-    wyckoffLotMult = 1.18;
-  }
-
-  const tfStr = (w: WyckoffAnalysis | null, name: string) =>
-    w ? `${name}: ${w.bias === "neutral" ? "neutral" : w.bias === "accumulation" ? "Acum" : "Dist"} F${w.phase}` : `${name}: sin datos`;
-
-  return {
-    ...dominant,
-    narrative: `${dominant.narrative} | ${tfStr(w1d, "1D")} · ${tfStr(w4h, "4H")} | Mult: ${wyckoffLotMult.toFixed(2)}×`,
-    wyckoffLotMult,
-    tf4h: w4h,
-    tf1d: w1d,
-  };
-}
-
-// ─── API ──────────────────────────────────────────────────────────────────────
-async function fetchJson<T>(url: string): Promise<T> {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json() as Promise<T>;
-}
-
-// ── MT5 Bridge: única fuente de datos ────────────────────────────────────────
-
-async function fetchFromMT5Bridge(bridgeUrl: string, prevPrices: Record<Asset, number>) {
-  const r = await fetch(`${bridgeUrl}/snapshot`, { signal: AbortSignal.timeout(6000) });
-  if (!r.ok) throw new Error(`Bridge HTTP ${r.status}`);
-  const data = await r.json() as {
-    assets: Record<string, {
-      price: number; bid: number; ask: number;
-      spread: number; spread_pct: number; digits: number;
-      contract_size: number; leverage: number; margin_initial: number;
-      candles: Candle[]; source: string; error?: string;
-    }>;
-    ts: string;
-  };
-
-  const prices      = { ...prevPrices };
-  const candleMap: Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
-  const seriesMap:   Partial<Record<Asset, number[]>> = {};
-  const spreadMap:   Partial<Record<Asset, { spread: number; spread_pct: number; bid: number; ask: number }>> = {};
-  const leverageMap: Partial<Record<Asset, number>> = {};
-  const failedAssets: string[] = [];
-
-  // Expandir assets[] con todos los disponibles en el broker
+function getAssetMinAtr(a: Asset): number { return getAssetCatalog(a).minAtr; }
   
-  for (const asset of assets) {
-    const d = data.assets[asset];
-    if (!d || d.error) { failedAssets.push(asset); continue; }
-    prices[asset]      = d.price;
-    candleMap[asset]   = d.candles ?? [];
-    seriesMap[asset]   = (d.candles ?? []).map(c => c.c);
-    spreadMap[asset]   = { spread: d.spread, spread_pct: d.spread_pct, bid: d.bid, ask: d.ask };
-    if (d.leverage && d.leverage > 0) leverageMap[asset] = d.leverage;
-  }
-
-  // Shock de volatilidad por activo (no solo BTC)
-  let shock = 0.28;
-  const shockByAsset: Partial<Record<Asset, number>> = {};
-  for (const asset of assets) {
-    const s = seriesMap[asset] ?? [];
-    if (s.length > 10) {
-      const absRet = avg(s.slice(1).map((v, i) => Math.abs((v - s[i]) / Math.max(s[i], 1e-9))));
-      shockByAsset[asset] = clamp(absRet * 220, 0.08, 1.25);
-    }
-  }
-  shock = shockByAsset.BTCUSD ?? 0.28;
-
-  const sourceNote = failedAssets.length > 0
-    ? `⚠ fallo: ${failedAssets.join(", ")}`
-    : `MT5/PrimeXBT (${data.ts.slice(11, 19)} UTC)`;
-
-  return { prices, candleMap, seriesMap, shock, shockByAsset, spreadMap, leverageMap, sourceNote, fromBridge: true };
-}
-
-// fetchRealMarketSnapshot: wrapper MT5-only.
-// Sin bridge activo → error explícito, no hay fallback a APIs externas.
-async function fetchRealMarketSnapshot(
-  prevPrices: Record<Asset, number>,
-  bridgeUrl?: string,
-  useBridge?: boolean,
-) {
-  if (!useBridge || !bridgeUrl) {
-    throw new Error("MT5 Bridge requerido. Activá y conectá el bridge en Configuración.");
-  }
-  return await fetchFromMT5Bridge(bridgeUrl, prevPrices);
-}
-
-// ─── Candlestick Chart with Indicators & Wyckoff ─────────────────────────────
-function deriveSyntheticCandles(closes: number[]): Candle[] {
-  const result: Candle[] = [];
-  for (let i = 0; i + 4 < closes.length; i += 3) {
-    const s = closes.slice(i, i + 5);
-    result.push({ t: i, o: s[0], h: Math.max(...s), l: Math.min(...s), c: s[s.length - 1], v: 0 });
-  }
-  return result;
-}
-
-function CandlestickChart({ candles, indicators, wyckoff, showIndicators }: {
-  candles: Candle[];
-  indicators: Indicators | null;
-  wyckoff: WyckoffAnalysis | null;
-  showIndicators: boolean;
-}) {
-  // ── Zoom + Pan state ─────────────────────────────────────────────────────
-  const [visibleCount, setVisibleCount] = useState(60);
-  const [offset, setOffset] = useState(0);
-  const svgRef = useRef<SVGSVGElement>(null);
-  const dragRef = useRef<{ startX: number; startOffset: number } | null>(null);
-
-  const totalCandles = candles.length;
-  const maxOffset = Math.max(0, totalCandles - visibleCount);
-  const startIdx = Math.max(0, totalCandles - visibleCount - offset);
-  const visible = candles.slice(startIdx, startIdx + visibleCount);
-
-  // Scroll = zoom (más velas = más zoom out)
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? 5 : -5;
-    setVisibleCount((v: number) => clamp(v + delta, 10, Math.min(200, totalCandles)));
-  }, [totalCandles]);
-
-  // Drag = pan
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    dragRef.current = { startX: e.clientX, startOffset: offset };
-  }, [offset]);
-
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!dragRef.current || !svgRef.current) return;
-    const rect = svgRef.current.getBoundingClientRect();
-    const pxPerCandle = rect.width / visibleCount;
-    const deltaPx = e.clientX - dragRef.current.startX;
-    const deltaCandles = Math.round(deltaPx / pxPerCandle);
-    setOffset(clamp(dragRef.current.startOffset - deltaCandles, 0, maxOffset));
-  }, [visibleCount, maxOffset]);
-
-  const handleMouseUp = useCallback(() => { dragRef.current = null; }, []);
-
-  // Touch support
-  const touchRef = useRef<{ startX: number; startOffset: number } | null>(null);
-  const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    touchRef.current = { startX: e.touches[0].clientX, startOffset: offset };
-  }, [offset]);
-  const handleTouchMove = useCallback((e: React.TouchEvent) => {
-    if (!touchRef.current || !svgRef.current) return;
-    const rect = svgRef.current.getBoundingClientRect();
-    const pxPerCandle = rect.width / visibleCount;
-    const deltaPx = e.touches[0].clientX - touchRef.current.startX;
-    const deltaCandles = Math.round(deltaPx / pxPerCandle);
-    setOffset(clamp(touchRef.current.startOffset - deltaCandles, 0, maxOffset));
-  }, [visibleCount, maxOffset]);
-
-  if (visible.length < 3) return (
-    <div style={{ height: 300, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <p style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos — sincronizá primero</p>
-    </div>
-  );
-
-  const W = 600; const CH = 200; const VH = 44; const TH = CH + VH + 12;
-  const allHigh = Math.max(...visible.map(c => c.h));
-  const allLow  = Math.min(...visible.map(c => c.l));
-  const indPrices: number[] = [];
-  if (indicators && showIndicators) {
-    indPrices.push(indicators.vwap, indicators.vwapUpperBand2, indicators.vwapLowerBand2, indicators.bbUpper, indicators.bbLower);
-  }
-  const maxH  = Math.max(allHigh, ...indPrices.filter(Boolean));
-  const minL  = Math.min(allLow,  ...indPrices.filter(Boolean));
-  const range  = Math.max(maxH - minL, 1e-9);
-  const maxVol = Math.max(...visible.map(c => c.v), 1);
-  const slotW  = W / visible.length;
-  const candleW = Math.max(1.2, slotW * 0.65);
-  const sy = (v: number) => ((maxH - v) / range) * CH;
-  const sv = (v: number) => (v / maxVol) * VH;
-
-  const labels = [minL, minL + range * 0.25, minL + range * 0.5, minL + range * 0.75, maxH].map(v => ({
-    y: sy(v), label: v >= 1000 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(3),
-  }));
-
-  // Map events to visible window
-  const wyckoffVisible = wyckoff?.events.filter(e => e.candleIndex >= startIdx && e.candleIndex < startIdx + visibleCount)
-    .map(e => ({ ...e, visibleIdx: e.candleIndex - startIdx })) ?? [];
-  const climaxVisible = (wyckoff?.volumeClimaxIdx ?? [])
-    .filter(i => i >= startIdx && i < startIdx + visibleCount)
-    .map(i => i - startIdx);
-
-  // ── Wyckoff accumulation/distribution range shading ──────────────────────
-  // Solo pintamos el rango completo de acumulación o distribución
-  // detectando el span entre primer y último evento del ciclo activo
-  const wyckoffBias  = wyckoff?.bias ?? "neutral";
-  const isAccum      = wyckoffBias === "accumulation";
-  const isDist       = wyckoffBias === "distribution";
-  let rangeShadeX1   = -1; let rangeShadeX2 = -1;
-  if ((isAccum || isDist) && wyckoff && wyckoff.events.length >= 2) {
-    const eventsInView = wyckoff.events.filter(e =>
-      e.candleIndex >= startIdx && e.candleIndex < startIdx + visibleCount
-    );
-    if (eventsInView.length >= 1) {
-      const firstIdx = eventsInView[0].candleIndex - startIdx;
-      const lastIdx  = eventsInView[eventsInView.length - 1].candleIndex - startIdx;
-      rangeShadeX1   = firstIdx * slotW;
-      rangeShadeX2   = Math.min((lastIdx + 1) * slotW, W);
-    }
-  }
-  const rangeShadeColor = isAccum
-    ? "rgba(16,185,129,0.07)"   // verde — acumulación
-    : isDist
-    ? "rgba(239,68,68,0.07)"    // rojo — distribución
-    : "transparent";
-  const rangeShadeStroke = isAccum ? "rgba(16,185,129,0.25)" : "rgba(239,68,68,0.25)";
-
-  // Soporte/resistencia Wyckoff
-  const supportY = wyckoff?.supportZone ? [sy(wyckoff.supportZone[1]), sy(wyckoff.supportZone[0])] : null;
-  const resistY  = wyckoff?.resistanceZone ? [sy(wyckoff.resistanceZone[1]), sy(wyckoff.resistanceZone[0])] : null;
-
-  return (
-    <div style={{ position: "relative" }}>
-      {/* Controles zoom/pan */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 10.5, color: "var(--muted)" }}>
-          Scroll: zoom · Drag: pan · {visible.length} velas
-        </span>
-        <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
-          {[20, 40, 60, 100].map(n => (
-            <button key={n} onClick={() => { setVisibleCount(n); setOffset(0); }}
-              style={{ fontSize: 10, padding: "2px 7px", borderRadius: 5, cursor: "pointer",
-                border: `1px solid ${visibleCount === n ? "rgba(99,102,241,0.6)" : "rgba(255,255,255,0.1)"}`,
-                background: visibleCount === n ? "rgba(99,102,241,0.15)" : "transparent",
-                color: visibleCount === n ? "#a5b4fc" : "var(--muted)" }}>
-              {n}
-            </button>
-          ))}
-          <button onClick={() => { setVisibleCount(60); setOffset(0); }}
-            style={{ fontSize: 10, padding: "2px 7px", borderRadius: 5, cursor: "pointer",
-              border: "1px solid rgba(255,255,255,0.1)", background: "transparent", color: "var(--muted)" }}>
-            Reset
-          </button>
-        </div>
-      </div>
-
-      <svg ref={svgRef} viewBox={`0 0 ${W} ${TH}`} className="w-full overflow-visible"
-        style={{ height: 310, cursor: dragRef.current ? "grabbing" : "grab", userSelect: "none" }}
-        onWheel={handleWheel}
-        onMouseDown={handleMouseDown} onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
-        onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={() => { touchRef.current = null; }}>
-
-        {/* Grid */}
-        {[0.2, 0.4, 0.6, 0.8].map(f => (
-          <line key={f} x1={0} y1={CH * f} x2={W} y2={CH * f} stroke="rgba(255,255,255,0.04)" strokeWidth="0.5" />
-        ))}
-        {labels.map(({ y, label }) => (
-          <text key={label} x={W - 2} y={y + 3} textAnchor="end" fontSize="7.5"
-            fill="rgba(255,255,255,0.3)" fontFamily="'JetBrains Mono',monospace">{label}</text>
-        ))}
-
-        {/* ── Rango Wyckoff: solo acumulación (verde) o distribución (rojo) ── */}
-        {rangeShadeX1 >= 0 && (
-          <rect x={rangeShadeX1} y={0} width={Math.max(0, rangeShadeX2 - rangeShadeX1)} height={CH}
-            fill={rangeShadeColor} stroke={rangeShadeStroke} strokeWidth="0.6" strokeDasharray="4,3" />
-        )}
-        {/* Etiqueta del rango */}
-        {rangeShadeX1 >= 0 && (
-          <text x={rangeShadeX1 + 4} y={12} fontSize="8" fontWeight="700"
-            fill={isAccum ? "#10b981" : "#ef4444"} fontFamily="'DM Sans',sans-serif" opacity="0.9">
-            {isAccum ? "ACUMULACIÓN" : "DISTRIBUCIÓN"} F{wyckoff?.phase}
-          </text>
-        )}
-
-        {/* Soporte/resistencia Wyckoff (líneas de zona, sutiles) */}
-        {supportY && (
-          <rect x={0} y={supportY[0]} width={W} height={Math.max(1, supportY[1] - supportY[0])}
-            fill="rgba(16,185,129,0.05)" stroke="rgba(16,185,129,0.25)" strokeWidth="0.4" strokeDasharray="3,2" />
-        )}
-        {resistY && (
-          <rect x={0} y={resistY[0]} width={W} height={Math.max(1, resistY[1] - resistY[0])}
-            fill="rgba(239,68,68,0.05)" stroke="rgba(239,68,68,0.25)" strokeWidth="0.4" strokeDasharray="3,2" />
-        )}
-
-        {/* Indicator lines */}
-        {indicators && showIndicators && (() => {
-          const lineData = [
-            { val: indicators.vwap,           color: "#f59e0b",               width: 1.3 },
-            { val: indicators.vwapUpperBand1,  color: "rgba(245,158,11,0.45)", dash: "3,2" },
-            { val: indicators.vwapLowerBand1,  color: "rgba(245,158,11,0.45)", dash: "3,2" },
-            { val: indicators.vwapUpperBand2,  color: "rgba(245,158,11,0.22)", dash: "2,3" },
-            { val: indicators.vwapLowerBand2,  color: "rgba(245,158,11,0.22)", dash: "2,3" },
-            { val: indicators.bbUpper,         color: "rgba(99,102,241,0.55)", dash: "2,2" },
-            { val: indicators.bbMiddle,        color: "rgba(99,102,241,0.35)", dash: "3,2" },
-            { val: indicators.bbLower,         color: "rgba(99,102,241,0.55)", dash: "2,2" },
-          ];
-          return lineData.map(({ val, color, dash, width = 0.9 }) => val > 0 ? (
-            <line key={`${color}-${val}`} x1={0} y1={sy(val)} x2={W} y2={sy(val)}
-              stroke={color} strokeWidth={width} strokeDasharray={dash ?? ""} />
-          ) : null);
-        })()}
-
-        {/* Imbalance zones */}
-        {indicators?.imbalances.map((imb, i) => {
-          const vIdx = imb.idx - startIdx;
-          if (vIdx < 0 || vIdx >= visible.length) return null;
-          const cx = vIdx * slotW;
-          return (
-            <rect key={i} x={cx} y={0} width={slotW * 3} height={CH}
-              fill={imb.type === "bullish" ? "rgba(16,185,129,0.05)" : "rgba(239,68,68,0.05)"}
-              stroke={imb.type === "bullish" ? "rgba(16,185,129,0.18)" : "rgba(239,68,68,0.18)"}
-              strokeWidth="0.3" />
-          );
-        })}
-
-        {/* Volume separator */}
-        <line x1={0} y1={CH + 5} x2={W} y2={CH + 5} stroke="rgba(255,255,255,0.05)" strokeWidth="0.4" />
-
-        {/* Candles */}
-        {visible.map((c, i) => {
-          const cx = i * slotW + slotW / 2;
-          const bull = c.c >= c.o;
-          const col = bull ? "#10b981" : "#ef4444";
-          const bt = sy(Math.max(c.o, c.c));
-          const bh = Math.max(1, sy(Math.min(c.o, c.c)) - bt);
-          const isClimax = climaxVisible.includes(i);
-          return (
-            <g key={i}>
-              {isClimax && <rect x={cx - slotW / 2} y={0} width={slotW} height={CH} fill="rgba(245,158,11,0.07)" />}
-              <line x1={cx} y1={sy(c.h)} x2={cx} y2={sy(c.l)} stroke={col} strokeWidth="0.9" />
-              <rect x={cx - candleW / 2} y={bt} width={candleW} height={bh} fill={col} opacity={0.88} rx={0.3} />
-              {c.v > 0 && <rect x={cx - candleW / 2} y={CH + 8 + VH - sv(c.v)} width={candleW} height={sv(c.v)} fill={col} opacity={0.28} rx={0.2} />}
-            </g>
-          );
-        })}
-
-        {/* Wyckoff event labels */}
-        {wyckoffVisible.map((ev, i) => {
-          const cx = ev.visibleIdx * slotW + slotW / 2;
-          const isTop = ["BC", "AR", "UTAD", "SOW", "LPSY"].includes(ev.label);
-          const y = isTop
-            ? sy(visible[ev.visibleIdx]?.h ?? ev.price) - 7
-            : sy(visible[ev.visibleIdx]?.l ?? ev.price) + 11;
-          return (
-            <g key={i}>
-              <rect x={cx - 11} y={y - 9} width={22} height={11} rx={2.5}
-                fill={ev.color} opacity={0.92} />
-              <text x={cx} y={y} textAnchor="middle" fontSize="6.5" fontWeight="700"
-                fill="#fff" fontFamily="'DM Sans',sans-serif">{ev.label}</text>
-            </g>
-          );
-        })}
-      </svg>
-    </div>
-  );
-}
-
-
-// ─── Tooltip técnico ─────────────────────────────────────────────────────────
-const GLOSSARY: Record<string, string> = {
-  "MTF":          "Multi-Timeframe: analiza la tendencia en 3 temporalidades (corto, medio, largo plazo) para confirmar la dirección antes de entrar.",
-  "HTF":          "Higher Time Frame: la temporalidad mayor (EMA20/50). Define la tendencia principal. Si no está alineada, no se opera.",
-  "LTF":          "Lower Time Frame: temporalidad media (EMA10/20). Confirma que la estructura va en la misma dirección que el HTF.",
-  "Exec":         "Execution TF: momentum de las últimas 8 velas de 1m. Confirma que el precio se está moviendo ahora en la dirección correcta.",
-  "RSI":          "Relative Strength Index: oscilador de momentum 0-100. En crypto: sobreventa <20, sobrecompra >80. Mide la velocidad del movimiento.",
-  "Estocástico":  "Oscilador %K/%D que mide dónde está el precio dentro de su rango reciente. En crypto: sobreventa <20, sobrecompra >80. Ideal para scalping.",
-  "VWAP":         "Volume Weighted Average Price: precio promedio ponderado por volumen. Las instituciones lo usan como referencia. Por encima = sesgo alcista.",
-  "Wyckoff":      "Método de análisis de Richard Wyckoff: identifica ciclos de acumulación (manos fuertes comprando) y distribución (vendiendo) antes de grandes movimientos.",
-  "Spring":       "Evento Wyckoff: caída falsa por debajo del soporte con recuperación rápida. Señal de que las manos fuertes absorbieron la venta. Alta probabilidad alcista.",
-  "UTAD":         "Upthrust After Distribution: falso quiebre sobre resistencia en distribución. Las manos fuertes venden a los compradores tardíos. Señal bajista.",
-  "SOS":          "Sign of Strength: expansión de rango alcista con alto volumen. Confirma que la acumulación terminó y el precio está listo para subir.",
-  "SOW":          "Sign of Weakness: expansión bajista con volumen. Confirma que la distribución terminó y el precio está listo para caer.",
-  "LPS":          "Last Point of Support: último pullback tras el SOS con bajo volumen. Punto de entrada de alta calidad en tendencia alcista.",
-  "SC":           "Selling Climax: venta masiva de pánico con volumen extremo. Marca el fondo potencial de una corrección.",
-  "BC":           "Buying Climax: compra masiva con volumen extremo en máximos. Marca el techo potencial antes de distribución.",
-  "AR":           "Automatic Rally: rebote automático tras el SC. Define el techo del rango de acumulación.",
-  "BB Squeeze":   "Bollinger Bands Squeeze: las bandas se comprimen dentro del canal Keltner. Indica baja volatilidad antes de una expansión fuerte.",
-  "Vol Delta":    "Volume Delta: diferencia entre volumen comprador y vendedor estimado. Positivo = presión de compra dominante.",
-  "ATR":          "Average True Range: medida de volatilidad promedio. Se usa para calcular stops y take profits proporcionales al movimiento real del mercado.",
-  "Confianza":    "Score interno 0-100% que refleja cuántos factores técnicos confluyen en la misma dirección. Por encima del umbral configurado, la IA evalúa si abrir.",
-  "Win Rate":     "Porcentaje de trades ganadores sobre el total. Por sí solo no indica rentabilidad — importa también el ratio ganancia/pérdida.",
-  "Sharpe":       "Ratio de Sharpe: retorno ajustado por riesgo. >1 es aceptable, >2 es excelente. Mide si el rendimiento justifica la volatilidad asumida.",
-  "Profit Factor":"Ratio entre ganancias brutas y pérdidas brutas. >1.5 es saludable. >2 es muy bueno.",
-  "Drawdown":     "Caída máxima desde un pico de equity. Mide el peor momento histórico de la curva de capital.",
-  "Expectancy":   "Ganancia promedio esperada por trade considerando win rate y ratio de ganancias/pérdidas.",
-  "Imbalance":    "Zona donde el precio se movió con impulso y poco retroceso. Las instituciones suelen regresar a estos niveles para completar órdenes.",
-  "Fase A":       "Wyckoff Fase A: parada de la tendencia bajista previa. Se confirma con SC + AR.",
-  "Fase B":       "Wyckoff Fase B: construcción del rango. Precio oscila entre soporte y resistencia mientras las manos fuertes acumulan.",
-  "Fase C":       "Wyckoff Fase C: test final (Spring en acumulación, UTAD en distribución). El momento más engañoso — parece que el precio cae/sube más.",
-  "Fase D":       "Wyckoff Fase D: inicio del movimiento tendencial. SOS/SOW confirman que el rango terminó.",
-  "Fase E":       "Wyckoff Fase E: tendencia establecida fuera del rango. LPS en acumulación son puntos de entrada.",
-  "Acumulación":  "Proceso donde manos fuertes (instituciones) compran gradualmente sin que el precio suba demasiado. Precede a movimientos alcistas tendenciales.",
-  "Distribución": "Proceso donde manos fuertes venden gradualmente en un rango. Precede a caídas tendenciales.",
-  "Scalping":     "Estrategia de trading de muy corto plazo (segundos a minutos). Busca pequeños movimientos frecuentes con stops ajustados.",
-  "Intradía":     "Estrategia que abre y cierra posiciones dentro del mismo día. Usa timeframes más amplios que scalping.",
-  "RR":           "Risk/Reward ratio: relación entre la ganancia potencial y el riesgo asumido. 2:1 significa que se gana el doble de lo que se arriesga.",
-  "Trailing Stop":"Stop loss que sigue al precio cuando va a favor, fijando ganancias. Se mueve solo en dirección favorable, nunca en contra.",
-  "Leverage":     "Apalancamiento: multiplicador de exposición. 500× significa que con $1 se controla $500 de activo. Amplifica ganancias Y pérdidas.",
-};
-
-function TechTip({ term, children }: { term: string; children?: React.ReactNode }) {
-  const [show, setShow] = useState(false);
-  const [pos, setPos] = useState({ x: 0, y: 0 });
-  const def = GLOSSARY[term];
-  if (!def) return <>{children ?? term}</>;
-
-  const handleEnter = (e: React.MouseEvent) => {
-    const rect = (e.target as HTMLElement).getBoundingClientRect();
-    setPos({ x: rect.left, y: rect.bottom + window.scrollY + 4 });
-    setShow(true);
-  };
-
-  return (
-    <span style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 2 }}>
-      {children ?? term}
-      <span
-        onMouseEnter={handleEnter}
-        onMouseLeave={() => setShow(false)}
-        style={{
-          display: "inline-flex", alignItems: "center", justifyContent: "center",
-          width: 13, height: 13, borderRadius: "50%",
-          background: "rgba(99,102,241,0.25)", border: "1px solid rgba(99,102,241,0.5)",
-          color: "#a5b4fc", fontSize: 8, fontWeight: 700, cursor: "help",
-          flexShrink: 0, lineHeight: 1,
-        }}>?</span>
-      {show && (
-        <span style={{
-          position: "fixed", left: Math.min(pos.x, window.innerWidth - 260), top: pos.y,
-          width: 240, background: "rgba(12,13,22,0.97)", border: "1px solid rgba(99,102,241,0.35)",
-          borderRadius: 8, padding: "8px 10px", fontSize: 11.5, color: "#e2e8f0",
-          lineHeight: 1.5, zIndex: 9999, pointerEvents: "none",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
-        }}>
-          <strong style={{ color: "#a5b4fc", display: "block", marginBottom: 3 }}>{term}</strong>
-          {def}
-        </span>
-      )}
-    </span>
-  );
-}
-
-// ─── Indicator Panel ──────────────────────────────────────────────────────────
-
-// ─── Order Flow Panel (solo scalping) ────────────────────────────────────────
-function OrderFlowPanel({ of: ofData, price }: { of: OrderFlowScore; price: number }) {
-  const ctrlColor = ofData.control === "bulls" ? "#10b981" : ofData.control === "bears" ? "#ef4444" : "#f59e0b";
-  const cvd = ofData.cvd;
-  const prof = ofData.profile;
-  const dp = (v: number) => v > 1000 ? 1 : v > 10 ? 2 : 4;
-
-  // Mini barra horizontal para el score de control
-  const barW = Math.abs(ofData.controlScore);
-  const barDir = ofData.controlScore >= 0 ? "right" : "left";
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {/* ── Control de mercado — gauge principal ── */}
-      <div className="card" style={{ padding: "12px 14px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-          <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)" }}>Control de mercado</span>
-          <span style={{ fontSize: 11, color: "var(--muted)" }}>{ofData.setupStrength > 0.6 ? "🔥 Setup fuerte" : ofData.setupStrength > 0.3 ? "⚡ Setup moderado" : "😐 Indeciso"}</span>
-        </div>
-        {/* Gauge -100 → 0 → +100 */}
-        <div style={{ position: "relative", height: 24, borderRadius: 12, background: "rgba(255,255,255,0.06)", overflow: "hidden", marginBottom: 6 }}>
-          {/* Fondo dividido */}
-          <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "rgba(255,255,255,0.12)" }} />
-          {/* Barra de control */}
-          <div style={{
-            position: "absolute",
-            top: 4, bottom: 4, borderRadius: 8,
-            left:  barDir === "right" ? "50%" : `${50 - barW/2}%`,
-            width: `${barW / 2}%`,
-            background: ofData.controlScore >= 0
-              ? "linear-gradient(90deg, rgba(16,185,129,0.3), #10b981)"
-              : "linear-gradient(90deg, #ef4444, rgba(239,68,68,0.3))",
-            transition: "width 0.6s ease, left 0.6s ease",
-          }} />
-          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <span style={{ fontSize: 13, fontWeight: 800, color: ctrlColor, textShadow: "0 1px 4px rgba(0,0,0,0.8)" }}>
-              {ofData.control === "bulls" ? "🐂 TOROS" : ofData.control === "bears" ? "🐻 OSOS" : "⚔ DISPUTADO"} {ofData.controlScore > 0 ? "+" : ""}{ofData.controlScore.toFixed(0)}
-            </span>
-          </div>
-        </div>
-        {/* Sub-scores */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 5 }}>
-          {[
-            { label: "CVD", val: ofData.cvdScore },
-            { label: "Footprint", val: ofData.footprintScore },
-            { label: "Perfil Vol", val: ofData.profileScore },
-            { label: "Absorción", val: ofData.absorptionScore },
-          ].map(({ label, val }) => {
-            const pct = clamp(Math.abs(val), 0, 100);
-            const col = val > 0 ? "#10b981" : val < 0 ? "#ef4444" : "var(--muted)";
-            return (
-              <div key={label} style={{ textAlign: "center", background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "6px 4px" }}>
-                <div style={{ fontSize: 9.5, color: "var(--muted)", marginBottom: 3, textTransform: "uppercase" }}>{label}</div>
-                <div style={{ height: 3, borderRadius: 2, background: "rgba(255,255,255,0.06)", marginBottom: 3 }}>
-                  <div style={{ height: "100%", width: `${pct}%`, background: col, borderRadius: 2 }} />
-                </div>
-                <div style={{ fontSize: 11, fontWeight: 700, color: col }}>{val > 0 ? "+" : ""}{val.toFixed(0)}</div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ── CVD multi-ventana ── */}
-      <div className="card" style={{ padding: "10px 14px" }}>
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)", marginBottom: 8 }}><Tip label="CVD Acumulado" text="Cumulative Volume Delta: diferencia acumulada entre volumen comprador y vendedor. Positivo = más compradores. Ayuda a detectar divergencias." /></div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
-          {[
-            { label: "CVD 50v", val: cvd.cvd50, trend: cvd.slope50 },
-            { label: "CVD 20v", val: cvd.cvd20, trend: null },
-            { label: "CVD 10v", val: cvd.cvd10, trend: cvd.slope10 },
-            { label: "CVD 5v",  val: cvd.cvd5,  trend: null },
-          ].map(({ label, val, trend }) => {
-            const col = val > 0 ? "#10b981" : val < 0 ? "#ef4444" : "var(--muted)";
-            const arrow = trend !== null ? (trend > 0 ? " ↑" : " ↓") : "";
-            return (
-              <div key={label} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "6px 8px", border: `1px solid ${col}22` }}>
-                <div style={{ fontSize: 9.5, color: "var(--muted)", marginBottom: 2 }}>{label}</div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: col, fontFamily: "'JetBrains Mono',monospace" }}>
-                  {val > 0 ? "+" : ""}{val.toFixed(1)}{arrow}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        {cvd.divergence && (
-          <div style={{ marginTop: 8, fontSize: 11, color: "#f59e0b", background: "rgba(245,158,11,0.1)", borderRadius: 6, padding: "5px 8px" }}>
-            ⚠ Divergencia CVD-precio — el precio se mueve sin respaldo de flujo real
-          </div>
-        )}
-        <div style={{ marginTop: 6, fontSize: 11, color: "var(--muted)" }}>
-          Tendencia: <span style={{ color: cvd.trend === "bullish" ? "#10b981" : cvd.trend === "bearish" ? "#ef4444" : "var(--muted)", fontWeight: 600 }}>
-            {cvd.trend === "bullish" ? "Acumulando ↑" : cvd.trend === "bearish" ? "Distribuyendo ↓" : "Lateral"}
-          </span>
-        </div>
-      </div>
-
-      {/* ── Volume Profile ── */}
-      <div className="card" style={{ padding: "10px 14px" }}>
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)", marginBottom: 8 }}>Perfil de Volumen</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
-          {[
-            { label: "VAH", val: prof.vah, color: "#10b981", note: price > prof.vah ? "← precio aquí" : "" },
-            { label: "POC", val: prof.poc, color: "#f59e0b", note: Math.abs(price - prof.poc) < (prof.vah - prof.val) * 0.15 ? "← precio aquí" : "" },
-            { label: "VAL", val: prof.val, color: "#ef4444", note: price < prof.val ? "← precio aquí" : "" },
-          ].map(({ label, val, color, note }) => (
-            <div key={label} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "6px 8px", border: `1px solid ${color}22` }}>
-              <div style={{ fontSize: 9.5, color: "var(--muted)", marginBottom: 2 }}>{label}</div>
-              <div style={{ fontSize: 13, fontWeight: 700, color, fontFamily: "'JetBrains Mono',monospace" }}>{val.toFixed(dp(val))}</div>
-              {note && <div style={{ fontSize: 9, color }}>{note}</div>}
-            </div>
-          ))}
-        </div>
-        {/* Posición del precio en el value area */}
-        <div style={{ fontSize: 11, color: "var(--muted)" }}>
-          Precio: <span style={{ fontWeight: 700, color:
-            price > prof.vah ? "#10b981" :
-            price < prof.val ? "#ef4444" :
-            price > prof.poc ? "#10b981" : "#f59e0b" }}>
-            {price > prof.vah ? "Sobre VAH — aceptación alcista" :
-             price < prof.val ? "Bajo VAL — aceptación bajista" :
-             price > prof.poc ? "Entre POC y VAH — toros" :
-             "Entre VAL y POC — osos"}
-          </span>
-        </div>
-        {(prof.hvn.length > 0 || prof.lvn.length > 0) && (
-          <div style={{ marginTop: 6, fontSize: 10, color: "var(--muted)" }}>
-            {prof.hvn.length > 0 && <>HVN (soporte/resist.): {prof.hvn.slice(0,3).map(p => p.toFixed(dp(p))).join(", ")} </>}
-            {prof.lvn.length > 0 && <>| LVN (vacíos): {prof.lvn.slice(0,3).map(p => p.toFixed(dp(p))).join(", ")}</>}
-          </div>
-        )}
-      </div>
-
-      {/* ── Footprint últimas 6 velas ── */}
-      <div className="card" style={{ padding: "10px 14px" }}>
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--muted)", marginBottom: 8 }}>Footprint (últimas 6 velas)</div>
-        <div style={{ display: "flex", gap: 4, alignItems: "flex-end" }}>
-          {ofData.footprint.slice(-6).map((c, i) => {
-            const isUp  = c.c >= c.o;
-            const dCol  = c.delta > 0 ? "#10b981" : "#ef4444";
-            const hPct  = Math.min(Math.abs(c.deltaPct) * 1.2, 100);
-            return (
-              <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-                {/* Vela */}
-                <div style={{ width: "100%", height: 22, borderRadius: 3, background: isUp ? "rgba(16,185,129,0.25)" : "rgba(239,68,68,0.25)", border: `1px solid ${isUp ? "#10b981" : "#ef4444"}44`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <span style={{ fontSize: 9, color: isUp ? "#10b981" : "#ef4444", fontWeight: 700 }}>{isUp ? "▲" : "▼"}</span>
-                </div>
-                {/* Delta bar */}
-                <div style={{ width: "100%", height: 20, borderRadius: 3, background: "rgba(255,255,255,0.04)", overflow: "hidden", position: "relative" }}>
-                  <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: `${hPct}%`, background: dCol, opacity: 0.7, borderRadius: 2 }} />
-                </div>
-                {/* Delta valor */}
-                <div style={{ fontSize: 9, color: dCol, fontFamily: "'JetBrains Mono',monospace" }}>
-                  {c.delta > 0 ? "+" : ""}{c.deltaPct.toFixed(0)}%
-                </div>
-                {/* Absorción */}
-                {c.absorption !== "none" && (
-                  <div style={{ fontSize: 8, color: "#f59e0b" }}>
-                    {c.absorption === "buy" ? "🧲B" : "🧲S"}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-        <div style={{ marginTop: 6, fontSize: 10, color: "var(--muted)" }}>
-          Iniciativa: {ofData.footprint.slice(-6).map(c => c.initiative === "buy" ? "🟢" : c.initiative === "sell" ? "🔴" : "⚪").join(" ")}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function IndicatorPanel({ ind, mode }: { ind: Indicators; mode: Mode }) {
-  const d = (v: number) => v > 100 ? 1 : v > 1 ? 3 : 4;
-  const rsiColor = ind.rsi > 70 ? "#ef4444" : ind.rsi < 30 ? "#10b981" : "#f59e0b";
-  const stochColor = ind.stochK > 80 ? "#ef4444" : ind.stochK < 20 ? "#10b981" : "var(--text)";
-  const divColor = ind.rsiDivergence === "bullish" ? "#10b981" : ind.rsiDivergence === "bearish" ? "#ef4444" : "var(--muted)";
-  const deltaColor = ind.volumeDeltaPct > 10 ? "#10b981" : ind.volumeDeltaPct < -10 ? "#ef4444" : "var(--muted)";
-  const maAligned = ind.ma10 > ind.ma20 && ind.ma20 > ind.ma50;
-  const maAlignedShort = ind.ma10 < ind.ma20 && ind.ma20 < ind.ma50;
-  const maAlignColor = maAligned ? "#10b981" : maAlignedShort ? "#ef4444" : "var(--muted)";
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-        {mode === "scalping" ? (
-          <div className="metric">
-            <span className="label" style={{ fontSize: 11, fontWeight: 600 }}><TechTip term="Estocástico">Estocástico %K/%D</TechTip></span>
-            <strong style={{ color: stochColor }}>{ind.stochK.toFixed(1)} / {ind.stochD.toFixed(1)}</strong>
-            <span style={{ fontSize: 12, color: stochColor, marginTop: 3, display: "block" }}>
-              {ind.stochK < 20 ? "⬇ Sobreventa (<20)" : ind.stochK > 80 ? "⬆ Sobrecompra (>80)" : ind.stochK > ind.stochD ? "K>D alcista" : "K<D bajista"}
-            </span>
-          </div>
-        ) : (
-          <div className="metric">
-            <span className="label" style={{ fontSize: 11, fontWeight: 600 }}><TechTip term="RSI">RSI 14</TechTip> <span style={{fontSize:10,color:"var(--muted)"}}>(OS&lt;20/OB&gt;80)</span></span>
-            <strong style={{ color: rsiColor }}>{ind.rsi.toFixed(1)}</strong>
-            <span style={{ fontSize: 12, color: divColor, marginTop: 3, display: "block" }}>
-              {ind.rsi < 20 ? "Sobreventa extrema" : ind.rsi > 80 ? "Sobrecompra extrema" : ind.rsiDivergence !== "none" ? (ind.rsiDivergence === "bullish" ? "↗ Div. alcista" : "↘ Div. bajista") : "Neutral"}
-            </span>
-          </div>
-        )}
-        {mode === "scalping" ? (
-          <div className="metric">
-            <span className="label" style={{ fontSize: 11, fontWeight: 600 }}>MA5/MA10 scalp</span>
-            <strong style={{ color: ind.ma5 > ind.ma10 ? "#10b981" : "#ef4444", fontSize: 12 }}>
-              {ind.ma5 > ind.ma10 ? "MA5 > MA10 ↑" : "MA5 < MA10 ↓"}
-            </strong>
-            <span style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, display: "block" }}>
-              {ind.ma5.toFixed(d(ind.ma5))} / {ind.ma10.toFixed(d(ind.ma10))}
-            </span>
-          </div>
-        ) : (
-          <div className="metric">
-            <span className="label" style={{ fontSize: 11, fontWeight: 600 }}>MAs Tendencia <TechTip term="HTF">?</TechTip></span>
-            <strong style={{ color: maAlignColor, fontSize: 11 }}>
-              {maAligned ? "Alcista ↑" : maAlignedShort ? "Bajista ↓" : "Sin alineación"}
-            </strong>
-            <span style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, display: "block" }}>
-              {ind.ma10.toFixed(d(ind.ma10))} / {ind.ma20.toFixed(d(ind.ma20))} / {ind.ma50.toFixed(d(ind.ma50))}
-            </span>
-          </div>
-        )}
-        <div className="metric">
-          <span className="label" style={{ fontSize: 11, fontWeight: 600 }}><TechTip term="VWAP">VWAP</TechTip></span>
-          <strong style={{ fontSize: 12 }}>{ind.vwap.toFixed(d(ind.vwap))}</strong>
-          <span style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, display: "block" }}>
-            ±1σ {ind.vwapUpperBand1.toFixed(d(ind.vwap))} / {ind.vwapLowerBand1.toFixed(d(ind.vwap))}
-          </span>
-        </div>
-        <div className="metric">
-          <span className="label" style={{ fontSize: 11, fontWeight: 600 }}><TechTip term="BB Squeeze">BB Squeeze</TechTip> {ind.bbSqueeze ? "🔴" : ""}</span>
-          <strong style={{ color: ind.bbSqueeze ? "#f59e0b" : "var(--text)", fontSize: 12 }}>
-            {ind.bbSqueeze ? "Expansión próxima" : `W ${(ind.bbUpper - ind.bbLower).toFixed(d(ind.bbUpper))}`}
-          </strong>
-          <span style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, display: "block" }}>
-            {ind.bbUpper.toFixed(d(ind.bbUpper))} / {ind.bbLower.toFixed(d(ind.bbLower))}
-          </span>
-        </div>
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: mode === "scalping" ? "1fr 1fr" : "1fr 1fr 1fr", gap: 8 }}>
-        <div className="metric">
-          <span className="label" style={{ fontSize: 11, fontWeight: 600 }}><TechTip term="Vol Delta">Vol. Delta</TechTip></span>
-          <strong style={{ color: deltaColor }}>{ind.volumeDeltaPct > 0 ? "+" : ""}{ind.volumeDeltaPct.toFixed(1)}%</strong>
-          <span style={{ fontSize: 12, color: deltaColor, marginTop: 3, display: "block" }}>
-            {ind.volumeDeltaPct > 15 ? "Compradores fuertes" : ind.volumeDeltaPct < -15 ? "Vendedores fuertes" : ind.volumeDeltaPct > 5 ? "Sesgo comprador" : ind.volumeDeltaPct < -5 ? "Sesgo vendedor" : "Equilibrado"}
-          </span>
-        </div>
-        {mode === "scalping" ? (
-          <div className="metric">
-            <span className="label" style={{ fontSize: 11, fontWeight: 600 }}>RSI (referencia)</span>
-            <strong style={{ color: rsiColor }}>{ind.rsi.toFixed(1)}</strong>
-            <span style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, display: "block" }}>OS &lt;20 / OB &gt;80</span>
-          </div>
-        ) : (<>
-          <div className="metric">
-            <span className="label" style={{ fontSize: 11, fontWeight: 600 }}><TechTip term="Estocástico">Estocástico</TechTip></span>
-            <strong style={{ color: stochColor }}>{ind.stochK.toFixed(1)} / {ind.stochD.toFixed(1)}</strong>
-            <span style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, display: "block" }}>K / D</span>
-          </div>
-          <div className="metric">
-            <span className="label" style={{ fontSize: 11, fontWeight: 600 }}><TechTip term="RSI">RSI</TechTip> div.</span>
-            <strong style={{ fontSize: 12, color: divColor }}>{ind.rsiDivergence === "bullish" ? "↗ Alcista" : ind.rsiDivergence === "bearish" ? "↘ Bajista" : "Ninguna"}</strong>
-          </div>
-        </>)}
-      </div>
-    </div>
-  );
-}
-
-// ─── Wyckoff Summary Panel ────────────────────────────────────────────────────
-function WyckoffPanel({ wyckoff }: { wyckoff: WyckoffAnalysis }) {
-  const biasColor = wyckoff.bias === "accumulation" ? "#10b981" : wyckoff.bias === "distribution" ? "#ef4444" : "#6b7280";
-  const phaseBg = wyckoff.phase === "unknown" ? "rgba(107,114,128,0.08)" : wyckoff.bias === "accumulation" ? "rgba(16,185,129,0.06)" : "rgba(239,68,68,0.06)";
-
-  return (
-    <div style={{ borderRadius: 10, border: `1px solid ${biasColor}25`, background: phaseBg, padding: "10px 12px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-        <span style={{ fontSize: 11, fontWeight: 700, color: biasColor }}>
-          {wyckoff.bias === "accumulation" ? "🟢 ACUMULACIÓN" : wyckoff.bias === "distribution" ? "🔴 DISTRIBUCIÓN" : "⚪ NEUTRAL"}
-        </span>
-        {wyckoff.phase !== "unknown" && (
-          <span style={{ fontSize: 10, padding: "1px 7px", borderRadius: 12, background: `${biasColor}20`, color: biasColor, fontWeight: 700 }}>
-            Fase {wyckoff.phase}
-          </span>
-        )}
-        <div style={{ display: "flex", gap: 4, marginLeft: "auto", flexWrap: "wrap" }}>
-          {wyckoff.events.slice(-5).map((ev, i) => (
-            <span key={i} style={{ fontSize: 11, padding: "1px 5px", borderRadius: 4, background: `${ev.color}20`, color: ev.color, fontWeight: 700, border: `1px solid ${ev.color}30` }}>{ev.label}</span>
-          ))}
-        </div>
-      </div>
-      <p style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.5 }}>{wyckoff.narrative}</p>
-      {wyckoff.supportZone && (
-        <p style={{ fontSize: 10, color: "#10b981", marginTop: 4 }}>
-          Soporte Wyckoff: {wyckoff.supportZone[0].toFixed(2)} – {wyckoff.supportZone[1].toFixed(2)}
-        </p>
-      )}
-      {wyckoff.resistanceZone && (
-        <p style={{ fontSize: 10, color: "#ef4444", marginTop: 2 }}>
-          Resistencia Wyckoff: {wyckoff.resistanceZone[0].toFixed(2)} – {wyckoff.resistanceZone[1].toFixed(2)}
-        </p>
-      )}
-    </div>
-  );
-}
-
-// ─── Toast ────────────────────────────────────────────────────────────────────
-function ToastList({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: number) => void }) {
-  const colors: Record<Toast["type"], string> = { success: "#10b981", warning: "#f59e0b", error: "#ef4444", info: "#3b82f6" };
-  return (
-    <div style={{ position: "fixed", top: 16, right: 16, zIndex: 9999, display: "flex", flexDirection: "column", gap: 8, maxWidth: 320, pointerEvents: "none" }}>
-      {toasts.map(t => (
-        <div key={t.id} onClick={() => onRemove(t.id)}
-          style={{ background: colors[t.type], color: "#fff", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, boxShadow: "0 8px 24px rgba(0,0,0,0.4)", display: "flex", gap: 8, pointerEvents: "auto", cursor: "pointer", animation: "slideIn 0.2s ease" }}>
-          <span style={{ flex: 1 }}>{t.msg}</span>
-          <span style={{ opacity: 0.7 }}>✕</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ─── Equity Curve ─────────────────────────────────────────────────────────────
-function EquityCurve({ trades, height = 80 }: { trades: ClosedTrade[]; height?: number }) {
-  const points = useMemo(() => {
-    let r = 100; const arr = [r];
-    [...trades].reverse().forEach(t => { r += t.pnl; arr.push(r); });
-    return arr;
-  }, [trades]);
-  if (points.length < 2) return <div style={{ height, display: "flex", alignItems: "center", justifyContent: "center" }}><p style={{ color: "var(--muted)", fontSize: 12 }}>Sin datos</p></div>;
-  const min = Math.min(...points); const max = Math.max(...points);
-  const range = Math.max(max - min, 0.01);
-  const sy = (v: number) => 100 - ((v - min) / range) * 100;
-  const pts = points.map((v, i) => `${(i / (points.length - 1)) * 100},${sy(v)}`).join(" ");
-  const color = points[points.length - 1] >= 100 ? "#10b981" : "#ef4444";
-  return (
-    <div style={{ borderRadius: 10, background: "rgba(255,255,255,0.03)", padding: "8px 4px 4px" }}>
-      <p style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.12em", color: "var(--muted)", marginBottom: 4, paddingLeft: 4 }}>Curva de equity</p>
-      <svg viewBox="0 0 100 60" className="w-full overflow-visible" style={{ height }}>
-        <defs><linearGradient id="eqFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity="0.22" /><stop offset="100%" stopColor={color} stopOpacity="0" /></linearGradient></defs>
-        <polyline fill="url(#eqFill)" stroke="none" points={`0,100 ${pts} 100,100`} />
-        <polyline fill="none" stroke={color} strokeWidth="1.4" strokeLinejoin="round" points={pts} />
-        <text x="0" y="58" fontSize="5" fill="rgba(255,255,255,0.3)" fontFamily="'JetBrains Mono',monospace">${points[0].toFixed(0)}</text>
-        <text x="100" y="58" fontSize="5" textAnchor="end" fill={color} fontFamily="'JetBrains Mono',monospace">${points[points.length - 1].toFixed(2)}</text>
-      </svg>
-    </div>
-  );
-}
-
-// ─── Live Position Card ───────────────────────────────────────────────────────
-function LivePositionCard({ position, prices, spreadByAsset, now, onClose }: {
-  position: Position; prices: Record<Asset, number>; spreadByAsset: Record<Asset, number>;
-  now: number; onClose: (pos: Position) => void;
-}) {
-  const mark = prices[position.signal.asset];
-  const spread = spreadByAsset[position.signal.asset];
-  const isLong = position.signal.direction === "LONG";
-  const eff = isLong ? mark - spread / 2 : mark + spread / 2;
-  const pnl = (isLong ? eff - position.signal.entry : position.signal.entry - eff) * position.size;
-  const totalRange = Math.abs(position.signal.takeProfit - position.signal.entry);
-  const progress = clamp((isLong ? eff - position.signal.entry : position.signal.entry - eff) / totalRange * 100, 0, 100);
-  const isOld = (now - new Date(position.openedAt).getTime()) > 30 * 60 * 1000;
-  return (
-    <div className="live-card" style={{ borderLeft: `3px solid ${isLong ? "#10b981" : "#ef4444"}` }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: isLong ? "#10b981" : "#ef4444", animation: "pulse 1.5s infinite", display: "inline-block" }} />
-          <span style={{ fontWeight: 700, fontSize: 14 }}>{position.signal.asset}</span>
-          <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 6, background: isLong ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)", color: isLong ? "#10b981" : "#ef4444" }}>{position.signal.direction}</span>
-          <span style={{ fontSize: 10, color: "var(--muted)", background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 5 }}>{position.signal.mode === "scalping" ? "Scalp" : "Intradía"}</span>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 11, color: isOld ? "#f59e0b" : "var(--muted)" }}>⏱ {formatDuration(position.openedAt)}</span>
-          <span style={{ fontWeight: 700, fontSize: 15, color: pnl >= 0 ? "#10b981" : "#ef4444" }}>{pnl >= 0 ? "+" : ""}{money(pnl)}</span>
-          <button onClick={() => onClose(position)} style={{ fontSize: 11, padding: "3px 8px", borderRadius: 6, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.1)", color: "#ef4444", cursor: "pointer", fontWeight: 600 }}>Cerrar</button>
-        </div>
-      </div>
-      <div>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3, fontSize: 10, color: "var(--muted)" }}>
-          <span>SL <Tip text="Stop Loss: precio al que se cierra la operación con pérdida limitada." /> {position.signal.stopLoss.toFixed(2)}</span>
-          <span>Entrada {position.signal.entry.toFixed(2)}</span>
-          <span>TP <Tip text="Take Profit: precio objetivo donde se toma la ganancia." /> {position.signal.takeProfit.toFixed(2)}</span>
-        </div>
-        <div style={{ height: 5, borderRadius: 3, background: "rgba(255,255,255,0.07)", overflow: "hidden" }}>
-          <div style={{ height: "100%", width: `${Math.max(0, progress)}%`, background: progress > 70 ? "#10b981" : progress > 30 ? "#f59e0b" : "#ef4444", transition: "width 0.5s ease" }} />
-        </div>
-      </div>
-      <div style={{ display: "flex", gap: 8, fontSize: 10, color: "var(--muted)", marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
-        {/* Confianza — prominente con color */}
-        <span style={{
-          padding: "2px 8px", borderRadius: 5, fontWeight: 800, fontSize: 11,
-          background: position.signal.confidence >= 70 ? "rgba(16,185,129,0.15)" : position.signal.confidence >= 58 ? "rgba(245,158,11,0.15)" : "rgba(239,68,68,0.12)",
-          color: position.signal.confidence >= 70 ? "#10b981" : position.signal.confidence >= 58 ? "#f59e0b" : "#ef4444",
-          border: `1px solid ${position.signal.confidence >= 70 ? "rgba(16,185,129,0.3)" : position.signal.confidence >= 58 ? "rgba(245,158,11,0.3)" : "rgba(239,68,68,0.2)"}`,
-        }}>
-          {position.signal.confidence.toFixed(0)}% conf <Tip text="Confianza calculada por el motor (50-96%). Por encima del piso configurado = abre la operación." />
-        </span>
-        {/* Lotaje */}
-        <span style={{ padding: "2px 7px", borderRadius: 5, background: "rgba(255,255,255,0.05)", fontWeight: 700 }}>
-          {position.size.toFixed(3)} lotes
-        </span>
-        {/* Margen */}
-        <span>Margen: {money(position.marginUsed)}</span>
-        {/* Modo */}
-        <span style={{ padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 700,
-          background: position.signal.mode === "scalping" ? "rgba(99,102,241,0.2)" : "rgba(245,158,11,0.2)",
-          color: position.signal.mode === "scalping" ? "#a5b4fc" : "#f59e0b" }}>
-          {position.signal.mode === "scalping" ? "SCALP" : "INTRADÍA"}
-        </span>
-        {/* Rationale resumido */}
-        {position.signal.rationale && (
-          <span style={{ fontSize: 10, color: "var(--muted)", fontStyle: "italic", maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-            title={position.signal.rationale}>
-            {position.signal.rationale.slice(0, 60)}{position.signal.rationale.length > 60 ? "…" : ""}
-          </span>
-        )}
-        {position.signal.mode === "intradia" && position.signal.wyckoff.bias !== "neutral" && (
-          <span style={{ color: position.signal.wyckoff.bias === "accumulation" ? "#10b981" : "#ef4444" }}>
-            Wyckoff: {position.signal.wyckoff.bias === "accumulation" ? "Acum" : "Dist"} F{position.signal.wyckoff.phase}
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── Trade History ────────────────────────────────────────────────────────────
-function TradeHistory({ trades, showSource = false }: { trades: ClosedTrade[]; showSource?: boolean }) {
-  const [fa, setFa] = useState<Asset | "todas">("todas");
-  const [fm, setFm] = useState<Mode | "todos">("todos");
-  const [fr, setFr] = useState<ExitReason | "todos">("todos");
-  const filtered = useMemo(() => trades.filter(t =>
-    (fa === "todas" || t.asset === fa) && (fm === "todos" || t.mode === fm) && (fr === "todos" || t.result === fr)
-  ), [trades, fa, fm, fr]);
-  return (
-    <div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-        <select className="sel" style={{ width: "auto" }} value={fa} onChange={e => setFa(e.target.value as Asset | "todas")}>
-          <option value="todas">Todos</option>{assets.map(a => <option key={a} value={a}>{a}</option>)}
-        </select>
-        <select className="sel" style={{ width: "auto" }} value={fm} onChange={e => setFm(e.target.value as Mode | "todos")}>
-          <option value="todos">Todos</option><option value="scalping">Scalp</option><option value="intradia">MTF</option>
-        </select>
-        <select className="sel" style={{ width: "auto" }} value={fr} onChange={e => setFr(e.target.value as ExitReason | "todos")}>
-          <option value="todos">Todos</option><option value="TP">TP</option><option value="SL">SL</option><option value="TRAIL">Trail</option><option value="REVERSAL">Rev.</option>
-        </select>
-      </div>
-      <div className="table-wrap" style={{ overflowX: "auto", borderRadius: 10, border: "1px solid rgba(255,255,255,0.06)" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 480 }}>
-          <thead style={{ background: "rgba(255,255,255,0.04)" }}>
-            <tr>{["Activo", "Modo", "Dir.", "Entrada", "Salida", "P&L", "Resultado", ...(showSource ? ["Fuente"] : [])].map(h => (
-              <th key={h} style={{ padding: "9px 10px", textAlign: "left", color: "var(--muted)", fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", whiteSpace: "nowrap" }}>{h}</th>
-            ))}</tr>
-          </thead>
-          <tbody>
-            {filtered.slice(0, 80).map(t => {
-              const dpT = (v: number) => v > 1000 ? 2 : v > 10 ? 3 : 4;
-              return (
-                <tr key={t.id} style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
-                  <td style={{ padding: "9px 10px", fontWeight: 700, fontSize: 13 }}>{t.asset}</td>
-                  <td style={{ padding: "9px 10px" }}>
-                    <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 5, fontWeight: 700,
-                      background: t.mode === "scalping" ? "rgba(99,102,241,0.15)" : "rgba(245,158,11,0.15)",
-                      color: t.mode === "scalping" ? "#a5b4fc" : "#f59e0b" }}>
-                      {t.mode === "scalping" ? "SCALP" : "INTRA"}
-                    </span>
-                  </td>
-                  <td style={{ padding: "9px 10px", fontWeight: 700, color: t.direction === "LONG" ? "#10b981" : "#ef4444", fontSize: 13 }}>{t.direction}</td>
-                  <td style={{ padding: "9px 10px", fontFamily: "'JetBrains Mono',monospace", fontSize: 12 }}>{t.entry.toFixed(dpT(t.entry))}</td>
-                  <td style={{ padding: "9px 10px", fontFamily: "'JetBrains Mono',monospace", fontSize: 12 }}>{t.exit.toFixed(dpT(t.exit))}</td>
-                  <td style={{ padding: "9px 10px", fontWeight: 800, fontSize: 14, color: t.pnl >= 0 ? "#10b981" : "#ef4444", fontFamily: "'JetBrains Mono',monospace" }}>{t.pnl >= 0 ? "+" : ""}{money(t.pnl)}</td>
-                  <td style={{ padding: "9px 10px", fontSize: 12 }}>{exitLabel[t.result]}</td>
-                  {showSource && <td style={{ padding: "9px 10px" }}><span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 4, background: t.source === "real" ? "rgba(16,185,129,0.12)" : "rgba(99,102,241,0.12)", color: t.source === "real" ? "#10b981" : "#a5b4fc" }}>{t.source}</span></td>}
-                </tr>
-              );
-            })}
-            {filtered.length === 0 && <tr><td colSpan={8} style={{ padding: "20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Sin operaciones</td></tr>}
-          </tbody>
-        </table>
-      </div>
-      <p style={{ marginTop: 5, fontSize: 10, color: "var(--muted)" }}>{filtered.length} operaciones</p>
-    </div>
-  );
-}
-
-// ─── AI Badge ─────────────────────────────────────────────────────────────────
-function AiBadge({ status, onTest, latency }: { status: AiStatus; onTest: () => void; latency: number | null }) {
-  const cfg: Record<AiStatus, { label: string; color: string; bg: string }> = {
-    idle: { label: "IA: sin conf.", color: "#6b7280", bg: "rgba(107,114,128,0.1)" },
-    testing: { label: "Probando…", color: "#f59e0b", bg: "rgba(245,158,11,0.1)" },
-    ok: { label: `Groq ${latency ? latency + "ms" : "OK"}`, color: "#10b981", bg: "rgba(16,185,129,0.1)" },
-    error: { label: "IA: error", color: "#ef4444", bg: "rgba(239,68,68,0.1)" },
-    disabled: { label: "Motor local", color: "#6b7280", bg: "rgba(107,114,128,0.08)" },
-  };
-  const c = cfg[status];
-  return (
-    <button onClick={onTest} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 11px", borderRadius: 8, border: `1px solid ${c.color}30`, background: c.bg, color: c.color, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
-      <span style={{ width: 6, height: 6, borderRadius: "50%", background: c.color, animation: status === "ok" || status === "testing" ? "pulse 2s infinite" : "none", display: "inline-block" }} />
-      {c.label}
-    </button>
-  );
-}
-
-// ─── Backtest Tab ──────────────────────────────────────────────────────────────
-function BacktestTab({ liveReady, backtestSize, setBacktestSize, riskPct, setRiskPct, runBacktest, lastBacktest, backtestTrades }: {
-  liveReady: boolean; backtestSize: number; setBacktestSize: (n: number) => void;
-  riskPct: number; setRiskPct: (n: number) => void;
-  runBacktest: () => void; lastBacktest: BacktestReport | null; backtestTrades: ClosedTrade[];
-}) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      <div style={{ padding: "10px 14px", borderRadius: 10, background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.2)", fontSize: 12, color: "#a5b4fc" }}>
-        <strong>ℹ️ Backtest aislado</strong> — los resultados son puramente simulados y <strong>no modifican el modelo adaptativo</strong>. El modelo aprende exclusivamente de trades reales.
-      </div>
-      <div className="card" style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end" }}>
-        <div><p className="label" style={{ marginBottom: 5 }}>Trades simulados</p><input className="inp" type="number" min={20} max={200} step={10} value={backtestSize} onChange={e => setBacktestSize(Number(e.target.value))} style={{ width: 110 }} /></div>
-        <div><p className="label" style={{ marginBottom: 5 }}>Riesgo por trade (%)</p><input className="inp" type="number" min={0.2} max={3} step={0.1} value={riskPct} onChange={e => setRiskPct(Number(e.target.value))} style={{ width: 100 }} /></div>
-        <button className="btn-primary" onClick={runBacktest} disabled={!liveReady} style={{ opacity: liveReady ? 1 : 0.45 }}>▶ Ejecutar backtest</button>
-      </div>
-      {lastBacktest ? (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
-            {[["Total trades", lastBacktest.total, false], ["Win rate", `${lastBacktest.winRate.toFixed(1)}%`, lastBacktest.winRate >= 50], ["Factor ganancia", lastBacktest.profitFactor.toFixed(2), lastBacktest.profitFactor >= 1.5], ["Sharpe", lastBacktest.sharpe.toFixed(2), lastBacktest.sharpe >= 1], ["Expectativa", money(lastBacktest.expectancy), lastBacktest.expectancy > 0], ["Max DD", `${lastBacktest.maxDrawdown.toFixed(1)}%`, false], ["Gan. bruta", money(lastBacktest.grossProfit), true], ["Pérd. bruta", money(lastBacktest.grossLoss), false], ["Win prom.", money(lastBacktest.avgWin), true], ["Loss prom.", money(lastBacktest.avgLoss), false]].map(([l, v, ac]) => (
-              <div key={l as string} className="metric"><span className="label" style={{ fontSize: 11, fontWeight: 600 }}>{l}</span><strong style={{ color: ac ? "#10b981" : "var(--text)" }}>{v}</strong></div>
-            ))}
-          </div>
-          <div className="card"><EquityCurve trades={backtestTrades} height={120} /></div>
-          <div className="card" style={{ fontSize: 12, lineHeight: 1.9, color: "var(--muted)" }}>
-            <p style={{ fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>📊 Interpretación estadística</p>
-            <p>
-              {lastBacktest.profitFactor >= 1.5 ? "✅ Factor ganancia sólido. " : "⚠️ Factor bajo (<1.5). "}
-              {lastBacktest.sharpe >= 1 ? "✅ Sharpe aceptable. " : "⚠️ Sharpe bajo. "}
-              {lastBacktest.winRate >= 50 ? "✅ Win rate positivo. " : "⚠️ WR <50% — revisar R:R. "}
-              {lastBacktest.maxDrawdown <= 20 ? "✅ Drawdown controlado." : "❌ DD elevado — revisar sizing."}
-            </p>
-          </div>
-          <div className="card"><p style={{ fontWeight: 700, marginBottom: 10 }}>Trades simulados</p><TradeHistory trades={backtestTrades} /></div>
-        </>
-      ) : (
-        <div className="card" style={{ textAlign: "center", padding: 40 }}>
-          <p style={{ fontSize: 28, marginBottom: 10 }}>🔬</p>
-          <p style={{ fontWeight: 700, marginBottom: 6 }}>Sin datos de backtest</p>
-          <p style={{ fontSize: 12, color: "var(--muted)" }}>Sincronice datos y ejecute el backtest.</p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Main App ─────────────────────────────────────────────────────────────────
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SCALPING ENGINE — Control de mercado, liquidez, perfil de volumen
-// ═══════════════════════════════════════════════════════════════════════════
-
-// ─── ORDER FLOW ENGINE ───────────────────────────────────────────────────────
-
-// 1. FOOTPRINT: reconstruye delta por vela con estimación de agresores
-function buildFootprint(candles: Candle[]): FootprintCandle[] {
-  return candles.map(c => {
-    const range  = Math.max(c.h - c.l, 1e-9);
-    const body   = Math.abs(c.c - c.o);
-    const isUp   = c.c >= c.o;
-    // Estimación de volumen comprador/vendedor basada en posición del cierre
-    // Método: fracción del cierre dentro del rango (buy fraction)
-    const buyFrac  = (c.c - c.l) / range;
-    const sellFrac = 1 - buyFrac;
-    const buyVol   = c.v * buyFrac;
-    const sellVol  = c.v * sellFrac;
-    const delta    = buyVol - sellVol;
-    const deltaPct = c.v > 0 ? (delta / c.v) * 100 : 0;
-    // Absorción: vela con mucho volumen pero cierre débil → absorción de esa dirección
-    // Ej: vela alcista con gran volumen y mecha superior larga → vendedores absorbiendo compradores
-    const upperWick = c.h - Math.max(c.o, c.c);
-    const lowerWick = Math.min(c.o, c.c) - c.l;
-    let absorption: FootprintCandle["absorption"] = "none";
-    if (isUp && upperWick > body * 1.5 && c.v > 0)  absorption = "sell"; // compradores absorbidos
-    if (!isUp && lowerWick > body * 1.5 && c.v > 0) absorption = "buy";  // vendedores absorbidos
-    // Iniciativa: quién tomó el control (la agresión neta en la vela)
-    const initiative: FootprintCandle["initiative"] =
-      deltaPct >  15 ? "buy" :
-      deltaPct < -15 ? "sell" : "neutral";
-    return { ...c, buyVol, sellVol, delta, deltaPct, absorption, initiative };
-  });
-}
-
-// 2. CVD MULTI-VENTANA: acumulación/distribución institucional
-function calcCVDFull(fp: FootprintCandle[]): CVDAnalysis {
-  if (!fp.length) return {
-    cvd50: 0, cvd20: 0, cvd10: 0, cvd5: 0,
-    slope50: 0, slope10: 0, divergence: false, trend: "neutral"
-  };
-  const accumulate = (slice: FootprintCandle[]) => {
-    let cum = 0;
-    return slice.map(c => { cum += c.delta; return cum; });
-  };
-  const tail50 = fp.slice(-50);
-  const tail20 = fp.slice(-20);
-  const tail10 = fp.slice(-10);
-  const tail5  = fp.slice(-5);
-  const ser50 = accumulate(tail50);
-  const ser10 = accumulate(tail10);
-  const cvd50 = ser50[ser50.length - 1] ?? 0;
-  const cvd20 = accumulate(tail20).slice(-1)[0] ?? 0;
-  const cvd10 = ser10[ser10.length - 1] ?? 0;
-  const cvd5  = accumulate(tail5).slice(-1)[0] ?? 0;
-  // Pendiente: regresión lineal simplificada sobre últimas N velas
-  const slope = (ser: number[]) => {
-    const n = ser.length;
-    if (n < 2) return 0;
-    return (ser[n-1] - ser[0]) / n;
-  };
-  const slope50 = slope(ser50);
-  const slope10 = slope(ser10);
-  // Divergencia: precio sube (+) pero CVD baja (−) o viceversa
-  const priceChange = fp.length >= 20
-    ? fp[fp.length-1].c - fp[fp.length-20].c : 0;
-  const divergence = (priceChange > 0 && cvd20 < 0) || (priceChange < 0 && cvd20 > 0);
-  const trend: CVDAnalysis["trend"] =
-    cvd50 > 0 && slope50 > 0 ? "bullish" :
-    cvd50 < 0 && slope50 < 0 ? "bearish" : "neutral";
-  return { cvd50, cvd20, cvd10, cvd5, slope50, slope10, divergence, trend };
-}
-
-// Legacy wrapper para compatibilidad
-function calcCVD(candles: Candle[]): { series: number[]; last: number; slope: number } {
-  const fp = buildFootprint(candles);
-  let cum = 0;
-  const series = fp.map(c => { cum += c.delta; return cum; });
-  const last = series[series.length - 1] ?? 0;
-  const tail = series.slice(-6);
-  const slope = tail.length >= 2 ? (tail[tail.length-1] - tail[0]) / tail.length : 0;
-  return { series, last, slope };
-}
-
-// 3. VOLUME PROFILE COMPLETO con HVN/LVN y delta por nivel
-function calcVolumeProfileFull(fp: FootprintCandle[]): VolumeProfileFull {
-  if (fp.length < 5) {
-    const mid = fp[fp.length-1]?.c ?? 0;
-    return { poc: mid, vah: mid, val: mid, hvn: [], lvn: [], profile: [], valueAreaPct: 0 };
-  }
-  const hi      = Math.max(...fp.map(c => c.h));
-  const lo      = Math.min(...fp.map(c => c.l));
-  const range   = Math.max(hi - lo, 1e-9);
-  const buckets = 32; // más resolución que antes (era 24)
-  const bSize   = range / buckets;
-  const vol     = new Array(buckets).fill(0) as number[];
-  const buyVols = new Array(buckets).fill(0) as number[];
-  const selVols = new Array(buckets).fill(0) as number[];
-
-  fp.forEach(c => {
-    const loIdx = Math.max(0,         Math.floor((c.l - lo) / bSize));
-    const hiIdx = Math.min(buckets-1, Math.floor((c.h - lo) / bSize));
-    const span  = Math.max(hiIdx - loIdx + 1, 1);
-    for (let i = loIdx; i <= hiIdx; i++) {
-      vol[i]     += c.v       / span;
-      buyVols[i] += c.buyVol  / span;
-      selVols[i] += c.sellVol / span;
-    }
-  });
-
-  const pocIdx    = vol.indexOf(Math.max(...vol));
-  const poc       = lo + (pocIdx + 0.5) * bSize;
-  const totalVol  = vol.reduce((a,b) => a+b, 0);
-  const target70  = totalVol * 0.70;
-  let accum = 0, loB = pocIdx, hiB = pocIdx;
-  while (accum < target70 && (loB > 0 || hiB < buckets-1)) {
-    const down = loB > 0       ? vol[loB-1] : -1;
-    const up   = hiB < buckets-1 ? vol[hiB+1] : -1;
-    if (down >= up) { accum += down; loB--; } else { accum += up; hiB++; }
-  }
-  const vah = lo + (hiB + 1) * bSize;
-  const val = lo + loB * bSize;
-
-  // HVN: buckets con volumen > 130% del promedio → zonas de aceptación (soporte/resistencia)
-  // LVN: buckets con volumen < 40% del promedio → vacíos de precio (el precio los cruza rápido)
-  const avgVol  = totalVol / buckets;
-  const hvn: number[] = [];
-  const lvn: number[] = [];
-  vol.forEach((v, i) => {
-    const price = lo + (i + 0.5) * bSize;
-    if (v > avgVol * 1.3) hvn.push(price);
-    if (v < avgVol * 0.4 && i > 2 && i < buckets-2) lvn.push(price); // excluir extremos
-  });
-
-  const profile = vol.map((v, i) => ({
-    price:   lo + (i + 0.5) * bSize,
-    vol:     v,
-    buyVol:  buyVols[i],
-    sellVol: selVols[i],
-  }));
-
-  return { poc, vah, val, hvn, lvn, profile, valueAreaPct: ((hiB - loB) / buckets) * 100 };
-}
-
-// Legacy wrapper
-function calcVolumeProfile(candles: Candle[]): { poc: number; vah: number; val: number; profile: Array<{price: number; vol: number}> } {
-  const fp = buildFootprint(candles);
-  const full = calcVolumeProfileFull(fp);
-  return { poc: full.poc, vah: full.vah, val: full.val, profile: full.profile };
-}
-
-// 4. ORDER FLOW SCORE: motor principal de control de mercado
-function analyzeOrderFlow(candles: Candle[], price: number, vwap: number, atr: number): OrderFlowScore {
-  if (candles.length < 10) {
-    return {
-      control: "contested", controlScore: 0, cvdScore: 0, footprintScore: 0,
-      profileScore: 0, absorptionScore: 0, longSetup: false, shortSetup: false,
-      setupStrength: 0, narrative: "Datos insuficientes",
-      cvd: { cvd50: 0, cvd20: 0, cvd10: 0, cvd5: 0, slope50: 0, slope10: 0, divergence: false, trend: "neutral" },
-      profile: { poc: price, vah: price, val: price, hvn: [], lvn: [], profile: [], valueAreaPct: 0 },
-      footprint: [],
-    };
-  }
-
-  const fp      = buildFootprint(candles.slice(-60));
-  const cvd     = calcCVDFull(fp);
-  const profile = calcVolumeProfileFull(fp);
-
-  // ── Score CVD: dónde fluye el dinero ──────────────────────────────────────
-  // Normalizamos por el volumen total para independizarnos del tamaño del mercado
-  const totalVol  = fp.reduce((s,c) => s + c.v, 1e-9);
-  const cvdNorm50 = clamp(cvd.cvd50 / (totalVol * 0.12), -1, 1);
-  const cvdNorm10 = clamp(cvd.cvd10 / (totalVol * 0.06), -1, 1);
-  const slopeNorm = clamp(cvd.slope50 / (totalVol * 0.003), -1, 1);
-  const cvdScore  = clamp(cvdNorm50 * 40 + cvdNorm10 * 35 + slopeNorm * 25, -100, 100);
-
-  // ── Score Footprint: iniciativa y absorción en velas recientes ────────────
-  const recent15 = fp.slice(-15);
-  let fpBuyScore = 0, fpSellScore = 0;
-  recent15.forEach((c, idx) => {
-    const weight = 0.6 + idx * 0.03; // velas recientes pesan más
-    if (c.initiative === "buy")  fpBuyScore  += weight;
-    if (c.initiative === "sell") fpSellScore += weight;
-    // Absorción: si hay absorción de vendedores (compradores se imponen), bullish
-    if (c.absorption === "buy")  fpBuyScore  += weight * 0.5;
-    if (c.absorption === "sell") fpSellScore += weight * 0.5;
-  });
-  const fpTotal        = fpBuyScore + fpSellScore || 1;
-  const footprintScore = clamp(((fpBuyScore - fpSellScore) / fpTotal) * 100, -100, 100);
-
-  // ── Score Volume Profile: posición del precio respecto al value area ──────
-  // Precio sobre VAH → toros en control, compradores aceptan precios altos
-  // Precio bajo VAL → osos en control
-  // Precio entre VAL y POC → osos leves
-  // Precio entre POC y VAH → toros leves
-  let profileScore = 0;
-  if      (price > profile.vah) profileScore =  80;
-  else if (price > profile.poc) profileScore =  35;
-  else if (price < profile.val) profileScore = -80;
-  else                          profileScore = -35;
-  // Bonus/malus: precio en LVN (movimiento rápido esperado) vs HVN (resistencia)
-  const nearHVN = profile.hvn.some(h => Math.abs(price - h) < atr * 0.5);
-  const nearLVN = profile.lvn.some(l => Math.abs(price - l) < atr * 0.5);
-  if (nearLVN) profileScore *= 1.3; // LVN: precio se moverá más rápido
-  if (nearHVN) profileScore *= 0.7; // HVN: resistencia a seguir
-
-  // ── Score Absorción: órdenes que frenan el movimiento ────────────────────
-  // Absorción de vendedores (compradores absorben sells) → bullish
-  // Absorción de compradores (vendedores absorben buys) → bearish
-  const last20  = fp.slice(-20);
-  const buyAbsorptions  = last20.filter(c => c.absorption === "buy").length;
-  const sellAbsorptions = last20.filter(c => c.absorption === "sell").length;
-  const absorptionScore = clamp(
-    (buyAbsorptions - sellAbsorptions) / Math.max(last20.length * 0.2, 1) * 100,
-    -100, 100
-  );
-
-  // ── Score VWAP: posición respecto al VWAP ────────────────────────────────
-  const vwapDev   = (price - vwap) / Math.max(atr, 1e-9);
-  const vwapScore = clamp(vwapDev * 25, -50, 50); // menor peso
-
-  // ── Score compuesto: ponderado por confiabilidad de cada señal ───────────
-  const controlScore = clamp(
-    cvdScore        * 0.35  // CVD: más confiable, institucional
-    + footprintScore * 0.25  // Footprint: iniciativa real
-    + profileScore   * 0.20  // Perfil: contexto estructural
-    + absorptionScore * 0.12 // Absorción: señal de reversión/continuación
-    + vwapScore      * 0.08, // VWAP: contexto menor
-    -100, 100
-  );
-
-  const control: OrderFlowScore["control"] =
-    controlScore >  20 ? "bulls" :
-    controlScore < -20 ? "bears" : "contested";
-
-  // ── Setup de trading ──────────────────────────────────────────────────────
-  // Detectar zonas extremas (sobrecompra / sobreventa)
-  // En extremos el setup se INVIERTE: no seguimos el momentum, anticipamos el rebote
-  // RSI calculado desde las velas disponibles en analyzeOrderFlow
-  const _cls = candles.slice(-30).map(c => c.c);
-  const rsiVal = _cls.length >= 14
-    ? (() => {
-        let g = 0, l = 0;
-        for (let i = _cls.length - 14; i < _cls.length; i++) {
-          const d = _cls[i] - _cls[i - 1];
-          if (d > 0) g += d; else l -= d;
-        }
-        const rs = g / Math.max(l, 1e-9);
-        return 100 - 100 / (1 + rs);
-      })()
-    : 50;
-
-  const isOversold   = rsiVal < 28 && price < profile.val;   // debajo del value area y RSI extremo
-  const isOverbought = rsiVal > 72 && price > profile.vah;   // encima del value area y RSI extremo
-  const hasCvdDivBull = cvd.divergence && cvd.trend === "bearish" && controlScore < 0;  // precio cae pero CVD se recupera
-  const hasCvdDivBear = cvd.divergence && cvd.trend === "bullish" && controlScore > 0;  // precio sube pero CVD se debilita
-
-  // LONG setup: momentum alcista normal O reversión desde sobreventa
-  const longSetup =
-    // Caso 1: momentum — toros en control con confirmación
-    (controlScore > 18 && cvd.trend !== "bearish" && price >= profile.val && !cvd.divergence)
-    ||
-    // Caso 2: mean reversion — sobreventa con divergencia CVD alcista o absorción
-    (isOversold && (hasCvdDivBull || buyAbsorptions >= 2) && controlScore > -40);
-
-  // SHORT setup: momentum bajista normal O reversión desde sobrecompra
-  const shortSetup =
-    // Caso 1: momentum — osos en control con confirmación
-    (controlScore < -18 && cvd.trend !== "bullish" && price <= profile.vah && !cvd.divergence)
-    ||
-    // Caso 2: mean reversion — sobrecompra con divergencia CVD bajista o absorción
-    (isOverbought && (hasCvdDivBear || sellAbsorptions >= 2) && controlScore < 40);
-
-  const setupStrength = clamp(Math.abs(controlScore) / 100, 0, 1);
-
-  // ── Narrativa en español ──────────────────────────────────────────────────
-  const ctrlStr = control === "bulls" ? "TOROS" : control === "bears" ? "OSOS" : "DISPUTADO";
-  const cvdStr  = cvd.trend === "bullish" ? "CVD↑ acumulando" : cvd.trend === "bearish" ? "CVD↓ distribuyendo" : "CVD lateral";
-  const posStr  =
-    price > profile.vah ? `precio sobre VAH (${profile.vah.toFixed(2)}) — aceptación alcista` :
-    price > profile.poc ? `precio sobre POC (${profile.poc.toFixed(2)}) — toros lideran` :
-    price < profile.val ? `precio bajo VAL (${profile.val.toFixed(2)}) — aceptación bajista` :
-    `precio bajo POC (${profile.poc.toFixed(2)}) — osos lideran`;
-  const absorStr = buyAbsorptions > sellAbsorptions
-    ? `absorción alcista (${buyAbsorptions})`
-    : sellAbsorptions > buyAbsorptions
-    ? `absorción bajista (${sellAbsorptions})`
-    : "sin absorción dominante";
-  const divStr = cvd.divergence ? " ⚠ DIVERGENCIA CVD-precio" : "";
-
-  const narrative =
-    `Control: ${ctrlStr} (${controlScore.toFixed(0)}pts) | ${cvdStr} | ${posStr} | ${absorStr}${divStr}`;
-
-  return {
-    control, controlScore, cvdScore, footprintScore, profileScore, absorptionScore,
-    cvd, profile, footprint: fp, longSetup, shortSetup, setupStrength, narrative,
-  };
-}
-
-// Legacy analyzeMarketControl — mantiene compatibilidad con el resto del código
-function calcSyntheticLiquidity(candles: Candle[], atr: number): { levels: Array<{price: number; side: "bid"|"ask"; strength: number}>; bidAskRatio: number } {
-  const fp = buildFootprint(candles.slice(-30));
-  const levels: Array<{price: number; side: "bid"|"ask"; strength: number}> = [];
-  fp.forEach(c => {
-    const upperWick = c.h - Math.max(c.o, c.c);
-    const lowerWick = Math.min(c.o, c.c) - c.l;
-    if (upperWick > atr * 0.3) levels.push({ price: c.h, side: "ask", strength: Math.min(upperWick / atr, 2) });
-    if (lowerWick > atr * 0.3) levels.push({ price: c.l, side: "bid", strength: Math.min(lowerWick / atr, 2) });
-  });
-  const bids = levels.filter(l => l.side === "bid").reduce((s,l) => s+l.strength, 0);
-  const asks = levels.filter(l => l.side === "ask").reduce((s,l) => s+l.strength, 0);
-  return { levels, bidAskRatio: (bids / Math.max(bids+asks, 1e-9)) * 100 };
-}
-
-function analyzeMarketControl(candles: Candle[], ind: Indicators, atr: number): MarketControl {
-  if (candles.length < 10) {
-    return { score: 0, bias: "neutral", cvd: 0, cvdSlope: 0,
-      poc: ind.vwap, vah: ind.vwap, val: ind.vwap,
-      vwapDev: 0, bidAskImbalance: 50, dominantSide: "balanced" };
-  }
-  const price = candles[candles.length-1].c;
-  const of    = analyzeOrderFlow(candles, price, ind.vwap, atr);
-  const { last: cvd, slope: cvdSlope } = calcCVD(candles.slice(-50));
-  const bidAskRatio = calcSyntheticLiquidity(candles.slice(-50), atr).bidAskRatio;
-  const score = of.controlScore;
-  const bias: MarketControl["bias"]   = score > 15 ? "bull" : score < -15 ? "bear" : "neutral";
-  const dominantSide: MarketControl["dominantSide"] =
-    score > 20 ? "buyers" : score < -20 ? "sellers" : "balanced";
-  return {
-    score, bias, cvd, cvdSlope,
-    poc: of.profile.poc, vah: of.profile.vah, val: of.profile.val,
-    vwapDev: of.cvdScore / 100, bidAskImbalance: bidAskRatio, dominantSide
-  };
-}
-
-// calcRiskMetrics — métricas completas de riesgo (panel + IA + aiDecision)
-function calcRiskMetrics(trades: ClosedTrade[], balance: number, maxDdPct: number) {
-  const real = trades.filter(t => t.source === "real");
-  const wins   = real.filter(t => t.pnl > 0);
-  const losses = real.filter(t => t.pnl <= 0);
-  const total  = real.length;
-  const winRate = total > 0 ? wins.length / total : 0;
-  const grossProfit = wins.reduce((s, t) => s + t.pnl, 0);
-  const grossLoss   = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
-  const pnl         = grossProfit - grossLoss;
-  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 99 : 0);
-  const avgWin   = wins.length   ? grossProfit / wins.length   : 0;
-  const avgLoss  = losses.length ? grossLoss   / losses.length : 0;
-  const expectancy = total > 0 ? pnl / total : 0;
-  const rets = real.map(t => t.pnlPct ?? (t.pnl / Math.max(balance, 1) * 100));
-  const sharpe = rets.length > 1 ? avg(rets) / (std(rets) || 1) * Math.sqrt(252) : 0;
-  const maxDrawdown  = calcDrawdown(real);
-  const maxDdPctVal  = balance > 0 ? (maxDrawdown / balance) * 100 : 0;
-  const blocked      = maxDdPctVal >= maxDdPct;
-  // Kelly criterion: WR - (1-WR)/RR
-  const kellyWR  = total >= 5 ? winRate : 0.5;
-  const kellyRR  = avgWin > 0 && avgLoss > 0 ? avgWin / avgLoss : 1.5;
-  const kellyFraction = clamp(kellyWR - (1 - kellyWR) / Math.max(kellyRR, 0.1), 0, 0.25);
-  // Riesgo de ruina (Vince)
-  const edge = kellyWR - (1 - kellyWR) / Math.max(kellyRR, 0.5);
-  const ruinProb = total >= 10 && edge > 0
-    ? Math.pow(Math.max((1 - edge) / (1 + edge), 0), 30) * 100
-    : (total < 5 ? 50 : 75);
-  return { total, winRate, pnl, grossProfit, grossLoss, profitFactor,
-           avgWin, avgLoss, expectancy, sharpe, maxDrawdown, maxDdPctVal,
-           kellyFraction, kellyWR, kellyRR, ruinProb, blocked };
-}
-
-
-function calcScalpingRisk(trades: ClosedTrade[], balance: number, maxDailyLoss: number, maxDailyGain: number): ScalpingRisk {
-  const today = new Date().toDateString();
-  const todayTrades = trades.filter(t => new Date(t.closedAt).toDateString() === today);
-  const dailyPnl    = todayTrades.reduce((s, t) => s + t.pnl, 0);
-  const dailyPnlPct = (dailyPnl / Math.max(balance, 1)) * 100;
-  const recent = trades.filter(t => t.source === "real").slice(0, 20);
-  let mathExpectancy = 0;
-  if (recent.length >= 5) {
-    const wins   = recent.filter(t => t.pnl > 0);
-    const losses = recent.filter(t => t.pnl <= 0);
-    const wr     = wins.length / recent.length;
-    const avgW   = wins.length   ? wins.reduce((s,t)=>s+t.pnl,0)/wins.length   : 0;
-    const avgL   = losses.length ? Math.abs(losses.reduce((s,t)=>s+t.pnl,0))/losses.length : 1;
-    mathExpectancy = wr * avgW - (1 - wr) * avgL;
-  }
-  let streak = 0;
-  for (const t of trades.slice(0, 10)) { if (t.pnl <= 0) streak++; else break; }
-  // ── Kelly criterion: fracción óptima del capital a arriesgar ────────────────
-  // Kelly = WR - (1-WR)/RR  donde RR = avgWin/avgLoss
-  const recent20 = trades.filter(t => t.source === "real").slice(0, 20);
-  const recentWins   = recent20.filter(t => t.pnl > 0);
-  const recentLosses = recent20.filter(t => t.pnl <= 0);
-  const kellyWR  = recent20.length >= 5 ? recentWins.length / recent20.length : 0.5;
-  const kellyRR  = recentWins.length && recentLosses.length
-    ? (recentWins.reduce((s,t)=>s+t.pnl,0)/recentWins.length) /
-      (Math.abs(recentLosses.reduce((s,t)=>s+t.pnl,0)/recentLosses.length) || 1)
-    : 1.5;
-  const kellyFraction = clamp(kellyWR - (1 - kellyWR) / kellyRR, 0, 0.25);
-
-  // ── Riesgo de ruina (fórmula de Vince) ───────────────────────────────────
-  const edge = kellyWR - (1 - kellyWR) / Math.max(kellyRR, 0.5);
-  const ruinProb = recent20.length >= 10 && edge > 0
-    ? Math.pow(Math.max((1 - edge) / (1 + edge), 0), 30) * 100
-    : (recent20.length < 5 ? 50 : 75); // conservador si no hay datos
-
-  // ── Sizing multiplier basado en riesgo compuesto ──────────────────────────
-  const ruinRisk = clamp(ruinProb / 100, 0, 1);
-  const ddPct = dailyPnlPct;
-  const sizeMultiplier =
-    ruinRisk > 0.6 || ddPct < -maxDailyLoss * 0.8 ? 0.25 :
-    ruinRisk > 0.4 || ddPct < -maxDailyLoss * 0.5 ? 0.50 :
-    ruinRisk > 0.2 || ddPct < -maxDailyLoss * 0.3 ? 0.75 : 1.0;
-
-  let blocked = false, blockReason = "";
-  if (dailyPnlPct <= -maxDailyLoss) { blocked = true; blockReason = `Límite pérdida diaria (-${maxDailyLoss}%) alcanzado`; }
-  if (streak >= 6) { blocked = true; blockReason = `6 pérdidas consecutivas — pausa obligatoria`; }
-  return { dailyPnl, dailyTrades: todayTrades.length, ruinRisk, ruinProb,
-           mathExpectancy, kellyFraction, kellyWR, kellyRR,
-           blocked, blockReason, sizeMultiplier, streak };
-}
-
-// ─── Persistencia ────────────────────────────────────────────────────────────
-
-// ─── AI Chat Panel ────────────────────────────────────────────────────────────
-type ChatMessage = { role: "user" | "ai"; text: string; ts: string };
-
-function AiChatPanel({
-  apiKey, usingGroq, groqModel, onGroqCall, canGroqCall, openPositions, realTrades, lastSignal, prices, stats,
-}: {
-  apiKey: string; usingGroq: boolean; groqModel: string;
-  onGroqCall: () => void; canGroqCall: () => boolean;
-  openPositions: Position[]; realTrades: ClosedTrade[];
-  lastSignal: Signal | null; prices: Record<Asset, number>;
-  stats: { total: number; winRate: number; pnl: number; profitFactor: number; sharpe: number; maxDrawdown?: number };
-}) {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: "ai", text: "Hola. Soy tu trader IA. Podés preguntarme sobre los trades activos, la estrategia, el rendimiento, o cualquier duda sobre las operaciones.", ts: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }) }
-  ]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const endRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
-
-
-  // ─── Helpers de estadísticas para el chat ────────────────────────────────
   function chatStatsByAsset(trades: ClosedTrade[]): string {
     return ["BTCUSD","ETHUSD","XAUUSD","XAGUSD"].map(a => {
       const at = trades.filter(t => t.asset === a);
@@ -2251,7 +600,13 @@ BEST/WORST TRADES:
 ${chatBestWorst(realTrades)}
 
 REVERSAL SETUPS DETECTED (last 10 trades):
-${chatReversalStats(realTrades)}`;
+${chatReversalStats(realTrades)}
+
+ASSET CORRELATIONS (dynamic, last 200 candles 1m):
+${chatCorrelationContext(correlationMatrix)}
+
+ASSET INTELLIGENCE (learned per asset):
+${chatAssetIntelContext(assetIntelligence)}`;
 
     if (!usingGroq || !apiKey.trim()) {
       setMessages(prev => [...prev, {
@@ -2388,6 +743,27 @@ ${chatReversalStats(realTrades)}`;
 }
 
 // useLocalStorage reemplazado por useState in-memory (localStorage no disponible en este entorno)
+function chatCorrelationContext(corrMatrix: Record<string, Record<string, number>>): string {
+  const pairs = Object.entries(corrMatrix).flatMap(([a, row]) =>
+    Object.entries(row)
+      .filter(([b, c]) => a < b && Math.abs(c) >= 0.6)
+      .map(([b, c]) => ({ a, b, c }))
+  ).sort((x, y) => Math.abs(y.c) - Math.abs(x.c)).slice(0, 10);
+  if (!pairs.length) return "  Sin correlaciones calculadas aún";
+  return pairs.map(({a, b, c}) =>
+    `  ${a}↔${b}: ${c >= 0 ? "+" : ""}${c.toFixed(2)} (${Math.abs(c) >= 0.75 ? "ALTA — bloqueado abrir mismo lado" : Math.abs(c) >= 0.5 ? "moderada" : "leve"})`
+  ).join("\n");
+}
+
+function chatAssetIntelContext(intel: Record<string, AssetIntelligence>): string {
+  const top = Object.values(intel).filter(i => i.totalTrades >= 3)
+    .sort((a,b) => b.profitFactor - a.profitFactor).slice(0, 8);
+  if (!top.length) return "  Sin inteligencia aprendida aún";
+  return top.map(i =>
+    `  ${i.symbol} [${i.category}]: WR=${((i.winRate)*100).toFixed(0)}% PF=${i.profitFactor.toFixed(2)} mejor=${i.bestSession}/${i.bestMode}/${i.bestHourUTC}h`
+  ).join("\n");
+}
+
 function useLocalStorage<T>(key: string, initial: T): [T, React.Dispatch<React.SetStateAction<T>>] {
   return useState<T>(initial);
 }
@@ -2427,6 +803,12 @@ class ErrorBoundary extends React.Component<
 }
 
 export function App() {
+  const [assetIntelligence, setAssetIntelligence] = useState<Record<string, AssetIntelligence>>({});
+  const [correlationMatrix, setCorrelationMatrix] = useState<Record<string, Record<string, number>>>({});
+  const [availableSymbols, setAvailableSymbols] = useState<Array<{name:string;brokerName?:string;category:AssetCategory;spread:number;contractSize:number;digits?:number;volumeMin?:number}>>([]);
+  const [assets, setAssets] = useState<Asset[]>(["BTCUSD","ETHUSD","XAGUSD","XAUUSD"]);
+  const assetIntelRef  = useRef<Record<string, AssetIntelligence>>({});
+  const correlationRef = useRef<Record<string, Record<string, number>>>({});
   const [appTab, setAppTab] = useState<AppTab>("trading");
   const [tab, setTab] = useState<Mode>("scalping");
   const [asset, setAsset] = useState<Asset>("BTCUSD");
@@ -2748,10 +1130,9 @@ export function App() {
     real.forEach(t => { const h = new Date(t.closedAt).getHours(); if (!hourMap[h]) hourMap[h] = []; hourMap[h].push(t.pnl); });
     const hourEdge: Record<number, number> = {};
     Object.entries(hourMap).forEach(([h, vs]) => { hourEdge[Number(h)] = avg(vs); });
-    // Con pocos trades (<10) el modelo no ajusta el piso para no bloquearse
     const minTrades = real.length;
     const floorAdjust = minTrades >= 10 ? clamp(52 + (0.5 - wr) * 16, 48, 62) : 52;
-    // ── AssetEdge: rendimiento acumulado por activo+modo ─────────────────────
+    // ── AssetEdge legacy ──────────────────────────────────────────────────────
     const assetEdge: Partial<Record<string, AssetEdge>> = { ...learningRef.current.assetEdge };
     real.forEach(t => {
       const key = `${t.asset}_${t.mode}`;
@@ -2769,6 +1150,74 @@ export function App() {
       atrTrailMult: clamp(0.25 + wr * 0.3, 0.2, 0.6),
       hourEdge, assetEdge,
     });
+    // ── AssetIntelligence: reconstruir desde cero con todos los trades reales ─
+    const intelMap: Record<string, AssetIntelligence> = {};
+    real.forEach(t => {
+      const sym = t.asset;
+      if (!intelMap[sym]) {
+        intelMap[sym] = {
+          symbol: sym, category: getAssetCategory(sym),
+          totalTrades: 0, winRate: 0, avgRR: 0, avgPnl: 0, profitFactor: 1,
+          sessionStats: {}, modeStats: {}, hourlyStats: {},
+          optimalSLMult: 1.0, optimalTPMult: 2.0,
+          avgSpreadPct: getAssetCatalog(sym).spreadPct,
+          spreadByHour: {}, avgVolatility: 0, trendStrength: 0,
+          bestMode: "scalping", bestSession: "NY", bestHourUTC: 14,
+          correlations: assetIntelRef.current[sym]?.correlations ?? {},
+          lastUpdated: new Date().toISOString(),
+        };
+      }
+      const intel = intelMap[sym];
+      intel.totalTrades++;
+      if (t.pnl > 0) {
+        // wins se computa al final con totalTrades
+      }
+      intel.avgPnl = (intel.avgPnl * (intel.totalTrades-1) + t.pnl) / intel.totalTrades;
+      // Session
+      const sess = t.closedAt ? (() => {
+        const h = new Date(t.closedAt).getUTCHours();
+        const d = new Date(t.closedAt).getUTCDay();
+        if (d === 0 || d === 6) return "Weekend";
+        if (h >= 13 && h < 21) return "NY";
+        if (h >= 7  && h < 16) return "London";
+        if (h >= 0  && h < 7 ) return "Asia";
+        return "Post-NY";
+      })() : "NY";
+      const ss = intel.sessionStats[sess] ?? { trades:0, wins:0, pnl:0, avgSpread:0 };
+      intel.sessionStats[sess] = { trades:ss.trades+1, wins:ss.wins+(t.pnl>0?1:0), pnl:ss.pnl+t.pnl, avgSpread:ss.avgSpread };
+      // Mode
+      const ms = intel.modeStats[t.mode] ?? { trades:0, wins:0, pnl:0, avgRR:0 };
+      intel.modeStats[t.mode] = { trades:ms.trades+1, wins:ms.wins+(t.pnl>0?1:0), pnl:ms.pnl+t.pnl, avgRR:ms.avgRR };
+      // Hour
+      const h = new Date(t.closedAt).getUTCHours();
+      const hs = intel.hourlyStats[h] ?? { trades:0, wins:0, pnl:0 };
+      intel.hourlyStats[h] = { trades:hs.trades+1, wins:hs.wins+(t.pnl>0?1:0), pnl:hs.pnl+t.pnl };
+    });
+    // Finalizar métricas derivadas
+    Object.values(intelMap).forEach(intel => {
+      const allWins = Object.values(intel.sessionStats).reduce((s,v)=>s+v.wins,0);
+      intel.winRate = intel.totalTrades > 0 ? allWins / intel.totalTrades : 0;
+      const grossProfit = Object.values(intel.sessionStats).reduce((s,v)=>s+(v.pnl>0?v.pnl:0),0);
+      const grossLoss   = Math.abs(Object.values(intel.sessionStats).reduce((s,v)=>s+(v.pnl<0?v.pnl:0),0));
+      intel.profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 3 : 1;
+      // Best session
+      const sessEntries = Object.entries(intel.sessionStats);
+      if (sessEntries.length) {
+        intel.bestSession = sessEntries.sort((a,b)=>(b[1].pnl/Math.max(b[1].trades,1))-(a[1].pnl/Math.max(a[1].trades,1)))[0][0];
+      }
+      // Best mode
+      const modeEntries = Object.entries(intel.modeStats);
+      if (modeEntries.length) {
+        intel.bestMode = modeEntries.sort((a,b)=>(b[1].pnl/Math.max(b[1].trades,1))-(a[1].pnl/Math.max(a[1].trades,1)))[0][0];
+      }
+      // Best hour
+      const hourEntries = Object.entries(intel.hourlyStats);
+      if (hourEntries.length) {
+        intel.bestHourUTC = Number(hourEntries.sort((a,b)=>(b[1].pnl/Math.max(b[1].trades,1))-(a[1].pnl/Math.max(a[1].trades,1)))[0][0]);
+      }
+    });
+    assetIntelRef.current = intelMap;
+    setAssetIntelligence(intelMap);
   }
 
   function getMtfScore(a: Asset, mode: Mode = "intradia") {
@@ -3813,6 +2262,15 @@ Rationale from system: ${signal.rationale}`;
   ];
   function hasCorrConflict(asset: Asset, direction: Direction, positions: Position[]): boolean {
     if (positions.length === 0) return false;
+    // 1. Correlación dinámica aprendida (umbral 0.75 = altamente correlacionados)
+    const dynConflict = positions.some(p => {
+      if (p.signal.asset === asset) return false;
+      if (p.signal.direction !== direction) return false;
+      const corr = correlationRef.current[asset]?.[p.signal.asset] ?? 0;
+      return Math.abs(corr) >= 0.75;
+    });
+    if (dynConflict) return true;
+    // 2. Fallback estático para activos sin correlación calculada
     const group = CORR_GROUPS.find(g => g.includes(asset));
     if (!group) return false;
     return positions.some(p =>
@@ -4111,6 +2569,8 @@ Rationale from system: ${signal.rationale}`;
         setMt5Account(d.account ?? null);
         setMt5Balance(d.balance ?? null);
         if (d.equity !== undefined) setMt5Equity(d.equity);
+        // Cargar catálogo de símbolos disponibles en el broker
+        void fetchMT5Symbols();
         // Sincronizar posiciones inmediatamente al conectar
         await syncMT5State();
         pushToast(
@@ -4183,6 +2643,307 @@ Rationale from system: ${signal.rationale}`;
     await closeInMT5(asset, undefined, ticket);
   }
 
+
+  // ─── fetchRealMarketSnapshot: pide precios + velas 1m al bridge MT5 ────────
+  // Usa /snapshot que devuelve todos los activos activos en una sola llamada.
+  // Para activos no presentes en /snapshot, hace fetch individual de /candles.
+  async function fetchRealMarketSnapshot(
+    prevPrices: Record<string, number>,
+    bridgeUrl: string,
+    _useBridge: boolean,
+  ): Promise<{
+    prices:      Record<string, number>;
+    seriesMap:   Record<string, number[]>;
+    candleMap:   Record<string, Candle[]>;
+    spreadMap:   Record<string, number>;
+    leverageMap: Record<string, number>;
+    shock:       number;
+    sourceNote:  string;
+  }> {
+    // ── 1. Llamar /snapshot — todos los activos en paralelo ──────────────────
+    const resp = await fetch(`${bridgeUrl}/snapshot`, {
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!resp.ok) throw new Error(`Bridge /snapshot HTTP ${resp.status}`);
+
+    const data = await resp.json() as {
+      assets: Record<string, {
+        price?: number; bid?: number; ask?: number;
+        spread?: number; spread_pct?: number;
+        leverage?: number; digits?: number;
+        candles?: Candle[];
+        error?: string;
+      }>;
+    };
+
+    const prices:      Record<string, number>   = { ...prevPrices };
+    const seriesMap:   Record<string, number[]>  = {};
+    const candleMap:   Record<string, Candle[]>  = {};
+    const spreadMap:   Record<string, number>    = {};
+    const leverageMap: Record<string, number>    = {};
+    const failed: string[] = [];
+
+    // ── 2. Procesar respuesta del bridge ─────────────────────────────────────
+    for (const [asset, d] of Object.entries(data.assets ?? {})) {
+      if (d.error || !d.price) { failed.push(asset); continue; }
+      prices[asset]  = d.price;
+      if (d.spread   !== undefined) spreadMap[asset]   = d.spread;
+      if (d.leverage !== undefined) leverageMap[asset] = d.leverage;
+      if (d.candles?.length) {
+        candleMap[asset]  = d.candles;
+        seriesMap[asset]  = d.candles.map(c => c.c);
+      }
+    }
+
+    // ── 3. Para activos del estado que no vinieron en /snapshot,
+    //       intentar fetch individual /candles/{asset}?tf=1m&limit=200 ─────────
+    const missing = assets.filter(a => !prices[a] || !seriesMap[a]);
+    if (missing.length > 0) {
+      await Promise.allSettled(missing.map(async a => {
+        try {
+          const r = await fetch(`${bridgeUrl}/candles/${a}?tf=1m&limit=200`, {
+            signal: AbortSignal.timeout(6000),
+          });
+          if (!r.ok) return;
+          const cd = await r.json() as { candles?: Candle[]; asset?: string };
+          if (cd.candles?.length) {
+            const last = cd.candles[cd.candles.length - 1];
+            prices[a]    = last.c;
+            candleMap[a] = cd.candles;
+            seriesMap[a] = cd.candles.map(c => c.c);
+          }
+        } catch { /* activo no disponible en este broker */ }
+      }));
+    }
+
+    // ── 4. Volatility shock basado en retornos de BTC ────────────────────────
+    const btcSeries = seriesMap["BTCUSD"] ?? seriesMap["BTCUSDT"] ?? [];
+    let shock = 0.28;
+    if (btcSeries.length > 10) {
+      const absRet = btcSeries
+        .slice(1)
+        .map((v, i) => Math.abs((v - btcSeries[i]) / Math.max(btcSeries[i], 1e-9)));
+      const meanRet = absRet.reduce((s, v) => s + v, 0) / absRet.length;
+      shock = Math.max(0.08, Math.min(1.25, meanRet * 220));
+    }
+
+    const ok = Object.keys(prices).filter(a => prices[a] > 0).length;
+    const sourceNote = failed.length > 0
+      ? `MT5 Bridge: ${ok} activos OK · ${failed.length} sin datos`
+      : `MT5 Bridge: ${ok} activos OK`;
+
+    return { prices, seriesMap, candleMap, spreadMap, leverageMap, shock, sourceNote };
+  }
+
+    // ─── fetchMT5Symbols: lee activos disponibles del broker ──────────────────
+  // Llama a /symbols del bridge (nuevo endpoint) y actualiza la lista de activos
+  async function fetchMT5Symbols() {
+    if (mt5Status !== "connected") return;
+    try {
+      const r = await fetch(`${mt5Url}/symbols`, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) return;
+
+      // Bridge v4 devuelve: { symbols: [...], resolved_map: { "BTCUSD": "BTCUSDT", ... }, total: N }
+      const data = await r.json() as {
+        symbols: Array<{
+          name: string; description: string;
+          spread: number; bid: number; ask: number;
+          trade_mode: number; filling_mode: number;
+          digits: number; contract_size: number;
+          volume_min: number; volume_step: number;
+          currency_base: string; currency_profit: string;
+          trade_allowed: boolean; visible: boolean;
+        }>;
+        resolved_map?: Record<string, string>; // TraderLab name → broker symbol
+        total: number;
+      };
+
+      if (!data.symbols?.length) return;
+
+      // ── Invertir resolved_map: broker_symbol → TraderLab name ───────────────
+      const brokerToTL: Record<string, string> = {};
+      if (data.resolved_map) {
+        Object.entries(data.resolved_map).forEach(([tl, broker]) => {
+          brokerToTL[broker] = tl;
+        });
+      }
+
+      // ── Filtrar solo activos con trading habilitado ──────────────────────────
+      const tradeable = data.symbols.filter(s => s.trade_allowed && s.trade_mode === 4);
+
+      // ── Mapear: para cada activo tradeable, usar nombre TraderLab si existe ──
+      const mapped = tradeable.map(s => {
+        // Intentar mapear al nombre TraderLab primero
+        const tlName = brokerToTL[s.name] ?? s.name;
+        const known  = ASSET_CATALOG[tlName] ?? ASSET_CATALOG[s.name];
+        const cat    = known?.category ?? inferCategoryFromSymbol(s.name, s.description, s.currency_base, s.currency_profit);
+        return {
+          name:         tlName,           // nombre TraderLab (o broker si no hay mapeo)
+          brokerName:   s.name,           // nombre real en MT5
+          category:     cat,
+          spread:       s.spread,
+          contractSize: s.contract_size,
+          digits:       s.digits,
+          volumeMin:    s.volume_min,
+        };
+      });
+
+      setAvailableSymbols(mapped);
+      pushToast(`📡 ${mapped.length} activos disponibles en el broker`, "info");
+
+      // ── Agregar TODOS los activos tradeables al assets state ─────────────────
+      // Los del ASSET_CATALOG tienen parámetros fine-tuned
+      // Los nuevos (desconocidos) se agregan con parámetros genéricos y size mínimo
+      const tlNames = mapped.map(m => m.name);
+
+      setAssets(prev => {
+        // Mantener los activos que ya estaban
+        const base = ["BTCUSD","ETHUSD","XAGUSD","XAUUSD"];
+        // Agregar del catálogo conocido
+        const fromCatalog = tlNames.filter(n => ASSET_CATALOG[n]);
+        // Agregar activos del broker que sean crypto o forex major por inferencia
+        const fromBroker  = mapped
+          .filter(m => (m.category === "crypto" || m.category === "forex_major" || m.category === "metals") && !ASSET_CATALOG[m.name])
+          .map(m => m.name);
+        const combined = [...new Set([...base, ...fromCatalog, ...fromBroker])];
+        return combined;
+      });
+
+    } catch (e) {
+      console.warn("[fetchMT5Symbols] error:", e);
+    }
+  }
+
+  // ── Infiere categoría desde nombre, descripción y monedas base/profit ───────
+  function inferCategoryFromSymbol(
+    name: string, desc: string, currBase: string, currProfit: string
+  ): AssetCategory {
+    const n = name.toUpperCase();
+    const d = (desc ?? "").toLowerCase();
+    // Crypto: moneda base no es divisa fiat conocida
+    const FIATS = new Set(["USD","EUR","GBP","JPY","CHF","AUD","CAD","NZD","HKD","SGD","NOK","SEK"]);
+    const cryptoNames = ["BTC","ETH","XRP","ADA","SOL","DOT","LINK","LTC","BNB","DOGE","AVAX","MATIC","USDT","POL"];
+    if (cryptoNames.some(c => n.startsWith(c) || n.includes(c+"USD") || n.includes(c+"USDT"))) return "crypto";
+    // Metales preciosos
+    if (n.startsWith("XAU") || n.startsWith("XAG") || n.startsWith("XPT") || n.startsWith("XPD")) return "metals";
+    if (d.includes("gold") || d.includes("silver") || d.includes("platinum")) return "metals";
+    // Índices
+    if (d.includes("index") || d.includes("indice") || d.includes("500") || d.includes("nasdaq") || d.includes("dow")) return "indices";
+    if (["US30","US500","USTEC","GER40","UK100","JP225","AUS200","FRA40"].some(x => n.includes(x))) return "indices";
+    // Energía
+    if (d.includes("crude") || d.includes("oil") || d.includes("brent") || d.includes("gas")) return "energy";
+    if (["OIL","WTI","BRENT","USOIL","UKOIL","NATGAS"].some(x => n.includes(x))) return "energy";
+    // Forex: ambas monedas son fiat
+    if (currBase && currProfit && FIATS.has(currBase) && FIATS.has(currProfit)) {
+      // Major: una de las dos es USD
+      if (currBase === "USD" || currProfit === "USD") return "forex_major";
+      return "forex_minor";
+    }
+    if (n.length === 6 && FIATS.has(n.slice(0,3)) && FIATS.has(n.slice(3))) {
+      return (n.includes("USD") ? "forex_major" : "forex_minor");
+    }
+    // Commodities
+    if (d.includes("wheat") || d.includes("corn") || d.includes("cotton") || d.includes("coffee") || d.includes("sugar")) return "commodities";
+    // Acciones
+    if (d.includes("stock") || d.includes("share") || d.includes("corp") || d.includes("inc")) return "stocks";
+    return "other";
+  }
+
+  // Alias para compatibilidad con código existente
+  function inferCategory(path: string, name: string): AssetCategory {
+    return inferCategoryFromSymbol(name, path, "", "");
+  }
+
+  // ─── updateAssetIntelligence: actualiza el aprendizaje tras cerrar un trade ─
+  function updateAssetIntelligence(trade: ClosedTrade) {
+    const symbol = trade.asset;
+    const session = getSessionProfile().name;
+    const hour = new Date().getUTCHours();
+    const isWin = trade.pnl > 0;
+    const rr = (trade as ClosedTrade & {rr?:number}).rr ?? 0;
+
+    setAssetIntelligence(prev => {
+      const existing = prev[symbol] ?? {
+        symbol, category: getAssetCategory(symbol),
+        totalTrades: 0, winRate: 0, avgRR: 0, avgPnl: 0, profitFactor: 1,
+        sessionStats: {}, modeStats: {}, hourlyStats: {},
+        optimalSLMult: 1.0, optimalTPMult: 2.0, avgSpreadPct: getAssetCatalog(symbol).spreadPct,
+        spreadByHour: {}, avgVolatility: 0, trendStrength: 0,
+        bestMode: "scalping", bestSession: "NY", bestHourUTC: 14,
+        correlations: {}, lastUpdated: new Date().toISOString(),
+      } as AssetIntelligence;
+
+      const n = existing.totalTrades;
+      const newTotal = n + 1;
+
+      // Session stats
+      const ss = existing.sessionStats[session] ?? { trades:0, wins:0, pnl:0, avgSpread:0 };
+      const newSS = { trades: ss.trades+1, wins: ss.wins+(isWin?1:0), pnl: ss.pnl+trade.pnl, avgSpread: ss.avgSpread };
+
+      // Mode stats
+      const ms = existing.modeStats[trade.mode] ?? { trades:0, wins:0, pnl:0, avgRR:0 };
+      const newMS = { trades: ms.trades+1, wins: ms.wins+(isWin?1:0), pnl: ms.pnl+trade.pnl, avgRR: (ms.avgRR*ms.trades+rr)/Math.max(ms.trades+1,1) };
+
+      // Hourly stats
+      const hs = existing.hourlyStats[hour] ?? { trades:0, wins:0, pnl:0 };
+      const newHS = { trades: hs.trades+1, wins: hs.wins+(isWin?1:0), pnl: hs.pnl+trade.pnl };
+
+      // Running WR y PnL
+      const allWins  = Object.values({...existing.sessionStats, [session]: newSS}).reduce((s,v)=>s+v.wins,0);
+      const newWR    = allWins / newTotal;
+      const newAvgPnl= (existing.avgPnl * n + trade.pnl) / newTotal;
+      const newAvgRR = (existing.avgRR * n + rr) / newTotal;
+
+      // Best session y best mode
+      const sessEntries = Object.entries({...existing.sessionStats, [session]: newSS});
+      const bestSess = sessEntries.sort((a,b) => (b[1].wins/Math.max(b[1].trades,1)) - (a[1].wins/Math.max(a[1].trades,1)))[0]?.[0] ?? "NY";
+      const modeEntries = Object.entries({...existing.modeStats, [trade.mode]: newMS});
+      const bestMode = modeEntries.sort((a,b) => (b[1].pnl/Math.max(b[1].trades,1)) - (a[1].pnl/Math.max(a[1].trades,1)))[0]?.[0] ?? "scalping";
+
+      // Best hour
+      const hourEntries = Object.entries({...existing.hourlyStats, [hour]: newHS});
+      const bestHour = hourEntries.sort((a,b) => (b[1].pnl/Math.max(b[1].trades,1)) - (a[1].pnl/Math.max(a[1].trades,1)))[0];
+
+      const updated: AssetIntelligence = {
+        ...existing,
+        totalTrades: newTotal,
+        winRate: newWR,
+        avgRR: newAvgRR,
+        avgPnl: newAvgPnl,
+        sessionStats: { ...existing.sessionStats, [session]: newSS },
+        modeStats:    { ...existing.modeStats,    [trade.mode]: newMS },
+        hourlyStats:  { ...existing.hourlyStats,  [hour]: newHS },
+        bestSession: bestSess,
+        bestMode: bestMode,
+        bestHourUTC: bestHour ? Number(bestHour[0]) : 14,
+        lastUpdated: new Date().toISOString(),
+      };
+      const next = { ...prev, [symbol]: updated };
+      assetIntelRef.current = next;
+      return next;
+    });
+  }
+
+  // ─── updateCorrelationMatrix: recalcula Pearson entre todos los activos ────
+  // Se llama cada 5 minutos o cuando llegan velas nuevas
+  function updateCorrelationMatrix(seriesData: Record<string, number[]>) {
+    const symbols = Object.keys(seriesData).filter(s => seriesData[s].length >= 20);
+    if (symbols.length < 2) return;
+
+    const matrix: Record<string, Record<string, number>> = {};
+    for (const a of symbols) {
+      matrix[a] = {};
+      for (const b of symbols) {
+        if (a === b) { matrix[a][b] = 1; continue; }
+        // Calcular solo si no existe o es > 5min viejo
+        const existing = correlationRef.current[a]?.[b];
+        matrix[a][b] = existing !== undefined ? existing : calcPearsonCorrelation(seriesData[a], seriesData[b]);
+      }
+    }
+    correlationRef.current = matrix;
+    setCorrelationMatrix(matrix);
+  }
+
   async function syncRealData() {
     setIsSyncing(true);
     const usingBridge = mt5Enabled && mt5Status === "connected";
@@ -4202,6 +2963,7 @@ Rationale from system: ${signal.rationale}`;
       setSeries(prev => {
         const next = { ...prev };
         assets.forEach(a => { const s = payload.seriesMap[a]; if (s?.length) next[a] = s; else next[a] = [...(prev[a] ?? []).slice(-159), payload.prices[a]]; });
+        seriesRef.current = next;
         return next;
       });
       setCandles(prev => {
@@ -4268,6 +3030,7 @@ Rationale from system: ${signal.rationale}`;
       const timeStr = new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
       setFeedStatus(`📡 ${timeStr} — ${payload.sourceNote}`);
       setLiveReady(true);
+      updateCorrelationMatrix(seriesRef.current);
     } catch (e) {
       setFeedStatus("❌ Feed no disponible");
       setLiveReady(false);
@@ -4347,29 +3110,55 @@ Rationale from system: ${signal.rationale}`;
   }
 
   async function runAutoScan() {
-    const prof = getSessionProfile();
-    const CRYPTO_ASSETS: Asset[] = ["BTCUSD", "ETHUSD"];
-    const ALL_ASSETS    = assets;
+    const prof       = getSessionProfile();
+    const sessionName = prof.name.split(" ")[0]; // "NY", "London", "Asia", etc.
+    const hourUTC     = new Date().getUTCHours();
+    const ALL_ASSETS  = assets;
 
-    const scanAssets = prof.isCryptoOnly
-      ? ALL_ASSETS.filter(a => CRYPTO_ASSETS.includes(a))
-      : ALL_ASSETS;
+    // ── Filtrar por sesión si es crypto-only ────────────────────────────────
+    const sessionFiltered = prof.isCryptoOnly
+      ? ALL_ASSETS.filter(a => isCryptoAsset(a))
+      : ALL_ASSETS.filter(a => {
+          // Excluir activos no apropiados para la sesión actual según catálogo
+          const cat = getAssetCatalog(a);
+          if (cat.sessions.length === 0) return true; // sin restricción
+          return cat.sessions.some(s => sessionName.includes(s) || s.includes(sessionName));
+        });
 
-    if (prof.isCryptoOnly && scanAssets.length === 0) return;
+    if (sessionFiltered.length === 0) return;
+
+    // ── Calcular opportunityScore y ordenar ─────────────────────────────────
+    const openSymbols = openPositionsRef.current.map(p => p.signal.asset);
+    const scored = sessionFiltered.map(a => ({
+      asset: a,
+      score: calcOpportunityScore(
+        a, assetIntelRef.current[a], sessionName, hourUTC,
+        openSymbols, correlationRef.current
+      )
+    })).sort((a, b) => b.score - a.score);
+
+    // Actualizar correlación cada 5 ciclos (~1-2min con scan cada 15s)
+    if (Math.random() < 0.2) {
+      updateCorrelationMatrix(seriesRef.current);
+    }
 
     const prevLen = openPositionsRef.current.length;
 
-    // ── Scalping nuevas posiciones ──────────────────────────────────────────
-    for (const a of scanAssets) await createSignalAndExecute("scalping", a, false);
-
-    // ── Intradía: solo sesiones institucionales ─────────────────────────────
-    if (!prof.isCryptoOnly) {
-      for (const a of scanAssets) await createSignalAndExecute("intradia", a, false);
+    // ── Scalping: todos ordenados por score ──────────────────────────────────
+    for (const { asset: a } of scored) {
+      await createSignalAndExecute("scalping", a, false);
     }
 
-    // ── Pyramiding: agregar lote a posiciones con TP1 tocado ────────────────
+    // ── Intradía: solo en sesiones institucionales (no crypto-only) ─────────
+    if (!prof.isCryptoOnly) {
+      for (const { asset: a } of scored) {
+        await createSignalAndExecute("intradia", a, false);
+      }
+    }
+
+    // ── Pyramiding ───────────────────────────────────────────────────────────
     const posWithTP1 = openPositionsRef.current.filter(p =>
-      p.tp1Hit && !(p.isPyramidAdd) && (p.pyramidCount ?? 0) < 2
+      p.tp1Hit && !p.isPyramidAdd && (p.pyramidCount ?? 0) < 2
     );
     for (const pos of posWithTP1) await tryPyramidAdd(pos);
 
@@ -4457,6 +3246,7 @@ Rationale from system: ${signal.rationale}`;
     { id: "trading" as AppTab, label: "Trading", icon: "📈" },
     { id: "backtest" as AppTab, label: "Backtest", icon: "🔬" },
     { id: "aprendizaje" as AppTab, label: "Aprendizaje", icon: "🧠" },
+    { id: "activos" as AppTab, label: "Activos IA", icon: "🌐" },
     { id: "configuracion" as AppTab, label: "Config", icon: "⚙️" },
   ];
 
@@ -5254,6 +4044,278 @@ Rationale from system: ${signal.rationale}`;
           </div>
         )}
 
+
+        {/* ━━━━━━━━━ ACTIVOS IA ━━━━━━━━━ */}
+        {appTab === "activos" && (() => {
+          const sessionName = getSessionProfile().name.split(" ")[0];
+          const hourUTC = new Date().getUTCHours();
+          const openSymbols = openPositions.map(p => p.signal.asset);
+
+          // Agrupar activos por categoría
+          const CAT_LABELS: Record<AssetCategory, string> = {
+            crypto:"⬡ Crypto", metals:"◈ Metales", forex_major:"₣ Forex Majors",
+            forex_minor:"₣ Forex Minors", indices:"▲ Índices", energy:"⛽ Energía",
+            stocks:"📈 Acciones", commodities:"🌾 Commodities", other:"Otros",
+          };
+          const CAT_ORDER: AssetCategory[] = ["crypto","metals","forex_major","forex_minor","indices","energy","stocks","commodities","other"];
+
+          const grouped: Record<string, Asset[]> = {};
+          assets.forEach(a => {
+            const cat = getAssetCategory(a);
+            if (!grouped[cat]) grouped[cat] = [];
+            grouped[cat].push(a);
+          });
+
+          // Ordenar dentro de cada grupo por opportunityScore
+          Object.keys(grouped).forEach(cat => {
+            grouped[cat].sort((a,b) =>
+              calcOpportunityScore(b, assetIntelligence[b], sessionName, hourUTC, openSymbols, correlationMatrix)
+              - calcOpportunityScore(a, assetIntelligence[a], sessionName, hourUTC, openSymbols, correlationMatrix)
+            );
+          });
+
+          // Matriz de correlación — top activos con datos
+          const assetsWithData = assets.filter(a => assetIntelligence[a] || correlationMatrix[a]);
+          const corrAssets = assetsWithData.slice(0, 12); // max 12 para la tabla
+
+          return (
+            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+
+              {/* ── Header info ── */}
+              <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                <div className="card" style={{ flex:"1 1 200px", minWidth:180, padding:"10px 14px" }}>
+                  <p style={{ fontSize:11, color:"var(--muted)", marginBottom:4 }}>Activos monitoreados</p>
+                  <p style={{ fontSize:22, fontWeight:800, color:"#6366f1" }}>{assets.length}</p>
+                  <p style={{ fontSize:10, color:"var(--muted)" }}>en {Object.keys(grouped).length} categorías</p>
+                </div>
+                <div className="card" style={{ flex:"1 1 200px", minWidth:180, padding:"10px 14px" }}>
+                  <p style={{ fontSize:11, color:"var(--muted)", marginBottom:4 }}>Con inteligencia aprendida</p>
+                  <p style={{ fontSize:22, fontWeight:800, color:"#10b981" }}>{Object.keys(assetIntelligence).length}</p>
+                  <p style={{ fontSize:10, color:"var(--muted)" }}>de {assets.length} activos totales</p>
+                </div>
+                <div className="card" style={{ flex:"1 1 200px", minWidth:180, padding:"10px 14px" }}>
+                  <p style={{ fontSize:11, color:"var(--muted)", marginBottom:4 }}>Correlaciones calculadas</p>
+                  <p style={{ fontSize:22, fontWeight:800, color:"#f59e0b" }}>{Object.keys(correlationMatrix).length}</p>
+                  <p style={{ fontSize:10, color:"var(--muted)" }}>pares analizados (200 velas 1m)</p>
+                </div>
+                <div className="card" style={{ flex:"1 1 200px", minWidth:180, padding:"10px 14px" }}>
+                  <p style={{ fontSize:11, color:"var(--muted)", marginBottom:4 }}>Sesión activa</p>
+                  <p style={{ fontSize:18, fontWeight:800, color:"#a5b4fc" }}>{getSessionProfile().emoji} {sessionName}</p>
+                  <p style={{ fontSize:10, color:"var(--muted)" }}>hora UTC: {hourUTC}:00</p>
+                </div>
+              </div>
+
+              {/* ── Activos por categoría con score ── */}
+              {CAT_ORDER.filter(cat => grouped[cat]?.length > 0).map(cat => (
+                <div key={cat} className="card">
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+                    <h3 style={{ fontWeight:800, fontSize:13, margin:0 }}>{CAT_LABELS[cat]}</h3>
+                    <span style={{ fontSize:10, color:"var(--muted)", background:"rgba(255,255,255,0.05)", padding:"1px 6px", borderRadius:8 }}>
+                      {grouped[cat].length} activos
+                    </span>
+                  </div>
+                  <div style={{ overflowX:"auto" }}>
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11.5 }}>
+                      <thead>
+                        <tr>
+                          {["Activo","Score","Trades","WR%","P&L","Mejor sesión","Mejor modo","Mejor hora","Precio","Spread"].map(h => (
+                            <th key={h} style={{ textAlign:"left", padding:"4px 8px", fontSize:10, textTransform:"uppercase",
+                              letterSpacing:"0.07em", color:"var(--muted)", borderBottom:"1px solid var(--border)", whiteSpace:"nowrap" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {grouped[cat].map(a => {
+                          const intel = assetIntelligence[a];
+                          const score = calcOpportunityScore(a, intel, sessionName, hourUTC, openSymbols, correlationMatrix);
+                          const scoreColor = score >= 70 ? "#10b981" : score >= 50 ? "#f59e0b" : "#ef4444";
+                          const scoreBg    = score >= 70 ? "rgba(16,185,129,0.12)" : score >= 50 ? "rgba(245,158,11,0.10)" : "rgba(239,68,68,0.08)";
+                          const price = prices[a] ?? 0;
+                          const cat2 = getAssetCatalog(a);
+                          const dp = cat2.digits > 3 ? 4 : 2;
+                          return (
+                            <tr key={a} style={{ borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
+                              <td style={{ padding:"6px 8px" }}>
+                                <div style={{ fontWeight:700 }}>{a}</div>
+                                <div style={{ fontSize:10, color:"var(--muted)" }}>{getAssetLabel(a).replace(a+" ","").replace(a,"")}</div>
+                              </td>
+                              <td style={{ padding:"6px 8px" }}>
+                                <span style={{ fontWeight:800, fontSize:13, padding:"2px 8px", borderRadius:8, background:scoreBg, color:scoreColor }}>
+                                  {score.toFixed(0)}
+                                </span>
+                              </td>
+                              <td style={{ padding:"6px 8px", color: intel ? "var(--text)" : "var(--muted)" }}>
+                                {intel ? intel.totalTrades : "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", fontWeight:700, color: intel ? (intel.winRate >= 0.5 ? "#10b981" : intel.winRate >= 0.4 ? "#f59e0b" : "#ef4444") : "var(--muted)" }}>
+                                {intel ? (intel.winRate*100).toFixed(1)+"%" : "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", fontWeight:700, color: intel ? (intel.avgPnl >= 0 ? "#10b981" : "#ef4444") : "var(--muted)" }}>
+                                {intel ? (intel.avgPnl >= 0 ? "+" : "") + intel.avgPnl.toFixed(2) : "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", color:"#a5b4fc" }}>
+                                {intel?.bestSession ?? "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", color: intel?.bestMode === "scalping" ? "#818cf8" : "#f59e0b" }}>
+                                {intel?.bestMode ?? "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", color:"var(--muted)" }}>
+                                {intel ? `${intel.bestHourUTC}:00 UTC` : "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", fontFamily:"'JetBrains Mono',monospace", fontSize:11 }}>
+                                {price > 0 ? price.toFixed(dp) : "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", fontSize:10, color:"var(--muted)" }}>
+                                {(cat2.spreadPct*100).toFixed(2)}%
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
+
+              {/* ── Matriz de correlación ── */}
+              {corrAssets.length >= 2 && (
+                <div className="card">
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+                    <h3 style={{ fontWeight:800, fontSize:13, margin:0 }}>🔗 Matriz de correlación dinámica</h3>
+                    <span style={{ fontSize:10, color:"var(--muted)" }}>Pearson · últimas 200 velas 1m</span>
+                  </div>
+                  <p style={{ fontSize:11, color:"var(--muted)", marginBottom:10 }}>
+                    Verde = descorrelacionado (diversifica cartera) · Rojo = correlacionado (riesgo concentrado) · El bot bloquea posiciones con r ≥ 0.75 en misma dirección.
+                  </p>
+                  <div style={{ overflowX:"auto" }}>
+                    <table style={{ borderCollapse:"collapse", fontSize:10 }}>
+                      <thead>
+                        <tr>
+                          <th style={{ padding:"4px 8px", textAlign:"left", fontSize:10, color:"var(--muted)", borderBottom:"1px solid var(--border)" }}>–</th>
+                          {corrAssets.map(a => (
+                            <th key={a} style={{ padding:"4px 6px", fontSize:9.5, fontWeight:700, color:"var(--muted)", borderBottom:"1px solid var(--border)", whiteSpace:"nowrap" }}>{a}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {corrAssets.map(rowA => (
+                          <tr key={rowA}>
+                            <td style={{ padding:"4px 8px", fontWeight:700, fontSize:10, color:"var(--text)", whiteSpace:"nowrap", borderRight:"1px solid var(--border)" }}>{rowA}</td>
+                            {corrAssets.map(colA => {
+                              const corr = rowA === colA ? 1 : (correlationMatrix[rowA]?.[colA] ?? null);
+                              if (corr === null) return (
+                                <td key={colA} style={{ padding:"4px 6px", textAlign:"center", color:"var(--muted)", fontSize:9 }}>–</td>
+                              );
+                              const abs = Math.abs(corr);
+                              const isDiag = rowA === colA;
+                              // Color: verde=descorrelacionado, rojo=muy correlacionado
+                              const r = isDiag ? 40 : Math.round(abs * 200);
+                              const g = isDiag ? 150 : Math.round((1 - abs) * 150);
+                              const bg = isDiag ? "rgba(99,102,241,0.2)" : `rgba(${r},${g},60,${abs*0.4+0.08})`;
+                              const textColor = isDiag ? "#a5b4fc" : abs >= 0.75 ? "#ef4444" : abs >= 0.5 ? "#f59e0b" : "#10b981";
+                              return (
+                                <td key={colA} style={{ padding:"4px 6px", textAlign:"center", background:bg, fontWeight: abs >= 0.6 ? 800 : 500, color: textColor, fontSize:10, borderRadius:3 }}>
+                                  {isDiag ? "◆" : corr.toFixed(2)}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {corrAssets.length === 0 && (
+                    <p style={{ fontSize:11, color:"var(--muted)", textAlign:"center", padding:20 }}>
+                      La correlación se calcula automáticamente con las velas 1m del bridge. Sincronicé primero.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* ── Intelligence por activo (detalle expandido) ── */}
+              {Object.keys(assetIntelligence).length > 0 && (
+                <div className="card">
+                  <h3 style={{ fontWeight:800, fontSize:13, marginBottom:12 }}>🧠 Inteligencia aprendida por activo</h3>
+                  {Object.entries(assetIntelligence).sort((a,b) => (b[1].profitFactor - a[1].profitFactor)).map(([sym, intel]) => (
+                    <div key={sym} style={{ marginBottom:14, padding:"10px 12px", borderRadius:10,
+                      background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.07)" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
+                        <span style={{ fontWeight:800, fontSize:14 }}>{sym}</span>
+                        <span style={{ fontSize:10, padding:"2px 7px", borderRadius:8, fontWeight:700,
+                          background:"rgba(99,102,241,0.15)", color:"#a5b4fc" }}>
+                          {CAT_LABELS[intel.category] ?? intel.category}
+                        </span>
+                        <span style={{ fontSize:10, color:"var(--muted)", marginLeft:"auto" }}>
+                          {intel.totalTrades} trades · actualizado {new Date(intel.lastUpdated).toLocaleTimeString("es",{hour:"2-digit",minute:"2-digit"})}
+                        </span>
+                      </div>
+                      {/* Métricas clave */}
+                      <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:6, marginBottom:8 }}>
+                        {[
+                          { label:"Win Rate", value:(intel.winRate*100).toFixed(1)+"%", color: intel.winRate >= 0.5 ? "#10b981" : "#ef4444" },
+                          { label:"PF",       value:intel.profitFactor.toFixed(2), color: intel.profitFactor >= 1.5 ? "#10b981" : "#f59e0b" },
+                          { label:"Avg PnL",  value:(intel.avgPnl >= 0 ? "+" : "")+intel.avgPnl.toFixed(2), color: intel.avgPnl >= 0 ? "#10b981" : "#ef4444" },
+                          { label:"Mejor sesión", value:intel.bestSession, color:"#a5b4fc" },
+                          { label:"Mejor hora", value:`${intel.bestHourUTC}:00 UTC`, color:"var(--muted)" },
+                        ].map(({label,value,color}) => (
+                          <div key={label} style={{ textAlign:"center", padding:"5px", background:"rgba(255,255,255,0.03)", borderRadius:6 }}>
+                            <div style={{ fontSize:9, color:"var(--muted)", textTransform:"uppercase", marginBottom:2 }}>{label}</div>
+                            <div style={{ fontWeight:800, fontSize:12, color }}>{value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {/* Stats por sesión */}
+                      {Object.keys(intel.sessionStats).length > 0 && (
+                        <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:6 }}>
+                          {Object.entries(intel.sessionStats).map(([sess, st]) => (
+                            <div key={sess} style={{ fontSize:10, padding:"3px 8px", borderRadius:6,
+                              background: (st.wins/Math.max(st.trades,1)) >= 0.5 ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.08)",
+                              border: "1px solid rgba(255,255,255,0.07)" }}>
+                              <span style={{ color:"var(--muted)" }}>{sess}: </span>
+                              <span style={{ fontWeight:700, color: (st.wins/Math.max(st.trades,1)) >= 0.5 ? "#10b981" : "#ef4444" }}>
+                                {st.trades}t · {((st.wins/Math.max(st.trades,1))*100).toFixed(0)}%WR · {st.pnl >= 0 ? "+" : ""}{st.pnl.toFixed(1)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {/* Correlaciones más fuertes */}
+                      {Object.keys(intel.correlations).length > 0 && (
+                        <div style={{ fontSize:10, color:"var(--muted)" }}>
+                          <span style={{ fontWeight:700 }}>Correlaciones: </span>
+                          {Object.entries(intel.correlations)
+                            .sort((a,b) => Math.abs(b[1]) - Math.abs(a[1]))
+                            .slice(0, 5)
+                            .map(([sym2, corr]) => (
+                              <span key={sym2} style={{ marginLeft:8,
+                                color: Math.abs(corr) >= 0.75 ? "#ef4444" : Math.abs(corr) >= 0.5 ? "#f59e0b" : "#10b981",
+                                fontWeight: Math.abs(corr) >= 0.75 ? 800 : 500 }}>
+                                {sym2}: {corr >= 0 ? "+" : ""}{corr.toFixed(2)}
+                              </span>
+                            ))
+                          }
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* ── Estado: sin datos aún ── */}
+              {Object.keys(assetIntelligence).length === 0 && (
+                <div className="card" style={{ textAlign:"center", padding:40, color:"var(--muted)" }}>
+                  <p style={{ fontSize:24, marginBottom:12 }}>🧠</p>
+                  <p style={{ fontWeight:700, fontSize:15, color:"var(--text)", marginBottom:8 }}>Sin inteligencia aprendida aún</p>
+                  <p style={{ fontSize:12 }}>
+                    El sistema aprende automáticamente con cada trade real cerrado.<br/>
+                    Los scores de oportunidad se activan desde el primer trade.
+                  </p>
+                </div>
+              )}
+
+            </div>
+          );
+        })()}
         {/* ━━━━━━━━━ CONFIGURACION ━━━━━━━━━ */}
         {appTab === "configuracion" && (
           <div style={{ maxWidth: 580, display: "flex", flexDirection: "column", gap: 14 }}>
