@@ -507,6 +507,9 @@ function AiChatPanel({
   const [input,    setInput]    = React.useState("");
   const [loading,  setLoading]  = React.useState(false);
   const [aiStatus, setAiStatus] = React.useState<string>("idle");
+    const endRef = React.useRef<HTMLDivElement>(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    React.useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
   function chatStatsByAsset(trades: ClosedTrade[]): string {
     return ["BTCUSD","ETHUSD","XAUUSD","XAGUSD"].map(a => {
