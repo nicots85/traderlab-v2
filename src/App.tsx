@@ -820,6 +820,417 @@ class ErrorBoundary extends React.Component<
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ─── COMPONENTES UI ──────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── ErrorBoundary ─────────────────────────────────────────────────────────────
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error: Error) { return { hasError: true, error }; }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ background: "#0f172a", color: "#f87171", padding: 32, fontFamily: "monospace", fontSize: 14, minHeight: "100vh" }}>
+          <h2 style={{ marginBottom: 12 }}>TraderLab — Error</h2>
+          <pre style={{ whiteSpace: "pre-wrap" }}>{this.state.error?.message}</pre>
+          <button onClick={() => this.setState({ hasError: false, error: null })}
+            style={{ marginTop: 16, padding: "8px 16px", background: "#6366f1", color: "#fff", border: "none", borderRadius: 8, cursor: "pointer" }}>
+            Reintentar
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// ── ToastList ─────────────────────────────────────────────────────────────────
+function ToastList({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: number) => void }) {
+  return (
+    <div style={{ position: "fixed", top: 16, right: 16, zIndex: 9999, display: "flex", flexDirection: "column", gap: 8, pointerEvents: "none" }}>
+      {toasts.map(t => (
+        <div key={t.id} onClick={() => onRemove(t.id)}
+          style={{
+            pointerEvents: "all", cursor: "pointer", minWidth: 260, maxWidth: 380,
+            padding: "10px 14px", borderRadius: 10, fontSize: 13, fontWeight: 600,
+            background: t.type === "success" ? "rgba(16,185,129,0.92)" : t.type === "error" ? "rgba(239,68,68,0.92)" : t.type === "warning" ? "rgba(245,158,11,0.92)" : "rgba(99,102,241,0.92)",
+            color: "#fff", boxShadow: "0 4px 20px rgba(0,0,0,0.4)",
+          }}>
+          {t.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── TechTip ───────────────────────────────────────────────────────────────────
+const TECH_TIPS: Record<string, string> = {
+  Wyckoff: "Metodología de análisis de fases del mercado: Acumulación (A-B-C), Distribución y tendencia (D-E).",
+  RSI: "Relative Strength Index — oscilador 0-100. >70 sobrecomprado, <30 sobrevendido.",
+  VWAP: "Volume Weighted Average Price — precio promedio ponderado por volumen. Referencia institucional.",
+  ATR: "Average True Range — medida de volatilidad. El SL se calcula como múltiplo del ATR.",
+  CVD: "Cumulative Volume Delta — diferencia acumulada entre volumen compra/venta.",
+};
+function TechTip({ term, children }: { term: string; children: React.ReactNode }) {
+  const tip = TECH_TIPS[term];
+  if (!tip) return <>{children}</>;
+  return (
+    <span className="tip">
+      {children}
+      <i className="tip-icon">?</i>
+      <span className="tip-box">{tip}</span>
+    </span>
+  );
+}
+
+// ── AiBadge ───────────────────────────────────────────────────────────────────
+function AiBadge({ status, onTest, latency }: { status: string; onTest: () => void; latency: number | null }) {
+  const cfg: Record<string, { bg: string; color: string; label: string }> = {
+    idle:     { bg: "rgba(16,185,129,0.15)",  color: "#10b981", label: "IA lista" },
+    loading:  { bg: "rgba(245,158,11,0.15)",  color: "#f59e0b", label: "IA procesando" },
+    error:    { bg: "rgba(239,68,68,0.15)",   color: "#ef4444", label: "IA error" },
+    disabled: { bg: "rgba(255,255,255,0.06)", color: "var(--muted)", label: "IA inactiva" },
+  };
+  const c = cfg[status] ?? cfg.disabled;
+  return (
+    <button onClick={onTest} title="Testear conexion IA"
+      style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 10px", borderRadius: 20,
+        background: c.bg, color: c.color, border: `1px solid ${c.color}40`,
+        fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: c.color, flexShrink: 0 }} />
+      {c.label}
+      {latency !== null && <span style={{ opacity: 0.7 }}> {latency}ms</span>}
+    </button>
+  );
+}
+
+// ── CandlestickChart ──────────────────────────────────────────────────────────
+function CandlestickChart({
+  candles, indicators, wyckoff, showIndicators,
+}: {
+  candles: Candle[];
+  indicators: Indicators | null;
+  wyckoff: WyckoffAnalysis | null;
+  showIndicators: boolean;
+}) {
+  const W = 640, H = 220, PL = 52, PR = 8, PT = 10, PB = 22;
+  const data = candles.slice(-80);
+  if (!data.length) {
+    return (
+      <div style={{ width: "100%", height: H, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontSize: 12 }}>
+        Sin datos de velas — conecta el bridge MT5
+      </div>
+    );
+  }
+  const hi = Math.max(...data.map(c => c.h));
+  const lo = Math.min(...data.map(c => c.l));
+  const range = hi - lo || 1;
+  const cW = (W - PL - PR) / data.length;
+  const bW = Math.max(1.5, cW * 0.6);
+  const py = (p: number) => PT + ((hi - p) / range) * (H - PT - PB);
+  const px = (i: number) => PL + i * cW + cW / 2;
+  const ticks = Array.from({ length: 5 }, (_, i) => lo + (range / 4) * (4 - i));
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, display: "block" }}>
+      <rect width={W} height={H} fill="transparent" />
+      {ticks.map((t, i) => (
+        <g key={i}>
+          <line x1={PL} x2={W - PR} y1={py(t)} y2={py(t)} stroke="rgba(255,255,255,0.04)" strokeWidth={1} />
+          <text x={PL - 4} y={py(t) + 3.5} textAnchor="end" fontSize={9} fill="rgba(156,163,184,0.5)">
+            {t >= 1000 ? t.toFixed(0) : t >= 1 ? t.toFixed(2) : t.toFixed(4)}
+          </text>
+        </g>
+      ))}
+      {wyckoff?.supportZone && (
+        <rect x={PL} width={W - PL - PR}
+          y={py(wyckoff.supportZone[1])} height={Math.max(1, py(wyckoff.supportZone[0]) - py(wyckoff.supportZone[1]))}
+          fill="rgba(16,185,129,0.06)" />
+      )}
+      {wyckoff?.resistanceZone && (
+        <rect x={PL} width={W - PL - PR}
+          y={py(wyckoff.resistanceZone[1])} height={Math.max(1, py(wyckoff.resistanceZone[0]) - py(wyckoff.resistanceZone[1]))}
+          fill="rgba(239,68,68,0.06)" />
+      )}
+      {showIndicators && indicators && (
+        <>
+          <path d={data.map((_, i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.bbUpper)}`).join(" ")}
+            fill="none" stroke="rgba(99,102,241,0.35)" strokeWidth={1} strokeDasharray="3,3" />
+          <path d={data.map((_, i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.bbLower)}`).join(" ")}
+            fill="none" stroke="rgba(99,102,241,0.35)" strokeWidth={1} strokeDasharray="3,3" />
+          <path d={data.map((_, i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwap)}`).join(" ")}
+            fill="none" stroke="rgba(245,158,11,0.7)" strokeWidth={1.5} />
+          <path d={data.map((_, i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwapUpperBand1)}`).join(" ")}
+            fill="none" stroke="rgba(245,158,11,0.3)" strokeWidth={1} strokeDasharray="2,3" />
+          <path d={data.map((_, i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwapLowerBand1)}`).join(" ")}
+            fill="none" stroke="rgba(245,158,11,0.3)" strokeWidth={1} strokeDasharray="2,3" />
+        </>
+      )}
+      {data.map((c, i) => {
+        const bull = c.c >= c.o;
+        const col  = bull ? "#10b981" : "#ef4444";
+        const bTop = py(Math.max(c.o, c.c));
+        const bBot = py(Math.min(c.o, c.c));
+        return (
+          <g key={i}>
+            <line x1={px(i)} x2={px(i)} y1={py(c.h)} y2={py(c.l)} stroke={col} strokeWidth={1} opacity={0.7} />
+            <rect x={px(i) - bW / 2} y={bTop} width={bW} height={Math.max(1, bBot - bTop)}
+              fill={bull ? "rgba(16,185,129,0.85)" : "rgba(239,68,68,0.85)"} stroke={col} strokeWidth={0.5} />
+          </g>
+        );
+      })}
+      {wyckoff?.events.map((ev, i) => {
+        const idx = Math.min(ev.candleIndex, data.length - 1);
+        return (
+          <g key={i}>
+            <line x1={px(idx)} x2={px(idx)} y1={PT} y2={H - PB} stroke={ev.color} strokeWidth={1} strokeDasharray="2,3" opacity={0.5} />
+            <text x={px(idx)} y={py(ev.price) - 5} textAnchor="middle" fontSize={8} fill={ev.color} fontWeight={700}>{ev.label}</text>
+          </g>
+        );
+      })}
+      {data.map((c, i) => {
+        if (i % 15 !== 0) return null;
+        const d = new Date(c.t * 1000);
+        return (
+          <text key={i} x={px(i)} y={H - 5} textAnchor="middle" fontSize={8} fill="rgba(156,163,184,0.4)">
+            {`${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}`}
+          </text>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ── IndicatorPanel ────────────────────────────────────────────────────────────
+function IndicatorPanel({ ind, mode }: { ind: Indicators | null; mode: string }) {
+  if (!ind) return null;
+  const rsiColor = ind.rsi > 70 ? "#ef4444" : ind.rsi < 30 ? "#10b981" : "var(--text)";
+  const items = [
+    { label: "RSI(14)", value: ind.rsi.toFixed(1), color: rsiColor },
+    { label: "Stoch K/D", value: `${ind.stochK.toFixed(1)}/${ind.stochD.toFixed(1)}`, color: ind.stochK > 80 ? "#ef4444" : ind.stochK < 20 ? "#10b981" : "var(--text)" },
+    { label: "MA5/20", value: `${ind.ma5.toFixed(2)}/${ind.ma20.toFixed(2)}`, color: ind.ma5 > ind.ma20 ? "#10b981" : "#ef4444" },
+    { label: "VWAP", value: ind.vwap.toFixed(2), color: "var(--text)" },
+    { label: "BB Squeeze", value: ind.bbSqueeze ? "SQ" : "No", color: ind.bbSqueeze ? "#f59e0b" : "var(--muted)" },
+    { label: "Vol Delta", value: `${ind.volumeDeltaPct >= 0 ? "+" : ""}${ind.volumeDeltaPct.toFixed(1)}%`, color: ind.volumeDeltaPct > 10 ? "#10b981" : ind.volumeDeltaPct < -10 ? "#ef4444" : "var(--muted)" },
+    { label: "ATR", value: ind.atr.toFixed(4), color: "var(--text)" },
+    { label: "RSI Div", value: ind.rsiDivergence === "none" ? "-" : ind.rsiDivergence === "bullish" ? "Bull" : "Bear", color: ind.rsiDivergence === "bullish" ? "#10b981" : ind.rsiDivergence === "bearish" ? "#ef4444" : "var(--muted)" },
+  ];
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(130px,1fr))", gap: 6 }}>
+      {items.map(({ label, value, color }) => (
+        <div key={label} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 6, padding: "5px 9px" }}>
+          <p style={{ fontSize: 10, color: "var(--muted)", marginBottom: 1 }}>{label}</p>
+          <p style={{ fontSize: 12.5, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color }}>{value}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── WyckoffPanel ──────────────────────────────────────────────────────────────
+function WyckoffPanel({ wyckoff }: { wyckoff: WyckoffAnalysis }) {
+  const phaseColor: Record<string, string> = { A:"#f59e0b",B:"#f59e0b",C:"#ef4444",D:"#10b981",E:"#10b981",unknown:"var(--muted)" };
+  const biasColor = wyckoff.bias === "accumulation" ? "#10b981" : wyckoff.bias === "distribution" ? "#ef4444" : "var(--muted)";
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 10, background: `${phaseColor[wyckoff.phase]}22`, color: phaseColor[wyckoff.phase], fontWeight: 700 }}>
+          Fase {wyckoff.phase}
+        </span>
+        <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 10, background: `${biasColor}22`, color: biasColor, fontWeight: 700 }}>
+          {wyckoff.bias === "accumulation" ? "Acumulacion" : wyckoff.bias === "distribution" ? "Distribucion" : "Neutral"}
+        </span>
+        {wyckoff.supportZone && <span style={{ fontSize: 10, color:"var(--muted)" }}>S: {wyckoff.supportZone[0].toFixed(2)}-{wyckoff.supportZone[1].toFixed(2)}</span>}
+        {wyckoff.resistanceZone && <span style={{ fontSize: 10, color:"var(--muted)" }}>R: {wyckoff.resistanceZone[0].toFixed(2)}-{wyckoff.resistanceZone[1].toFixed(2)}</span>}
+      </div>
+      {wyckoff.events.length > 0 && (
+        <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+          {wyckoff.events.slice(-5).map((ev, i) => (
+            <span key={i} style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: `${ev.color}22`, color: ev.color, fontWeight: 700 }}>{ev.label}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── OrderFlowPanel ────────────────────────────────────────────────────────────
+function OrderFlowPanel({ of: of_, price }: { of: OrderFlowScore; price: number }) {
+  const ctrlColor = of_.control === "bulls" ? "#10b981" : of_.control === "bears" ? "#ef4444" : "#f59e0b";
+  const pct = (of_.controlScore + 100) / 2;
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+        <span style={{ fontSize: 11, color: "var(--muted)" }}>Order Flow</span>
+        <span style={{ fontSize: 12, fontWeight: 800, color: ctrlColor }}>
+          {of_.control === "bulls" ? "Toros" : of_.control === "bears" ? "Osos" : "Disputado"}
+          <span style={{ fontSize: 10, marginLeft: 5, opacity: 0.7 }}>{of_.controlScore.toFixed(0)}</span>
+        </span>
+      </div>
+      <div style={{ height: 6, borderRadius: 3, background: "rgba(255,255,255,0.08)", overflow: "hidden", marginBottom: 6 }}>
+        <div style={{ height: "100%", width: `${pct}%`, background: ctrlColor, borderRadius: 3 }} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+        {[
+          { label: "CVD", value: of_.cvdScore.toFixed(0) },
+          { label: "Footprint", value: of_.footprintScore.toFixed(0) },
+        ].map(({ label, value }) => (
+          <div key={label} style={{ textAlign: "center", background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "3px 0" }}>
+            <p style={{ fontSize: 9, color: "var(--muted)" }}>{label}</p>
+            <p style={{ fontSize: 11.5, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace" }}>{value}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── LivePositionCard ──────────────────────────────────────────────────────────
+function LivePositionCard({
+  position, prices, spreadByAsset, now, onClose,
+}: {
+  position: Position; prices: Record<string, number>;
+  spreadByAsset: Record<string, number>; now: number;
+  onClose: (p: Position) => void;
+}) {
+  const price  = prices[position.signal.asset] ?? position.signal.entry;
+  const cs     = getAssetCatalog(position.signal.asset).contractSize ?? 1;
+  const pnl    = position.direction === "LONG"
+    ? (price - position.signal.entry) * position.lot * cs
+    : (position.signal.entry - price) * position.lot * cs;
+  const dur    = Math.floor((now - position.openTime) / 60000);
+  const pnlCol = pnl >= 0 ? "#10b981" : "#ef4444";
+  return (
+    <div className="live-card" style={{ borderLeft: `3px solid ${position.direction === "LONG" ? "#10b981" : "#ef4444"}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontWeight: 800, fontSize: 13 }}>{position.signal.asset}</span>
+          <span style={{ fontSize: 11, padding: "1px 6px", borderRadius: 4, fontWeight: 700,
+            background: position.direction === "LONG" ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
+            color: position.direction === "LONG" ? "#10b981" : "#ef4444" }}>{position.direction}</span>
+          <span style={{ fontSize: 10, color: "var(--muted)" }}>{position.signal.mode} · {dur}m</span>
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 800, fontSize: 14, color: pnlCol }}>
+            {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}$
+          </span>
+          <button onClick={() => onClose(position)}
+            style={{ fontSize: 11, padding: "2px 8px", borderRadius: 5, border: "1px solid rgba(239,68,68,0.3)",
+              background: "rgba(239,68,68,0.08)", color: "#ef4444", cursor: "pointer", fontWeight: 700 }}>
+            X Cerrar
+          </button>
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 4, fontSize: 11 }}>
+        {[["Entrada", position.signal.entry.toFixed(2)], ["Precio", price.toFixed(2)],
+          ["SL", position.signal.stopLoss.toFixed(2)], ["TP1", position.signal.tp1.toFixed(2)]].map(([k, v]) => (
+          <div key={k} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "3px 6px" }}>
+            <p style={{ fontSize: 9, color: "var(--muted)" }}>{k}</p>
+            <p style={{ fontSize: 11, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace" }}>{v}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── TradeHistory ──────────────────────────────────────────────────────────────
+function TradeHistory({ trades }: { trades: ClosedTrade[] }) {
+  if (!trades.length) return (
+    <p style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: 16 }}>Sin trades cerrados aun</p>
+  );
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 320, overflowY: "auto" }}>
+      {[...trades].reverse().slice(0, 40).map((t, i) => {
+        const pnlColor = t.pnl >= 0 ? "#10b981" : "#ef4444";
+        return (
+          <div key={i} style={{ display: "grid", gridTemplateColumns: "65px 50px 55px 1fr 65px 60px", gap: 4,
+            padding: "5px 8px", borderRadius: 6, background: "rgba(255,255,255,0.025)",
+            fontSize: 11, alignItems: "center", fontFamily: "'JetBrains Mono',monospace" }}>
+            <span style={{ fontWeight: 700 }}>{t.asset}</span>
+            <span style={{ color: t.direction === "LONG" ? "#10b981" : "#ef4444", fontWeight: 700 }}>{t.direction}</span>
+            <span style={{ color: "var(--muted)" }}>{t.mode}</span>
+            <span style={{ color: "var(--muted)", fontSize: 10, fontFamily: "sans-serif", overflow: "hidden", whiteSpace: "nowrap" }}>{t.result}</span>
+            <span style={{ color: pnlColor, fontWeight: 800, textAlign: "right" }}>{t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(2)}$</span>
+            <span style={{ color: "var(--muted)", fontSize: 10 }}>{new Date(t.closeTime ?? Date.now()).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── BacktestTab ───────────────────────────────────────────────────────────────
+function BacktestTab({
+  liveReady, backtestSize, setBacktestSize, riskPct, setRiskPct,
+  runBacktest, lastBacktest, backtestTrades,
+}: {
+  liveReady: boolean; backtestSize: number; setBacktestSize: (n: number) => void;
+  riskPct: number; setRiskPct: (n: number) => void;
+  runBacktest: () => void; lastBacktest: BacktestReport | null; backtestTrades: ClosedTrade[];
+}) {
+  return (
+    <div style={{ maxWidth: 860, display: "flex", flexDirection: "column", gap: 14 }}>
+      <div className="card">
+        <h3 style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>Backtest</h3>
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div>
+            <p className="label" style={{ marginBottom: 4 }}>Velas a simular</p>
+            <select className="sel" value={backtestSize} onChange={e => setBacktestSize(Number(e.target.value))} style={{ width: 130 }}>
+              {[50, 100, 200, 500].map(n => <option key={n} value={n}>{n} velas</option>)}
+            </select>
+          </div>
+          <div>
+            <p className="label" style={{ marginBottom: 4 }}>Riesgo / trade</p>
+            <select className="sel" value={riskPct} onChange={e => setRiskPct(Number(e.target.value))} style={{ width: 110 }}>
+              {[0.5, 1, 1.5, 2, 3].map(n => <option key={n} value={n}>{n}%</option>)}
+            </select>
+          </div>
+          <button onClick={runBacktest} disabled={!liveReady}
+            style={{ padding: "8px 18px", borderRadius: 8, border: "none", cursor: liveReady ? "pointer" : "not-allowed",
+              background: liveReady ? "rgba(99,102,241,0.7)" : "rgba(99,102,241,0.2)",
+              color: "#fff", fontSize: 13, fontWeight: 700 }}>
+            Ejecutar
+          </button>
+        </div>
+      </div>
+      {lastBacktest && (
+        <div className="card">
+          <h4 style={{ fontWeight: 700, marginBottom: 10 }}>{lastBacktest.trades} trades simulados</h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(130px,1fr))", gap: 8 }}>
+            {[
+              { label: "Win Rate",     value: `${lastBacktest.winRate.toFixed(1)}%`,      color: lastBacktest.winRate >= 50 ? "#10b981" : "#ef4444" },
+              { label: "P&L",          value: `$${lastBacktest.pnl.toFixed(2)}`,           color: lastBacktest.pnl >= 0 ? "#10b981" : "#ef4444" },
+              { label: "Profit Factor",value: lastBacktest.profitFactor.toFixed(2),        color: lastBacktest.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
+              { label: "Max DD",       value: `$${lastBacktest.maxDrawdown.toFixed(2)}`,   color: "#ef4444" },
+              { label: "Sharpe",       value: lastBacktest.sharpe.toFixed(2),              color: lastBacktest.sharpe >= 1 ? "#10b981" : "var(--text)" },
+              { label: "Expectancy",   value: `$${lastBacktest.expectancy.toFixed(2)}`,    color: lastBacktest.expectancy >= 0 ? "#10b981" : "#ef4444" },
+            ].map(({ label, value, color }) => (
+              <div key={label} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "8px 10px" }}>
+                <p style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2 }}>{label}</p>
+                <p style={{ fontSize: 14, fontWeight: 800, color }}>{value}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {backtestTrades.length > 0 && (
+        <div className="card">
+          <h4 style={{ fontWeight: 700, marginBottom: 8 }}>Trades del backtest</h4>
+          <TradeHistory trades={backtestTrades} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export function App() {
   const [assetIntelligence, setAssetIntelligence] = useState<Record<string, AssetIntelligence>>({});
   const [correlationMatrix, setCorrelationMatrix] = useState<Record<string, Record<string, number>>>({});
