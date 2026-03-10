@@ -394,7 +394,7 @@ type Toast = { id: number; msg: string; type: "success" | "warning" | "error" | 
 type AiStatus = "idle" | "testing" | "ok" | "error" | "disabled";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const assets: Asset[] = ["BTCUSD", "ETHUSD", "XAGUSD", "XAUUSD"]; // se expande con los datos del bridge
+// assets se gestiona como estado React (useState) dentro de App — ver abajo
 
 
 
@@ -2787,18 +2787,18 @@ Rationale from system: ${signal.rationale}`;
         });
       }
 
-      // ── Filtrar solo activos con trading habilitado ──────────────────────────
-      const tradeable = data.symbols.filter(s => s.trade_allowed && s.trade_mode === 4);
+      // ── Filtrar: excluir solo activos con trade_mode=0 (solo conversión/deshabilitado)
+      // trade_mode: 0=disabled, 1=long only, 2=short only, 4=full — aceptar 1,2,4
+      const tradeable = data.symbols.filter(s => s.trade_mode !== 0 && s.bid > 0);
 
       // ── Mapear: para cada activo tradeable, usar nombre TraderLab si existe ──
       const mapped = tradeable.map(s => {
-        // Intentar mapear al nombre TraderLab primero
         const tlName = brokerToTL[s.name] ?? s.name;
         const known  = ASSET_CATALOG[tlName] ?? ASSET_CATALOG[s.name];
         const cat    = known?.category ?? inferCategoryFromSymbol(s.name, s.description, s.currency_base, s.currency_profit);
         return {
-          name:         tlName,           // nombre TraderLab (o broker si no hay mapeo)
-          brokerName:   s.name,           // nombre real en MT5
+          name:         tlName,
+          brokerName:   s.name,
           category:     cat,
           spread:       s.spread,
           contractSize: s.contract_size,
@@ -2811,21 +2811,33 @@ Rationale from system: ${signal.rationale}`;
       pushToast(`📡 ${mapped.length} activos disponibles en el broker`, "info");
 
       // ── Agregar TODOS los activos tradeables al assets state ─────────────────
-      // Los del ASSET_CATALOG tienen parámetros fine-tuned
-      // Los nuevos (desconocidos) se agregan con parámetros genéricos y size mínimo
+      // Estrategia: incluir todo lo que el broker tiene tradeable
+      // Prioridad: base 4 activos + catálogo conocido + todos los del broker
       const tlNames = mapped.map(m => m.name);
+      const base = ["BTCUSD","ETHUSD","XAGUSD","XAUUSD"];
 
-      setAssets(prev => {
-        // Mantener los activos que ya estaban
-        const base = ["BTCUSD","ETHUSD","XAGUSD","XAUUSD"];
-        // Agregar del catálogo conocido
-        const fromCatalog = tlNames.filter(n => ASSET_CATALOG[n]);
-        // Agregar activos del broker que sean crypto o forex major por inferencia
-        const fromBroker  = mapped
-          .filter(m => (m.category === "crypto" || m.category === "forex_major" || m.category === "metals") && !ASSET_CATALOG[m.name])
-          .map(m => m.name);
-        const combined = [...new Set([...base, ...fromCatalog, ...fromBroker])];
-        return combined;
+      setAssets(() => {
+        // Orden: primero los base, luego del catálogo, luego el resto del broker
+        const fromCatalog = tlNames.filter(n => ASSET_CATALOG[n] && !base.includes(n));
+        const fromBroker  = tlNames.filter(n => !ASSET_CATALOG[n] && !base.includes(n));
+        return [...new Set([...base, ...fromCatalog, ...fromBroker])];
+      });
+
+      // ── También actualizar ASSET_CATALOG en runtime para activos nuevos ──────
+      // Esto evita que calcPosSize use parámetros default incorrectos
+      mapped.forEach(m => {
+        if (!ASSET_CATALOG[m.name]) {
+          // Parámetros conservadores para activos desconocidos
+          (ASSET_CATALOG as Record<string, typeof ASSET_CATALOG[string]>)[m.name] = {
+            category:    m.category,
+            digits:      m.digits ?? 5,
+            contractSize: m.contractSize ?? 1,
+            leverage:    50,
+            minAtr:      0.0001,
+            spreadPct:   m.spread > 0 ? m.spread / Math.max(m.spread, 0.0001) * 0.01 : 0.02,
+            sessions:    ["NY","London","Asia","Post-NY"],
+          };
+        }
       });
 
     } catch (e) {
@@ -3420,24 +3432,47 @@ Rationale from system: ${signal.rationale}`;
                 <p className="label" style={{ marginBottom: 5 }}>Activo</p>
                 <select className="sel" value={asset} onChange={e => setAsset(e.target.value as Asset)} style={{ width: "100%" }}>
                   {(() => {
-                    const GROUPS: [string, string[]][] = [
-                      ["⬡ Crypto",  ["BTCUSD","ETHUSD","BNBUSD","SOLUSD","XRPUSD","ADAUSD","DOTUSD","LTCUSD","DOGEUSD","AVAXUSD","LINKUSD","MATICUSD"]],
-                      ["◈ Metales", ["XAUUSD","XAGUSD"]],
-                      ["₣ Forex",   ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD"]],
-                      ["▲ Índices", ["US30","US500","USTEC"]],
-                      ["⛽ Energía", ["USOIL","UKOIL"]],
-                    ];
-                    const grouped = GROUPS.map(([lbl, ids]) => ({
-                      lbl, items: ids.filter(id => assets.includes(id))
-                    })).filter(g => g.items.length > 0);
-                    const used = grouped.flatMap(g => g.items);
-                    const other = assets.filter(a => !used.includes(a));
-                    if (other.length) grouped.push({ lbl: "Otros", items: other });
-                    return grouped.map(g => (
-                      <optgroup key={g.lbl} label={g.lbl}>
-                        {g.items.map(a => <option key={a} value={a}>{getAssetLabel(a)}</option>)}
-                      </optgroup>
-                    ));
+                    // Categorías dinámicas — usa availableSymbols si hay datos del broker
+                    // sino usa los assets fijos con grupos hardcodeados
+                    const CAT_LABEL: Record<string, string> = {
+                      crypto: "⬡ Crypto", metals: "◈ Metales",
+                      forex_major: "₣ Forex Major", forex_minor: "₣ Forex Minor",
+                      indices: "▲ Índices", energy: "⛽ Energía",
+                      stocks: "📈 Acciones", commodities: "🌾 Commodities", other: "📦 Otros",
+                    };
+                    // Orden de categorías en el select
+                    const CAT_ORDER = ["crypto","metals","forex_major","forex_minor","indices","energy","stocks","commodities","other"];
+
+                    // Construir mapa nombre → categoría desde availableSymbols
+                    const symCatMap: Record<string, string> = {};
+                    availableSymbols.forEach(s => { symCatMap[s.name] = s.category; });
+                    // Fallback: inferir desde ASSET_CATALOG
+                    assets.forEach(a => {
+                      if (!symCatMap[a]) symCatMap[a] = ASSET_CATALOG[a]?.category ?? "other";
+                    });
+
+                    // Agrupar por categoría
+                    const groups: Record<string, string[]> = {};
+                    assets.forEach(a => {
+                      const cat = symCatMap[a] ?? "other";
+                      if (!groups[cat]) groups[cat] = [];
+                      groups[cat].push(a);
+                    });
+
+                    return CAT_ORDER
+                      .filter(cat => groups[cat]?.length)
+                      .map(cat => (
+                        <optgroup key={cat} label={CAT_LABEL[cat] ?? cat}>
+                          {groups[cat].map(a => (
+                            <option key={a} value={a}>
+                              {getAssetLabel(a)}
+                              {availableSymbols.find(s=>s.name===a)?.brokerName && availableSymbols.find(s=>s.name===a)?.brokerName !== a
+                                ? ` (${availableSymbols.find(s=>s.name===a)?.brokerName})`
+                                : ""}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ));
                   })()}
                 </select>
                 <div style={{ marginTop: 8, fontSize: 11 }}>
