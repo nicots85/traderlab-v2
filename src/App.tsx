@@ -792,7 +792,7 @@ function useLocalStorage<T>(key: string, initial: T): [T, React.Dispatch<React.S
 
 // ── Error Boundary — muestra el error en pantalla en vez de negro ─────────────
 class ErrorBoundary extends React.Component<
-  { children: React.ReactNode },
+  { children: React.ReactNode; onReset?: () => void },
   { error: Error | null }
 > {
   constructor(props: { children: React.ReactNode }) {
@@ -813,14 +813,18 @@ class ErrorBoundary extends React.Component<
           <h2 style={{ color: "#ef4444", marginBottom: 16 }}>
             💥 TraderLab — Error de render
           </h2>
-          <strong>{this.state.error.message}</strong>
-          {'\n\n'}
-          {this.state.error.stack}
+          <p style={{ color: "#fca5a5", marginBottom: 8 }}><strong>{this.state.error.message}</strong></p>
+          <pre style={{ fontSize: 11, opacity: 0.7, marginBottom: 16 }}>{this.state.error.stack}</pre>
+          <button onClick={() => { this.setState({ error: null }); this.props.onReset?.(); }}
+            style={{ padding: "8px 20px", background: "#6366f1", color: "#fff", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: 700 }}>
+            🔄 Reintentar
+          </button>
         </div>
       );
     }
     return this.props.children;
   }
+  componentDidCatch(e: Error) { console.error("[TraderLab]", e.message, e.stack); }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -4732,6 +4736,7 @@ Rationale from system: ${signal.rationale}`;
 
               {/* Señal en vivo para debug */}
               {(() => {
+                try {
                 const dbgAsset = asset;
                 const dbgSeries = series[dbgAsset] ?? [];
                 const dbgCandles = candles[dbgAsset] ?? [];
@@ -4794,7 +4799,9 @@ Rationale from system: ${signal.rationale}`;
                           ))}
                         </div>
                       );
-                    })()}
+                    
+                } catch(e) { return <div style={{color:"#ef4444",fontSize:11,padding:"8px",borderRadius:6,background:"rgba(239,68,68,0.08)"}}>⚠ Error diagnóstico: {String(e)}</div>; }
+              })()}
                   </div>
                 );
               })()}
@@ -5290,8 +5297,9 @@ Rationale from system: ${signal.rationale}`;
 }
 
 function AppWithBoundary() {
+  const [k, setK] = React.useState(0);
   return (
-    <ErrorBoundary>
+    <ErrorBoundary key={k} onReset={() => setK(n => n+1)}>
       <App />
     </ErrorBoundary>
   );
