@@ -1448,26 +1448,6 @@ export function App() {
     }
   }
 
-  // ── getSpreadPct: spread estimado % para activo (fallback sin bridge) ─────────
-  function getSpreadPct(asset: Asset, shock: number): number {
-    // 1. Spread del catálogo fine-tuned (si existe)
-    const catalog = ASSET_CATALOG[asset];
-    const base = catalog?.spreadPct
-      ?? CFD_BASE_SPREAD_PCT[asset]
-      ?? 0.02; // fallback genérico 0.02%
-
-    // 2. Ajuste por sesión (spread sube fuera de horario prime)
-    const session = getSessionProfile().name;
-    const sessionMult = session === "Weekend" ? 2.5
-      : session === "Post-NY" || session === "Asia — Crypto" ? 1.6
-      : 1.0;
-
-    // 3. Ajuste por volatilidad (shock alto = spread mayor en crypto)
-    const shockMult = shock > 0.8 ? 1.8 : shock > 0.5 ? 1.35 : shock > 0.3 ? 1.15 : 1.0;
-
-    return base * 100 * sessionMult * shockMult; // retorna en %
-  }
-
     // spreadByAsset — usa spread REAL del broker (MT5/PrimeXBT) cuando está disponible.
   // Fallback: spread estimado por calcCFDSpread (sesión + volatilidad) si bridge no entregó datos.
   const spreadByAsset = useMemo(() => {
@@ -1537,19 +1517,6 @@ export function App() {
     const gp = wins.reduce((a, x) => a + x.pnl, 0);
     const gl = Math.abs(losses.reduce((a, x) => a + x.pnl, 0));
     const returns = t.map(x => x.pnlPct / 100);
-  // ── calcDrawdown: máximo drawdown desde equity curve ─────────────────────────
-  function calcDrawdown(trades: ClosedTrade[]): number {
-    if (trades.length < 2) return 0;
-    let peak = 0, maxDD = 0, equity = 0;
-    for (const t of trades) {
-      equity += t.pnl;
-      if (equity > peak) peak = equity;
-      const dd = peak - equity;
-      if (dd > maxDD) maxDD = dd;
-    }
-    return maxDD;
-  }
-
       const sharpe = std(returns) === 0 ? 0 : (avg(returns) / std(returns)) * Math.sqrt(Math.max(returns.length, 1));
     return { total, winRate: total ? (wins.length / total) * 100 : 0, pnl, expectancy: total ? pnl / total : 0, profitFactor: gl > 0 ? gp / gl : gp > 0 ? 99 : 0, sharpe, maxDrawdown: calcDrawdown(t) };
   }, [realTrades]);
@@ -1558,7 +1525,8 @@ export function App() {
     Object.entries(learning.hourEdge).map(([h, e]) => ({ hour: Number(h), edge: e }))
       .sort((a, b) => b.edge - a.edge).slice(0, 4), [learning.hourEdge]);
 
-  const visibleCandles = useMemo(() => {
+
+    const visibleCandles = useMemo(() => {
     const c = candles[asset] ?? [];
     return c.length > 0 ? c : deriveSyntheticCandles(series[asset] ?? []);
   }, [asset, candles, series]);
@@ -1668,6 +1636,58 @@ export function App() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 // ── getAssetMinAtr ────────────────────────────────────────────────────────────
+// ── deriveSyntheticCandles: genera velas OHLC desde serie de precios ─────────
+function deriveSyntheticCandles(prices: number[]): Candle[] {
+  if (!prices.length) return [];
+  const now = Math.floor(Date.now() / 1000);
+  return prices.map((p, i) => {
+    const prev = prices[i - 1] ?? p;
+    const noise = p * 0.0003;
+    return {
+      t: now - (prices.length - i) * 60,
+      o: prev,
+      h: Math.max(prev, p) + noise,
+      l: Math.min(prev, p) - noise,
+      c: p,
+      v: 100 + Math.random() * 200,
+    };
+  });
+}
+
+
+// ── getSpreadPct: spread estimado % para activo (fallback sin bridge) ─────────
+function getSpreadPct(asset: Asset, shock: number): number {
+  // 1. Spread del catálogo fine-tuned (si existe)
+  const catalog = ASSET_CATALOG[asset];
+  const base = catalog?.spreadPct
+    ?? CFD_BASE_SPREAD_PCT[asset]
+    ?? 0.02; // fallback genérico 0.02%
+
+  // 2. Ajuste por sesión (spread sube fuera de horario prime)
+  const session = getSessionProfile().name;
+  const sessionMult = session === "Weekend" ? 2.5
+    : session === "Post-NY" || session === "Asia — Crypto" ? 1.6
+    : 1.0;
+
+  // 3. Ajuste por volatilidad (shock alto = spread mayor en crypto)
+  const shockMult = shock > 0.8 ? 1.8 : shock > 0.5 ? 1.35 : shock > 0.3 ? 1.15 : 1.0;
+
+  return base * 100 * sessionMult * shockMult; // retorna en %
+}
+
+// ── calcDrawdown: máximo drawdown desde equity curve ─────────────────────────
+function calcDrawdown(trades: ClosedTrade[]): number {
+  if (trades.length < 2) return 0;
+  let peak = 0, maxDD = 0, equity = 0;
+  for (const t of trades) {
+    equity += t.pnl;
+    if (equity > peak) peak = equity;
+    const dd = peak - equity;
+    if (dd > maxDD) maxDD = dd;
+  }
+  return maxDD;
+}
+
 function getAssetMinAtr(a: string): number {
   return ASSET_CATALOG[a]?.minAtr ?? 0.0001;
 }
