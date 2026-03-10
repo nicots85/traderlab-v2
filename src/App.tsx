@@ -4736,14 +4736,13 @@ Rationale from system: ${signal.rationale}`;
 
               {/* Señal en vivo para debug */}
               {(() => {
-                try {
                 const dbgAsset = asset;
                 const dbgSeries = series[dbgAsset] ?? [];
                 const dbgCandles = candles[dbgAsset] ?? [];
                 const dbgC5m = candles5m[dbgAsset] ?? [];
                 const dbgC15m = candles15m[dbgAsset] ?? [];
                 const dbgPrice = prices[dbgAsset] ?? 0;
-                const lrn = learningRef.current;
+                const lrn = learningRef.current ?? { confidenceFloor: 52, atrTrailMult: 0.35, scalpingTpAtr: 2.4, intradayTpAtr: 5.0, riskScale: 1, hourEdge: {}, assetEdge: {} };
                 const floor = tab === "scalping"
                   ? Math.max(46, lrn.confidenceFloor - 4)
                   : Math.max(50, lrn.confidenceFloor);
@@ -4786,10 +4785,10 @@ Rationale from system: ${signal.rationale}`;
                         <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
                           <div style={{ color: "#a5b4fc", fontWeight: 700, marginBottom: 4 }}>Última señal generada:</div>
                           {[
-                            ["Confianza", `${lastSignal.confidence.toFixed(1)}% (piso ${floor}%)`, lastSignal.confidence >= floor],
+                            ["Confianza", `${(lastSignal.confidence ?? 0).toFixed(1)}% (piso ${floor}%)`, (lastSignal.confidence ?? 0) >= floor],
                             ["RR",        `${rr.toFixed(2)} (mín 1.5)`, rr >= 1.5],
                             ["Dirección", lastSignal.direction, true],
-                            ["ATR",       lastSignal.atr.toFixed(4), lastSignal.atr > 0],
+                            ["ATR",       (lastSignal.atr ?? 0).toFixed(4), (lastSignal.atr ?? 0) > 0],
                           ].map(([k, v, ok]) => (
                             <div key={k as string} style={{ display: "flex", justifyContent: "space-between",
                               padding: "2px 0", color: ok ? "#10b981" : "#ef4444", fontWeight: 700 }}>
@@ -4800,7 +4799,6 @@ Rationale from system: ${signal.rationale}`;
                         </div>
                       );
                     
-                } catch(e) { return <div style={{color:"#ef4444",fontSize:11,padding:"8px",borderRadius:6,background:"rgba(239,68,68,0.08)"}}>⚠ Error diagnóstico: {String(e)}</div>; }
               })()}
                   </div>
                 );
