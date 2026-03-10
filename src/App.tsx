@@ -1356,12 +1356,16 @@ export function App() {
   // Recalcular indicadores y control de mercado al cambiar velas 1m
   useEffect(() => {
     assets.forEach(a => {
-      const c = candles[a] ?? [];
+      const c = (candles[a] ?? []).filter(x => x.c > 0 && x.h > 0 && x.l > 0);
       if (c.length > 25) {
-        setIndicatorsMap(prev => ({ ...prev, [a]: computeIndicators(c) }));
-        const indForControl = computeIndicators(c);
-        const atrForControl = Math.max(calcAtrFromSeries(c.map(x=>x.c), 20), getAssetMinAtr(a));
-        setMarketControlMap(prev => ({ ...prev, [a]: analyzeMarketControl(c, indForControl, atrForControl) }));
+        try {
+          const ind = computeIndicators(c);
+          // Guard NaN: si vwap es NaN las velas son malas, ignorar
+          if (isNaN(ind.vwap) || !isFinite(ind.vwap)) return;
+          setIndicatorsMap(prev => ({ ...prev, [a]: ind }));
+          const atrForControl = Math.max(calcAtrFromSeries(c.map(x=>x.c), 20), getAssetMinAtr(a));
+          setMarketControlMap(prev => ({ ...prev, [a]: analyzeMarketControl(c, ind, atrForControl) }));
+        } catch { /* velas malformadas — ignorar hasta próxima sync */ }
       }
     });
   }, [candles]);
@@ -1370,8 +1374,8 @@ export function App() {
   // Solo para modo intradía — no afecta scalping
   useEffect(() => {
     assets.forEach(a => {
-      const c4h = candles4h[a];
-      const c1d = candles1d[a];
+      const c4h = candles4h[a] ?? [];
+      const c1d = candles1d[a] ?? [];
       // Requiere al menos datos mínimos en alguno de los dos TFs
       if (c4h.length >= 20 || c1d.length >= 10) {
         setWyckoffMap(prev => ({ ...prev, [a]: analyzeWyckoff(c4h, c1d) }));
@@ -3777,10 +3781,10 @@ Rationale from system: ${signal.rationale}`;
               new1d[r.value.a]  = r.value.c1d;
             }
           });
-          setCandles5m(new5m);
-          setCandles15m(new15m);
-          setCandles4h(new4h);
-          setCandles1d(new1d);
+          setCandles5m(prev  => ({ ...prev, ...new5m }));
+          setCandles15m(prev => ({ ...prev, ...new15m }));
+          setCandles4h(prev  => ({ ...prev, ...new4h }));
+          setCandles1d(prev  => ({ ...prev, ...new1d }));
         } catch (e) {
           console.warn("[TraderLab] MTF fetch falló:", e);
           // Sin velas MTF — Wyckoff queda en neutral, scalping usa sintético
