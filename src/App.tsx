@@ -1263,6 +1263,8 @@ export function App() {
   const [usingGroq,   setUsingGroq]   = useState(false);
   const [groqModel,   setGroqModel]   = useState("llama-3.3-70b-versatile");
   const [riskPct, setRiskPct] = useLocalStorage("tl_riskPct", 1.2);
+  const [manualTp, setManualTp] = useState<string>("");
+  const [manualSl, setManualSl] = useState<string>("");
   const [backtestSize, setBacktestSize] = useState(40);
   const [lastBacktest, setLastBacktest] = useState<BacktestReport | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -2273,7 +2275,7 @@ function calcScalpingRisk(
     return 1.0;
   }
 
-  function generateSignal(currentMode: Mode, currentAsset: Asset): Signal {
+  function generateSignal(currentMode: Mode, currentAsset: Asset, overrides?: { tp?: number; sl?: number }): Signal {
     // Leer SIEMPRE de refs (no del closure state) para evitar stale data
     // Los refs se actualizan sincrónicamente en cada render via useEffect
     const _prices    = pricesRef.current;
@@ -2532,6 +2534,17 @@ function calcScalpingRisk(
       tp1 = dir === "LONG" ? entry + baseAtr * t1m : entry - baseAtr * t1m;
       tp2 = dir === "LONG" ? entry + baseAtr * t2m : entry - baseAtr * t2m;
       tp3 = dir === "LONG" ? entry + baseAtr * t3m : entry - baseAtr * t3m;
+    }
+    // ── Overrides manuales (tp/sl pasado desde la UI) ──────────────────────
+    if (overrides?.tp && overrides.tp > 0) {
+      // Recalcular tp1 como punto intermedio entre entry y tp override
+      const tpDist = Math.abs(overrides.tp - entry);
+      tp1 = dir === "LONG" ? entry + tpDist * 0.4 : entry - tpDist * 0.4;
+      tp2 = overrides.tp;
+      tp3 = dir === "LONG" ? entry + tpDist * 1.3 : entry - tpDist * 1.3;
+    }
+    if (overrides?.sl && overrides.sl > 0) {
+      structuralSl = overrides.sl;
     }
     const takeProfit = tp2; // alias principal = TP final
 
@@ -3039,7 +3052,7 @@ Rationale from system: ${signal.rationale}`;
     );
   }
 
-  async function createSignalAndExecute(mode: Mode, targetAsset: Asset, autoLabel = false) {
+  async function createSignalAndExecute(mode: Mode, targetAsset: Asset, autoLabel = false, overrides?: { tp?: number; sl?: number }) {
     if (!liveReady) {
       pushToast("⟳ Sincronizando datos antes de generar señal...", "info");
       await syncRealData();
@@ -3082,7 +3095,7 @@ Rationale from system: ${signal.rationale}`;
       }
     }
 
-    const signal = generateSignal(mode, targetAsset);
+    const signal = generateSignal(mode, targetAsset, overrides);
     if (!autoLabel) setLastSignal(signal);
 
     // ── DEBUG: log completo de la señal para diagnosticar por qué no abre ───
@@ -4251,7 +4264,36 @@ Rationale from system: ${signal.rationale}`;
                 <input className="inp" type="number" min={0.2} max={3} step={0.1} value={riskPct} onChange={e => setRiskPct(Number(e.target.value))} />
               </div>
               <div className="card" style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                <button className="btn-primary" onClick={() => createSignalAndExecute(tab, asset)}>⚡ Generar + ejecutar señal</button>
+                {/* ── Overrides manuales de SL/TP ── */}
+                <div style={{ display:"flex", gap:5 }}>
+                  <div style={{ flex:1 }}>
+                    <p style={{ fontSize:10, color:"var(--muted)", marginBottom:3 }}>SL manual (opcional)</p>
+                    <input className="inp" type="number" step="0.0001" placeholder="ej: 0.7200"
+                      value={manualSl} onChange={e => setManualSl(e.target.value)}
+                      style={{ fontSize:11 }} />
+                  </div>
+                  <div style={{ flex:1 }}>
+                    <p style={{ fontSize:10, color:"var(--muted)", marginBottom:3 }}>TP manual (opcional)</p>
+                    <input className="inp" type="number" step="0.0001" placeholder="ej: 0.6900"
+                      value={manualTp} onChange={e => setManualTp(e.target.value)}
+                      style={{ fontSize:11 }} />
+                  </div>
+                </div>
+                {(manualTp || manualSl) && (
+                  <p style={{ fontSize:10, color:"#a5b4fc", margin:0 }}>
+                    {manualTp && manualSl
+                      ? `RR estimado: ${(Math.abs(Number(manualTp) - prices[asset]) / Math.abs(prices[asset] - Number(manualSl))).toFixed(2)}×`
+                      : manualTp ? `TP → ${manualTp}` : `SL → ${manualSl}`
+                    }
+                    {" "}<span style={{ cursor:"pointer", color:"#ef4444" }} onClick={() => { setManualTp(""); setManualSl(""); }}>✕ limpiar</span>
+                  </p>
+                )}
+                <button className="btn-primary" onClick={() => {
+                  const ov: { tp?: number; sl?: number } = {};
+                  if (manualTp && Number(manualTp) > 0) ov.tp = Number(manualTp);
+                  if (manualSl && Number(manualSl) > 0) ov.sl = Number(manualSl);
+                  void createSignalAndExecute(tab, asset, false, Object.keys(ov).length ? ov : undefined);
+                }}>⚡ Generar + ejecutar señal</button>
                 <button className="btn-secondary" onClick={() => void syncRealData()} disabled={isSyncing}>{isSyncing ? "⟳ Sincronizando..." : "↻ Sync MT5 Bridge"}</button>
                 <button className="btn-secondary" onClick={() => void runAutoScan()}>🔍 Escanear todos</button>
               </div>
