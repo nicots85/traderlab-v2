@@ -544,13 +544,13 @@ function AiChatPanel({
     const sorted = [...trades].sort((a, b) => b.pnl - a.pnl);
     const best  = sorted[0];
     const worst = sorted[sorted.length - 1];
-    return "  Best:  " + best.asset  + " " + best.direction  + " " + best.mode  + " | +$" + best.pnl.toFixed(3)  + "\n"
-         + "  Worst: " + worst.asset + " " + worst.direction + " " + worst.mode + " | $"  + worst.pnl.toFixed(3);
+    return "  Best:  " + best.asset  + " " + best.direction  + " " + best.mode  + " | +$" + (best.pnl ?? 0).toFixed(3)  + "\n"
+         + "  Worst: " + worst.asset + " " + worst.direction + " " + worst.mode + " | $"  + (worst.pnl ?? 0).toFixed(3);
   }
   function chatReversalStats(trades: ClosedTrade[]): string {
     const rev = trades.slice(0,10).filter(t => (t as ClosedTrade & {isReversalSetup?:boolean}).isReversalSetup);
     if (!rev.length) return "  Ninguno en últimos 10 trades";
-    return rev.map(t => "  " + t.asset + " " + t.direction + " | " + t.result + " | $" + t.pnl.toFixed(3)).join("\n");
+    return rev.map(t => "  " + t.asset + " " + t.direction + " | " + t.result + " | $" + (t.pnl ?? 0).toFixed(3)).join("\n");
   }
 
   async function sendMessage() {
@@ -577,7 +577,7 @@ You speak to your operator in Spanish. Be direct, quantitative, and honest — n
 
 ACCOUNT STATE:
 - Equity: $${stats.total > 0 ? (100 + stats.pnl).toFixed(2) : "100.00"} USDT (initial: $100)
-- P&L total: $${stats.pnl.toFixed(2)} | Trades: ${stats.total} | Win rate: ${(stats.winRate ?? 0).toFixed(1)}%
+- P&L total: $${(stats.pnl ?? 0).toFixed(2)} | Trades: ${stats.total} | Win rate: ${(stats.winRate ?? 0).toFixed(1)}%
 - Profit factor: ${(stats.profitFactor ?? 0).toFixed(2)} | Sharpe: ${(stats.sharpe ?? 0).toFixed(2)} | Max DD: ${stats.maxDrawdown?.toFixed(1) ?? "N/A"}%
 - Avg win: $${chatAvgW.toFixed(3)} | Avg loss: $${chatAvgL.toFixed(3)}
 - Expected value/trade: $${chatEV}
@@ -591,12 +591,12 @@ ${openPositions.length === 0 ? "None" : openPositions.map(p => {
   const pnlEst = (p.signal.direction === "LONG"
     ? prices[p.signal.asset] - p.signal.entry
     : p.signal.entry - prices[p.signal.asset]) * p.size;
-  return `  ${p.signal.asset} ${p.signal.direction} ${p.signal.mode.toUpperCase()} | Entry ${p.signal.entry.toFixed(3)} → now ${prices[p.signal.asset]?.toFixed(3)} | PnL est: $${pnlEst.toFixed(3)} | SL: ${p.signal.stopLoss.toFixed(3)} | TP: ${p.signal.takeProfit.toFixed(3)} | Margin: $${p.marginUsed.toFixed(3)}`;
+  return `  ${p.signal.asset} ${p.signal.direction} ${p.signal.mode.toUpperCase()} | Entry ${(p.signal.entry ?? 0).toFixed(3)} → now ${prices[p.signal.asset]?.toFixed(3)} | PnL est: $${pnlEst.toFixed(3)} | SL: ${(p.signal.stopLoss ?? 0).toFixed(3)} | TP: ${(p.signal.takeProfit ?? 0).toFixed(3)} | Margin: $${(p.marginUsed ?? 0).toFixed(3)}`;
 }).join("\n")}
 
 LAST 5 TRADES:
 ${realTrades.slice(0,5).map(t =>
-  `  ${t.asset} ${t.direction} ${t.mode.toUpperCase()} | ${t.result} | PnL: $${t.pnl.toFixed(3)}`
+  `  ${t.asset} ${t.direction} ${t.mode.toUpperCase()} | ${t.result} | PnL: $${(t.pnl ?? 0).toFixed(3)}`
 ).join("\n") || "None yet"}
 
 LAST SIGNAL: ${lastSignal ? `${lastSignal.asset} ${lastSignal.direction} ${lastSignal.mode} conf:${(lastSignal.confidence ?? 0).toFixed(0)}% | ${lastSignal.rationale}` : "None"}
@@ -781,7 +781,7 @@ function chatAssetIntelContext(intel: Record<string, AssetIntelligence>): string
     .sort((a,b) => b.profitFactor - a.profitFactor).slice(0, 8);
   if (!top.length) return "  Sin inteligencia aprendida aún";
   return top.map(i =>
-    `  ${i.symbol} [${i.category}]: WR=${((i.winRate)*100).toFixed(0)}% PF=${i.profitFactor.toFixed(2)} mejor=${i.bestSession}/${i.bestMode}/${i.bestHourUTC}h`
+    `  ${i.symbol} [${i.category}]: WR=${((i.winRate)*100).toFixed(0)}% PF=${(i.profitFactor ?? 0).toFixed(2)} mejor=${i.bestSession}/${i.bestMode}/${i.bestHourUTC}h`
   ).join("\n");
 }
 
@@ -994,13 +994,13 @@ function IndicatorPanel({ ind, mode }: { ind: Indicators | null; mode: string })
   if (!ind) return null;
   const rsiColor = ind.rsi > 70 ? "#ef4444" : ind.rsi < 30 ? "#10b981" : "var(--text)";
   const items = [
-    { label: "RSI(14)", value: ind.rsi.toFixed(1), color: rsiColor },
-    { label: "Stoch K/D", value: `${ind.stochK.toFixed(1)}/${ind.stochD.toFixed(1)}`, color: ind.stochK > 80 ? "#ef4444" : ind.stochK < 20 ? "#10b981" : "var(--text)" },
-    { label: "MA5/20", value: `${ind.ma5.toFixed(2)}/${ind.ma20.toFixed(2)}`, color: ind.ma5 > ind.ma20 ? "#10b981" : "#ef4444" },
-    { label: "VWAP", value: ind.vwap.toFixed(2), color: "var(--text)" },
+    { label: "RSI(14)", value: (ind.rsi ?? 0).toFixed(1), color: rsiColor },
+    { label: "Stoch K/D", value: `${(ind.stochK ?? 0).toFixed(1)}/${(ind.stochD ?? 0).toFixed(1)}`, color: ind.stochK > 80 ? "#ef4444" : ind.stochK < 20 ? "#10b981" : "var(--text)" },
+    { label: "MA5/20", value: `${(ind.ma5 ?? 0).toFixed(2)}/${(ind.ma20 ?? 0).toFixed(2)}`, color: ind.ma5 > ind.ma20 ? "#10b981" : "#ef4444" },
+    { label: "VWAP", value: (ind.vwap ?? 0).toFixed(2), color: "var(--text)" },
     { label: "BB Squeeze", value: ind.bbSqueeze ? "SQ" : "No", color: ind.bbSqueeze ? "#f59e0b" : "var(--muted)" },
-    { label: "Vol Delta", value: `${ind.volumeDeltaPct >= 0 ? "+" : ""}${ind.volumeDeltaPct.toFixed(1)}%`, color: ind.volumeDeltaPct > 10 ? "#10b981" : ind.volumeDeltaPct < -10 ? "#ef4444" : "var(--muted)" },
-    { label: "ATR", value: ind.atr.toFixed(4), color: "var(--text)" },
+    { label: "Vol Delta", value: `${ind.volumeDeltaPct >= 0 ? "+" : ""}${(ind.volumeDeltaPct ?? 0).toFixed(1)}%`, color: ind.volumeDeltaPct > 10 ? "#10b981" : ind.volumeDeltaPct < -10 ? "#ef4444" : "var(--muted)" },
+    { label: "ATR", value: (ind.atr ?? 0).toFixed(4), color: "var(--text)" },
     { label: "RSI Div", value: ind.rsiDivergence === "none" ? "-" : ind.rsiDivergence === "bullish" ? "Bull" : "Bear", color: ind.rsiDivergence === "bullish" ? "#10b981" : ind.rsiDivergence === "bearish" ? "#ef4444" : "var(--muted)" },
   ];
   return (
@@ -1052,7 +1052,7 @@ function OrderFlowPanel({ of: of_, price }: { of: OrderFlowScore; price: number 
         <span style={{ fontSize: 11, color: "var(--muted)" }}>Order Flow</span>
         <span style={{ fontSize: 12, fontWeight: 800, color: ctrlColor }}>
           {of_.control === "bulls" ? "Toros" : of_.control === "bears" ? "Osos" : "Disputado"}
-          <span style={{ fontSize: 10, marginLeft: 5, opacity: 0.7 }}>{of_.controlScore.toFixed(0)}</span>
+          <span style={{ fontSize: 10, marginLeft: 5, opacity: 0.7 }}>{(of_.controlScore ?? 0).toFixed(0)}</span>
         </span>
       </div>
       <div style={{ height: 6, borderRadius: 3, background: "rgba(255,255,255,0.08)", overflow: "hidden", marginBottom: 6 }}>
@@ -1060,8 +1060,8 @@ function OrderFlowPanel({ of: of_, price }: { of: OrderFlowScore; price: number 
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
         {[
-          { label: "CVD", value: of_.cvdScore.toFixed(0) },
-          { label: "Footprint", value: of_.footprintScore.toFixed(0) },
+          { label: "CVD", value: (of_.cvdScore ?? 0).toFixed(0) },
+          { label: "Footprint", value: (of_.footprintScore ?? 0).toFixed(0) },
         ].map(({ label, value }) => (
           <div key={label} style={{ textAlign: "center", background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "3px 0" }}>
             <p style={{ fontSize: 9, color: "var(--muted)" }}>{label}</p>
@@ -1115,8 +1115,8 @@ function LivePositionCard({
         </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 4, fontSize: 11 }}>
-        {[["Entrada", sig.entry.toFixed(2)], ["Precio", price.toFixed(2)],
-          ["SL", sig.stopLoss.toFixed(2)], ["TP1", sig.tp1.toFixed(2)]].map(([k, v]) => (
+        {[["Entrada", (sig.entry ?? 0).toFixed(2)], ["Precio", price.toFixed(2)],
+          ["SL", (sig.stopLoss ?? 0).toFixed(2)], ["TP1", (sig.tp1 ?? 0).toFixed(2)]].map(([k, v]) => (
           <div key={k} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "3px 6px" }}>
             <p style={{ fontSize: 9, color: "var(--muted)" }}>{k}</p>
             <p style={{ fontSize: 11, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace" }}>{v}</p>
@@ -1144,7 +1144,7 @@ function TradeHistory({ trades }: { trades: ClosedTrade[] }) {
             <span style={{ color: t.direction === "LONG" ? "#10b981" : "#ef4444", fontWeight: 700 }}>{t.direction}</span>
             <span style={{ color: "var(--muted)" }}>{t.mode}</span>
             <span style={{ color: "var(--muted)", fontSize: 10, fontFamily: "sans-serif", overflow: "hidden", whiteSpace: "nowrap" }}>{t.result}</span>
-            <span style={{ color: pnlColor, fontWeight: 800, textAlign: "right" }}>{t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(2)}$</span>
+            <span style={{ color: pnlColor, fontWeight: 800, textAlign: "right" }}>{t.pnl >= 0 ? "+" : ""}{(t.pnl ?? 0).toFixed(2)}$</span>
             <span style={{ color: "var(--muted)", fontSize: 10 }}>{new Date(t.closedAt ?? Date.now()).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })}</span>
           </div>
         );
@@ -1192,12 +1192,12 @@ function BacktestTab({
           <h4 style={{ fontWeight: 700, marginBottom: 10 }}>{lastBacktest.total} trades simulados</h4>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(130px,1fr))", gap: 8 }}>
             {[
-              { label: "Win Rate",     value: `${lastBacktest.winRate.toFixed(1)}%`,      color: lastBacktest.winRate >= 50 ? "#10b981" : "#ef4444" },
+              { label: "Win Rate",     value: `${(lastBacktest.winRate ?? 0).toFixed(1)}%`,      color: lastBacktest.winRate >= 50 ? "#10b981" : "#ef4444" },
               { label: "P&L",          value: `$${(lastBacktest.grossProfit - lastBacktest.grossLoss).toFixed(2)}`,           color: lastBacktest.grossProfit >= lastBacktest.grossLoss ? "#10b981" : "#ef4444" },
-              { label: "Profit Factor",value: lastBacktest.profitFactor.toFixed(2),        color: lastBacktest.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
-              { label: "Max DD",       value: `$${lastBacktest.maxDrawdown.toFixed(2)}`,   color: "#ef4444" },
-              { label: "Sharpe",       value: lastBacktest.sharpe.toFixed(2),              color: lastBacktest.sharpe >= 1 ? "#10b981" : "var(--text)" },
-              { label: "Expectancy",   value: `$${lastBacktest.expectancy.toFixed(2)}`,    color: lastBacktest.expectancy >= 0 ? "#10b981" : "#ef4444" },
+              { label: "Profit Factor",value: (lastBacktest.profitFactor ?? 0).toFixed(2),        color: lastBacktest.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
+              { label: "Max DD",       value: `$${(lastBacktest.maxDrawdown ?? 0).toFixed(2)}`,   color: "#ef4444" },
+              { label: "Sharpe",       value: (lastBacktest.sharpe ?? 0).toFixed(2),              color: lastBacktest.sharpe >= 1 ? "#10b981" : "var(--text)" },
+              { label: "Expectancy",   value: `$${(lastBacktest.expectancy ?? 0).toFixed(2)}`,    color: lastBacktest.expectancy >= 0 ? "#10b981" : "#ef4444" },
             ].map(({ label, value, color }) => (
               <div key={label} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "8px 10px" }}>
                 <p style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2 }}>{label}</p>
@@ -1865,7 +1865,7 @@ function analyzeMarketControl(
 
   if (ind.ma5 > ind.ma20) { score += 20; reasons.push("MA5>MA20"); }
   if (price > ind.vwap)   { score += 15; reasons.push("precio>VWAP"); }
-  if (ind.rsi > 55)       { score += 10; reasons.push(`RSI${ind.rsi.toFixed(0)}`); }
+  if (ind.rsi > 55)       { score += 10; reasons.push(`RSI${(ind.rsi ?? 0).toFixed(0)}`); }
   if (ind.volumeDeltaPct > 10) { score += 15; reasons.push("CVD+"); }
   if (ind.bbSqueeze)      { score += 5;  reasons.push("squeeze"); }
 
@@ -2543,7 +2543,7 @@ function calcScalpingRisk(
     const spreadCostUsd = (realSpreadPct / 100) * entry * contractSz * lotSize;
 
     // ── Paso 6: Rationale ─────────────────────────────────────────────────────
-    const mtfCtx = `HTF ${mtf.htf.toFixed(2)} / LTF ${mtf.ltf.toFixed(2)} / Exec ${mtf.exec.toFixed(2)}`;
+    const mtfCtx = `HTF ${(mtf.htf ?? 0).toFixed(2)} / LTF ${(mtf.ltf ?? 0).toFixed(2)} / Exec ${(mtf.exec ?? 0).toFixed(2)}`;
     const confirmCtx = bestConfirm ? `Confirmación: ${bestConfirm.name} (${(bestConfirm.strength * 100).toFixed(0)}%)` : "Sin confirmación adicional";
     const wyckoffCtx = currentMode === "intradia" && wyckoff.bias !== "neutral"
       ? ` | Wyckoff ${wyckoff.bias === "accumulation" ? "Acum" : "Dist"} F${wyckoff.phase} mult×${wyckoffMult.toFixed(2)}` : "";
@@ -2553,8 +2553,8 @@ function calcScalpingRisk(
       : "";
     const cvdArrow = of ? (of.cvd.trend === "bullish" ? "↑" : of.cvd.trend === "bearish" ? "↓" : "→") : "";
     const mcCtx = (of && currentMode === "scalping")
-      ? ` | OF: ${controlLabel} score=${of.controlScore.toFixed(0)} CVD${cvdArrow} FP=${of.footprintScore.toFixed(0)} Vol=${price>of.profile.poc?"▲POC":"▼POC"}`
-      : (mc ? ` | Control: ${mc.dominantSide} (${mc.score.toFixed(0)}) CVD${mc.cvdSlope>=0?"↑":"↓"} POC:${mc.poc.toFixed(2)}` : "");
+      ? ` | OF: ${controlLabel} score=${(of.controlScore ?? 0).toFixed(0)} CVD${cvdArrow} FP=${(of.footprintScore ?? 0).toFixed(0)} Vol=${price>of.profile.poc?"▲POC":"▼POC"}`
+      : (mc ? ` | Control: ${mc.dominantSide} (${(mc.score ?? 0).toFixed(0)}) CVD${mc.cvdSlope>=0?"↑":"↓"} POC:${(mc.poc ?? 0).toFixed(2)}` : "");
     const rationale = currentMode === "scalping"
       ? `${controlLabel} ${finalDirection} | CVD${cvdArrow} FP:${of?.footprintScore.toFixed(0)??"?"} | ${confirmCtx}${mcCtx}`
       : `${finalDirection} | ${mtfCtx} | ${confirmCtx}${wyckoffCtx}${mcCtx}`;
@@ -2671,10 +2671,10 @@ function calcScalpingRisk(
       // ── Métricas adicionales para el prompt ──────────────────────────────────
       const riskSnap   = calcRiskMetrics(realTrades, balance, maxDailyLoss);
       const kellyStr   = riskSnap.kellyFraction > 0
-        ? `${(riskSnap.kellyFraction * 100).toFixed(1)}% (WR ${(riskSnap.kellyWR*100).toFixed(0)}% / RR ${riskSnap.kellyRR.toFixed(2)})`
+        ? `${(riskSnap.kellyFraction * 100).toFixed(1)}% (WR ${(riskSnap.kellyWR*100).toFixed(0)}% / RR ${(riskSnap.kellyRR ?? 0).toFixed(2)})`
         : "insuficiente data";
       const consecLoss = calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain).streak;
-      const ruinPct    = riskSnap.ruinProb.toFixed(1);
+      const ruinPct    = (riskSnap.ruinProb ?? 0).toFixed(1);
       // Con pocos trades, el EV histórico no es representativo — usar RR del motor
       const fewTrades  = stats.total < 15;
       const evSign     = fewTrades
@@ -2755,25 +2755,25 @@ Respond ONLY with valid JSON:
 
       const userMsg = `SIGNAL TO EVALUATE:
 Asset: ${signal.asset} | Mode: ${signal.mode.toUpperCase()} | Direction: ${signal.direction}
-Entry: ${signal.entry.toFixed(4)} | SL: ${signal.stopLoss.toFixed(4)} | TP: ${signal.takeProfit.toFixed(4)}
+Entry: ${(signal.entry ?? 0).toFixed(4)} | SL: ${(signal.stopLoss ?? 0).toFixed(4)} | TP: ${(signal.takeProfit ?? 0).toFixed(4)}
 RR: ${rrRatio.toFixed(2)}:1 [${rrQuality}] | Risk USDT: $${(equitySnap * riskPerTrade).toFixed(3)}
 Expected value if opened: $${expectedValue} [${evSign}]
-Confidence: ${signal.confidence.toFixed(1)}% | Kelly suggests: ${riskSnap.kellyFraction > 0.01 ? "OPEN" : "SKIP (no edge)"}
+Confidence: ${(signal.confidence ?? 0).toFixed(1)}% | Kelly suggests: ${riskSnap.kellyFraction > 0.01 ? "OPEN" : "SKIP (no edge)"}
 
 CFD SPREAD (broker cobra spread, no comisión):
-- Spread: $${spreadCostA.toFixed(4)} (${sigSpread.spreadPct.toFixed(3)}%) | Sesión: ${sigSpread.sessionLabel} | Vol alta: ${sigSpread.isHighVolume ? "SÍ ⚠" : "no"}
+- Spread: $${spreadCostA.toFixed(4)} (${(sigSpread.spreadPct ?? 0).toFixed(3)}%) | Sesión: ${sigSpread.sessionLabel} | Vol alta: ${sigSpread.isHighVolume ? "SÍ ⚠" : "no"}
 - Spread vs TP: ${spreadRatioTP}% del objetivo (>35% = setup degradado, >50% = SKIP)
 - Spread vs SL: ${spreadRatioSL}% del stop (clave en scalping)
-- Desglose: base=$${sigSpread.component.base.toFixed(4)} + volumen=$${sigSpread.component.volume.toFixed(4)} + sesión=$${sigSpread.component.session.toFixed(4)}
+- Desglose: base=$${(sigSpread.component.base ?? 0).toFixed(4)} + volumen=$${(sigSpread.component.volume ?? 0).toFixed(4)} + sesión=$${(sigSpread.component.session ?? 0).toFixed(4)}
 
 TECHNICAL CONTEXT:
-MTF → HTF: ${signal.mtf.htf.toFixed(2)} | LTF: ${signal.mtf.ltf.toFixed(2)} | Exec: ${signal.mtf.exec.toFixed(2)}
+MTF → HTF: ${(signal.mtf.htf ?? 0).toFixed(2)} | LTF: ${(signal.mtf.ltf ?? 0).toFixed(2)} | Exec: ${(signal.mtf.exec ?? 0).toFixed(2)}
 ${signal.mode === "scalping"
-  ? `Stoch %K: ${signal.indicators.stochK.toFixed(1)} / %D: ${signal.indicators.stochD.toFixed(1)} | ${signal.indicators.stochK > signal.indicators.stochD ? "K>D alcista" : "K<D bajista"}`
-  : `RSI: ${signal.indicators.rsi.toFixed(1)} | Divergencia: ${signal.indicators.rsiDivergence}`}
+  ? `Stoch %K: ${(signal.indicators.stochK ?? 0).toFixed(1)} / %D: ${(signal.indicators.stochD ?? 0).toFixed(1)} | ${signal.indicators.stochK > signal.indicators.stochD ? "K>D alcista" : "K<D bajista"}`
+  : `RSI: ${(signal.indicators.rsi ?? 0).toFixed(1)} | Divergencia: ${signal.indicators.rsiDivergence}`}
 VWAP: ${signal.entry > signal.indicators.vwap ? "SOBRE" : "BAJO"} (${((signal.entry - signal.indicators.vwap) / signal.indicators.vwap * 100).toFixed(2)}%)
 BB Squeeze: ${signal.indicators.bbSqueeze ? "SÍ — expansión de volatilidad inminente" : "NO"}
-Vol Delta: ${signal.indicators.volumeDeltaPct.toFixed(1)}% (${signal.indicators.volumeDeltaPct > 0 ? "presión compradora" : "presión vendedora"})
+Vol Delta: ${(signal.indicators.volumeDeltaPct ?? 0).toFixed(1)}% (${signal.indicators.volumeDeltaPct > 0 ? "presión compradora" : "presión vendedora"})
 ${signal.mode === "intradia"
   ? `Wyckoff: ${signal.wyckoff.bias} | Fase: ${signal.wyckoff.phase} | ${signal.wyckoff.narrative}`
   : "Wyckoff: N/A (scalping)"}
@@ -3050,6 +3050,8 @@ Rationale from system: ${signal.rationale}`;
       return;
     }
 
+    // ── Log de diagnóstico del flujo ─────────────────────────────────────────
+    console.log(`[FLOW] asset=${targetAsset} mode=${mode} liveReady=${liveReady} mt5=${mt5Status} circuit=${circuitOpenRef.current}`);
     // ── Verificar límites diarios antes de generar señal ─────────────────────
     if (mode === "scalping") {
       const risk = calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain);
@@ -3059,7 +3061,7 @@ Rationale from system: ${signal.rationale}`;
       }
       // Modo defensivo si expectancy negativa con suficientes trades
       if (risk.mathExpectancy < -0.5 && risk.dailyTrades > 5) {
-        if (!autoLabel) pushToast(`⚠️ Expectativa negativa ($${risk.mathExpectancy.toFixed(2)}). Modo defensivo.`, "warning");
+        if (!autoLabel) pushToast(`⚠️ Expectativa negativa ($${(risk.mathExpectancy ?? 0).toFixed(2)}). Modo defensivo.`, "warning");
       }
     }
 
@@ -3091,7 +3093,7 @@ Rationale from system: ${signal.rationale}`;
       const floorDbg = mode === "scalping"
         ? Math.max(46, lrnDbg.confidenceFloor - 4)
         : Math.max(50, lrnDbg.confidenceFloor);
-      console.log(`[TraderLab] ${targetAsset} ${mode} | price=${signal.entry.toFixed(2)} | conf=${signal.confidence.toFixed(1)}% (floor=${floorDbg}) | RR=${rrDbg.toFixed(2)} | SL=${signal.stopLoss.toFixed(2)} | TP1=${signal.tp1.toFixed(2)} TP2=${signal.tp2.toFixed(2)} | ${signal.rationale.slice(0,80)}`);
+      console.log(`[TraderLab] ${targetAsset} ${mode} | price=${(signal.entry ?? 0).toFixed(2)} | conf=${(signal.confidence ?? 0).toFixed(1)}% (floor=${floorDbg}) | RR=${rrDbg.toFixed(2)} | SL=${(signal.stopLoss ?? 0).toFixed(2)} | TP1=${(signal.tp1 ?? 0).toFixed(2)} TP2=${(signal.tp2 ?? 0).toFixed(2)} | ${signal.rationale.slice(0,80)}`);
     }
 
     // ── Guard correlación ────────────────────────────────────────────────────
@@ -3140,21 +3142,21 @@ Rationale from system: ${signal.rationale}`;
 
     // Log diagnóstico siempre visible (consola del navegador → F12)
     console.log(
-      `[SIGNAL] ${targetAsset} ${mode} | price=${signal.entry.toFixed(2)}` +
-      ` | conf=${signal.confidence.toFixed(1)}% (piso=${floor})` +
-      ` | RR=${rrActual.toFixed(2)} | SL=${signal.stopLoss.toFixed(2)}` +
+      `[SIGNAL] ${targetAsset} ${mode} | price=${(signal.entry ?? 0).toFixed(2)}` +
+      ` | conf=${(signal.confidence ?? 0).toFixed(1)}% (piso=${floor})` +
+      ` | RR=${rrActual.toFixed(2)} | SL=${(signal.stopLoss ?? 0).toFixed(2)}` +
       ` | TP1=${signal.tp1?.toFixed(2)} TP2=${signal.tp2?.toFixed(2)}` +
       ` | ${signal.rationale?.slice(0,60)}`
     );
 
     if (isNaN(signal.confidence) || isNaN(rrActual)) {
       console.error(`[TraderLab] NaN detectado — conf=${signal.confidence} RR=${rrActual} para ${targetAsset}`);
-      if (!autoLabel) pushToast(`⚠ ${targetAsset}: señal inválida (NaN) — verificá el bridge`, "error");
+      pushToast(`⚠ ${targetAsset}: señal inválida (NaN) — verificá el bridge`, "error");
       return;
     }
 
     if (signal.confidence < floor) {
-      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — conf ${signal.confidence.toFixed(0)}% < piso ${floor.toFixed(0)}% | ${signal.rationale.slice(0,60)}`, "warning");
+      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — conf ${(signal.confidence ?? 0).toFixed(0)}% < piso ${floor.toFixed(0)}% | ${signal.rationale.slice(0,60)}`, "warning");
       return;
     }
     if (rrActual < 1.5) {
@@ -3242,13 +3244,13 @@ Rationale from system: ${signal.rationale}`;
         const entry = execPrice ?? signal.entry;
         setOpenPositions(prev => [...prev, { id: ticket ?? Date.now(), signal: { ...signal, entry }, size, marginUsed, openedAt: new Date().toISOString(), peak: entry, trough: entry }]);
         const reversalTag = signal.isReversalSetup ? ` | 🔄 GIRO score=${signal.reversalScore}` : "";
-        const wyckoffTag  = signal.wyckoffSizeMult !== 1.0 ? ` | Wyckoff×${signal.wyckoffSizeMult.toFixed(1)}` : "";
-        if (!autoLabel) pushToast(`🚀 MT5 #${ticket} ${signal.asset} ${signal.direction} @ ${entry.toFixed(2)} | conf ${signal.confidence.toFixed(0)}%${multTag}${reversalTag}${wyckoffTag}`, "success");
+        const wyckoffTag  = signal.wyckoffSizeMult !== 1.0 ? ` | Wyckoff×${(signal.wyckoffSizeMult ?? 0).toFixed(1)}` : "";
+        if (!autoLabel) pushToast(`🚀 MT5 #${ticket} ${signal.asset} ${signal.direction} @ ${entry.toFixed(2)} | conf ${(signal.confidence ?? 0).toFixed(0)}%${multTag}${reversalTag}${wyckoffTag}`, "success");
       });
     } else {
       // Sin MT5: panel simulado
       setOpenPositions(prev => [...prev, { id: Date.now(), signal, size, marginUsed, openedAt: new Date().toISOString(), peak: signal.entry, trough: signal.entry }]);
-      if (!autoLabel) pushToast(`🚀 ${signal.asset} ${signal.direction} @ ${signal.entry.toFixed(2)} | conf ${signal.confidence.toFixed(0)}%${multTag}${signal.aiRationale ? " | " + signal.aiRationale : ""}`, "success");
+      if (!autoLabel) pushToast(`🚀 ${signal.asset} ${signal.direction} @ ${(signal.entry ?? 0).toFixed(2)} | conf ${(signal.confidence ?? 0).toFixed(0)}%${multTag}${signal.aiRationale ? " | " + signal.aiRationale : ""}`, "success");
     }
   }
 
@@ -3364,7 +3366,9 @@ Rationale from system: ${signal.rationale}`;
       if (d.ok && d.ticket) {
         onConfirm?.(d.ticket, d.price ?? signal.entry);
       } else {
-        pushToast(`⚠ MT5 rechazó: ${d.error ?? "error"}`, "error");
+        const errMsg = d.error ?? JSON.stringify(d);
+        pushToast(`❌ MT5 rechazó: ${errMsg}`, "error");
+        console.error("[sendToMT5] Bridge rechazó:", d);
       }
     } catch { pushToast("MT5: timeout al enviar señal", "error"); }
   }
@@ -3802,6 +3806,8 @@ Rationale from system: ${signal.rationale}`;
       setFeedStatus(`📡 ${timeStr} — ${payload.sourceNote}`);
       setLiveReady(true);
       updateCorrelationMatrix(seriesRef.current);
+      // Auto-cargar símbolos del broker si aún no se cargaron
+      if (mt5Enabled && mt5Status === "connected") void fetchMT5Symbols();
     } catch (e) {
       setFeedStatus("❌ Feed no disponible");
       setLiveReady(false);
@@ -3881,6 +3887,8 @@ Rationale from system: ${signal.rationale}`;
   }
 
   async function runAutoScan() {
+    // Sincronizar datos frescos antes de escanear
+    if (mt5Enabled && mt5Status === "connected") await syncRealData();
     const prof       = getSessionProfile();
     const sessionName = prof.name.split(" ")[0]; // "NY", "London", "Asia", etc.
     const hourUTC     = new Date().getUTCHours();
@@ -4107,10 +4115,10 @@ Rationale from system: ${signal.rationale}`;
           {[
             // Cuando MT5 está conectado: mostrar datos reales del broker
             { label: "Balance",
-              value: mt5Enabled && mt5Balance !== null ? `$${mt5Balance.toFixed(2)}` : money(balance),
+              value: mt5Enabled && mt5Balance !== null ? `$${(mt5Balance ?? 0).toFixed(2)}` : money(balance),
               color: "var(--text)" },
             { label: "Patrimonio",
-              value: mt5Enabled && mt5Equity !== null ? `$${mt5Equity.toFixed(2)}` : money(equity),
+              value: mt5Enabled && mt5Equity !== null ? `$${(mt5Equity ?? 0).toFixed(2)}` : money(equity),
               color: mt5Enabled && mt5Equity !== null && mt5Balance !== null
                 ? (mt5Equity >= mt5Balance ? "#10b981" : "#ef4444")
                 : (equity >= balance ? "#10b981" : "#ef4444") },
@@ -4126,11 +4134,11 @@ Rationale from system: ${signal.rationale}`;
             { label: "Sharpe", value: (stats.sharpe ?? 0).toFixed(2), color: stats.sharpe >= 1 ? "#10b981" : "var(--text)" },
             { label: "Trades reales", value: realTrades.length, color: "var(--muted)" },
             { label: mt5Enabled && mt5Margin !== null ? "Margen usado": "Margen usado",
-              value: mt5Enabled && mt5Margin !== null ? `$${mt5Margin.toFixed(2)}` : money(openPositions.reduce((a,p)=>a+p.marginUsed,0)),
+              value: mt5Enabled && mt5Margin !== null ? `$${(mt5Margin ?? 0).toFixed(2)}` : money(openPositions.reduce((a,p)=>a+p.marginUsed,0)),
               color: "var(--muted)" },
             { label: mt5Enabled && mt5FreeMargin !== null ? "Margen libre" : "Posiciones",
               value: mt5Enabled && mt5FreeMargin !== null
-                ? `$${mt5FreeMargin.toFixed(2)}${mt5MarginLevel !== null ? ` (${mt5MarginLevel.toFixed(0)}%)` : ""}`
+                ? `$${(mt5FreeMargin ?? 0).toFixed(2)}${mt5MarginLevel !== null ? ` (${(mt5MarginLevel ?? 0).toFixed(0)}%)` : ""}`
                 : String(openPositions.length + (mt5Positions.length > 0 ? ` (+${mt5Positions.length} MT5)` : "")),
               color: mt5Enabled && mt5MarginLevel !== null
                 ? (mt5MarginLevel > 500 ? "#10b981" : mt5MarginLevel > 200 ? "#f59e0b" : "#ef4444")
@@ -4224,8 +4232,8 @@ Rationale from system: ${signal.rationale}`;
                       ["Precio", (prices[asset] ?? 0).toFixed(dp)],
                       ["Bid", ss && ss.bid != null ? (ss.bid).toFixed(dp) : "-"],
                       ["Ask", ss && ss.ask != null ? (ss.ask).toFixed(dp) : "-"],
-                      ["Spread $", ss && ss.spread != null ? `$${ss.spread.toFixed(dp === 2 ? 2 : 4)}` : "-"],
-                      ["Spread", ss && ss.spreadPct != null ? `${ss.spreadPct.toFixed(3)}% ${mt5SpreadMap[asset] ? "📡 real" : "~ estimado"}` : "-"],
+                      ["Spread $", ss && ss.spread != null ? `$${(ss.spread ?? 0).toFixed(dp === 2 ? 2 : 4)}` : "-"],
+                      ["Spread", ss && ss.spreadPct != null ? `${(ss.spreadPct ?? 0).toFixed(3)}% ${mt5SpreadMap[asset] ? "📡 real" : "~ estimado"}` : "-"],
                       ["Sesión", ss ? ss.sessionLabel : "-"],
                       ["Vol", ss?.isHighVolume ? "⚠ ALTA" : "Normal"],
                       ["Leverage", `${getLeverage(asset)}× ${mt5LeverageMap[asset] ? "📡" : "~"}`],
@@ -4585,9 +4593,9 @@ Rationale from system: ${signal.rationale}`;
 
         {/* ━━━━━━━━━ BACKTEST ━━━━━━━━━ */}
         {appTab === "backtest" && (
-          <BacktestTab liveReady={liveReady} backtestSize={backtestSize} setBacktestSize={setBacktestSize}
+          <ErrorBoundary key="backtest-tab"><BacktestTab liveReady={liveReady} backtestSize={backtestSize} setBacktestSize={setBacktestSize}
             riskPct={riskPct} setRiskPct={setRiskPct} runBacktest={runBacktest}
-            lastBacktest={lastBacktest} backtestTrades={backtestTrades} />
+            lastBacktest={lastBacktest} backtestTrades={backtestTrades} /></ErrorBoundary>
         )}
 
         {/* ━━━━━━━━━ APRENDIZAJE ━━━━━━━━━ */}
@@ -4684,7 +4692,7 @@ Rationale from system: ${signal.rationale}`;
                         border: `1px solid ${edge > 0 ? "rgba(16,185,129,0.25)" : "rgba(239,68,68,0.2)"}`,
                         fontSize: 10 }}>
                         <div style={{ fontWeight: 700, color: "var(--muted)" }}>{h}h</div>
-                        <div style={{ fontWeight: 800, color: edge > 0 ? "#10b981" : "#ef4444" }}>{edge > 0 ? "+" : ""}{edge.toFixed(1)}</div>
+                        <div style={{ fontWeight: 800, color: edge > 0 ? "#10b981" : "#ef4444" }}>{edge > 0 ? "+" : ""}{(edge ?? 0).toFixed(1)}</div>
                       </div>
                     );
                   })}
@@ -4721,15 +4729,15 @@ Rationale from system: ${signal.rationale}`;
                             <td style={{ padding: "7px 10px", fontWeight: 700 }}>{asset}</td>
                             <td style={{ padding: "7px 10px", color: mode === "scalping" ? "#818cf8" : "#f59e0b" }}>{mode}</td>
                             <td style={{ padding: "7px 10px" }}>{ae.total}</td>
-                            <td style={{ padding: "7px 10px", color: wr >= 50 ? "#10b981" : "#ef4444", fontWeight: 700 }}>{wr.toFixed(1)}%</td>
+                            <td style={{ padding: "7px 10px", color: wr >= 50 ? "#10b981" : "#ef4444", fontWeight: 700 }}>{(wr ?? 0).toFixed(1)}%</td>
                             <td style={{ padding: "7px 10px", color: ae.pnl >= 0 ? "#10b981" : "#ef4444", fontWeight: 700 }}>
-                              {ae.pnl >= 0 ? "+" : ""}{ae.pnl.toFixed(2)}
+                              {ae.pnl >= 0 ? "+" : ""}{(ae.pnl ?? 0).toFixed(2)}
                             </td>
                             <td style={{ padding: "7px 10px", color: "var(--muted)" }}>
                               {bestH ? `${bestH[0]}h (+${bestH[1].toFixed(2)})` : "—"}
                             </td>
                             <td style={{ padding: "7px 10px", color: aeBonus > 0 ? "#10b981" : aeBonus < 0 ? "#ef4444" : "var(--muted)", fontWeight: 700 }}>
-                              {ae.total >= 5 ? `${aeBonus >= 0 ? "+" : ""}${aeBonus.toFixed(1)} pts` : "< 5 trades"}
+                              {ae.total >= 5 ? `${aeBonus >= 0 ? "+" : ""}${(aeBonus ?? 0).toFixed(1)} pts` : "< 5 trades"}
                             </td>
                           </tr>
                         );
@@ -4774,7 +4782,7 @@ Rationale from system: ${signal.rationale}`;
                       )}
                     </div>
                     {[
-                      ["Precio",       dbgPrice > 0 ? `${dbgPrice.toFixed(2)} ✓` : "⚠ SIN PRECIO",  dbgPrice > 0],
+                      ["Precio",       dbgPrice > 0 ? `${(dbgPrice ?? 0).toFixed(2)} ✓` : "⚠ SIN PRECIO",  dbgPrice > 0],
                       ["Series 1m",    `${dbgSeries.length} velas ${dbgSeries.length >= 20 ? "✓" : "⚠ pocas (<20)"}`, dbgSeries.length >= 20],
                       ["Candles 1m",   `${dbgCandles.length} velas ${dbgCandles.length >= 5 ? "✓" : "⚠ pocas"}`, dbgCandles.length >= 5],
                       ["Candles 5m",   `${dbgC5m.length} velas ${dbgC5m.length >= 13 ? "✓" : "⚠ /candles_mtf falla?"}`, dbgC5m.length >= 13],
@@ -4823,12 +4831,12 @@ Rationale from system: ${signal.rationale}`;
                   { label: "Trades reales",         value: String(realTrades.filter(t => t.source === "real").length),          ok: realTrades.length >= 5 },
                   { label: "Piso confianza actual", value: `${(learning.confidenceFloor ?? 52).toFixed(0)}%`,                          ok: learning.confidenceFloor <= 58 },
                   { label: "Escala riesgo",         value: `${(learning.riskScale ?? 1).toFixed(2)}×`,                               ok: learning.riskScale >= 0.8 },
-                  { label: "Equity usado",          value: mt5Equity !== null ? `$${mt5Equity.toFixed(2)} (MT5 real)` : `$${equity.toFixed(2)} (simulado)`, ok: mt5Equity !== null },
-                  { label: "Margen libre",          value: mt5FreeMargin !== null ? `$${mt5FreeMargin.toFixed(2)}` : "N/D",    ok: mt5FreeMargin === null || mt5FreeMargin > 0 },
+                  { label: "Equity usado",          value: mt5Equity !== null ? `$${(mt5Equity ?? 0).toFixed(2)} (MT5 real)` : `$${(equity ?? 0).toFixed(2)} (simulado)`, ok: mt5Equity !== null },
+                  { label: "Margen libre",          value: mt5FreeMargin !== null ? `$${(mt5FreeMargin ?? 0).toFixed(2)}` : "N/D",    ok: mt5FreeMargin === null || mt5FreeMargin > 0 },
                   { label: "Bridge conectado",      value: mt5Status === "connected" ? "✅ Sí" : "❌ No",                     ok: mt5Status === "connected" },
                   { label: "IA Groq",               value: aiStatus === "ok" ? `✅ ${groqModel}` : aiStatus,                  ok: aiStatus === "ok" },
                   { label: "Groq rpm (último min)", value: `${groqRateInfo.calls}/${GROQ_MAX_RPM}${groqRateInfo.paused ? " ⏸ PAUSADO" : ""}`, ok: !groqRateInfo.paused && groqRateInfo.calls < GROQ_MAX_RPM - 5 },
-                  { label: "Circuit breaker",      value: circuitOpen ? `🔴 ACTIVO — P&L diario: $${dailyPnlRef.current.pnl.toFixed(2)}` : `✅ OK — P&L hoy: $${dailyPnlRef.current.pnl.toFixed(2)}`, ok: !circuitOpen },
+                  { label: "Circuit breaker",      value: circuitOpen ? `🔴 ACTIVO — P&L diario: $${(dailyPnlRef.current.pnl ?? 0).toFixed(2)}` : `✅ OK — P&L hoy: $${(dailyPnlRef.current.pnl ?? 0).toFixed(2)}`, ok: !circuitOpen },
                 ].map(({ label, value, ok }) => (
                   <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "7px 10px", borderRadius: 7,
                     background: ok ? "rgba(16,185,129,0.06)" : "rgba(239,68,68,0.06)",
@@ -4940,7 +4948,7 @@ Rationale from system: ${signal.rationale}`;
                               </td>
                               <td style={{ padding:"6px 8px" }}>
                                 <span style={{ fontWeight:800, fontSize:13, padding:"2px 8px", borderRadius:8, background:scoreBg, color:scoreColor }}>
-                                  {score.toFixed(0)}
+                                  {(score ?? 0).toFixed(0)}
                                 </span>
                               </td>
                               <td style={{ padding:"6px 8px", color: intel ? "var(--text)" : "var(--muted)" }}>
@@ -4950,7 +4958,7 @@ Rationale from system: ${signal.rationale}`;
                                 {intel ? (intel.winRate*100).toFixed(1)+"%" : "–"}
                               </td>
                               <td style={{ padding:"6px 8px", fontWeight:700, color: intel ? (intel.avgPnl >= 0 ? "#10b981" : "#ef4444") : "var(--muted)" }}>
-                                {intel ? (intel.avgPnl >= 0 ? "+" : "") + intel.avgPnl.toFixed(2) : "–"}
+                                {intel ? (intel.avgPnl >= 0 ? "+" : "") + (intel.avgPnl ?? 0).toFixed(2) : "–"}
                               </td>
                               <td style={{ padding:"6px 8px", color:"#a5b4fc" }}>
                                 {intel?.bestSession ?? "–"}
@@ -4962,7 +4970,7 @@ Rationale from system: ${signal.rationale}`;
                                 {intel ? `${intel.bestHourUTC}:00 UTC` : "–"}
                               </td>
                               <td style={{ padding:"6px 8px", fontFamily:"'JetBrains Mono',monospace", fontSize:11 }}>
-                                {price > 0 ? price.toFixed(dp) : "–"}
+                                {price > 0 ? (price ?? 0).toFixed(dp) : "–"}
                               </td>
                               <td style={{ padding:"6px 8px", fontSize:10, color:"var(--muted)" }}>
                                 {(cat2.spreadPct*100).toFixed(2)}%
@@ -5052,8 +5060,8 @@ Rationale from system: ${signal.rationale}`;
                       <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:6, marginBottom:8 }}>
                         {[
                           { label:"Win Rate", value:(intel.winRate*100).toFixed(1)+"%", color: intel.winRate >= 0.5 ? "#10b981" : "#ef4444" },
-                          { label:"PF",       value:intel.profitFactor.toFixed(2), color: intel.profitFactor >= 1.5 ? "#10b981" : "#f59e0b" },
-                          { label:"Avg PnL",  value:(intel.avgPnl >= 0 ? "+" : "")+intel.avgPnl.toFixed(2), color: intel.avgPnl >= 0 ? "#10b981" : "#ef4444" },
+                          { label:"PF",       value:(intel.profitFactor ?? 0).toFixed(2), color: intel.profitFactor >= 1.5 ? "#10b981" : "#f59e0b" },
+                          { label:"Avg PnL",  value:(intel.avgPnl >= 0 ? "+" : "")+(intel.avgPnl ?? 0).toFixed(2), color: intel.avgPnl >= 0 ? "#10b981" : "#ef4444" },
                           { label:"Mejor sesión", value:intel.bestSession, color:"#a5b4fc" },
                           { label:"Mejor hora", value:`${intel.bestHourUTC}:00 UTC`, color:"var(--muted)" },
                         ].map(({label,value,color}) => (
@@ -5072,7 +5080,7 @@ Rationale from system: ${signal.rationale}`;
                               border: "1px solid rgba(255,255,255,0.07)" }}>
                               <span style={{ color:"var(--muted)" }}>{sess}: </span>
                               <span style={{ fontWeight:700, color: (st.wins/Math.max(st.trades,1)) >= 0.5 ? "#10b981" : "#ef4444" }}>
-                                {st.trades}t · {((st.wins/Math.max(st.trades,1))*100).toFixed(0)}%WR · {st.pnl >= 0 ? "+" : ""}{st.pnl.toFixed(1)}
+                                {st.trades}t · {((st.wins/Math.max(st.trades,1))*100).toFixed(0)}%WR · {st.pnl >= 0 ? "+" : ""}{(st.pnl ?? 0).toFixed(1)}
                               </span>
                             </div>
                           ))}
@@ -5195,7 +5203,7 @@ Rationale from system: ${signal.rationale}`;
               {mt5Status === "connected" && mt5Account && (
                 <div style={{ padding: "8px 12px", borderRadius: 8, background: "rgba(16,185,129,0.07)", border: "1px solid rgba(16,185,129,0.2)", marginBottom: 12, fontSize: 12 }}>
                   <span style={{ color: "var(--muted)" }}>Cuenta: </span><strong style={{ color: "#10b981" }}>{mt5Account}</strong>
-                  {mt5Balance !== null && <><span style={{ color: "var(--muted)", marginLeft: 12 }}>Balance: </span><strong>${mt5Balance.toFixed(2)}</strong></>}
+                  {mt5Balance !== null && <><span style={{ color: "var(--muted)", marginLeft: 12 }}>Balance: </span><strong>${(mt5Balance ?? 0).toFixed(2)}</strong></>}
                   <span style={{ marginLeft: 12, fontSize: 11, color: "#10b981" }}>DEMO ✓</span>
                 </div>
               )}
