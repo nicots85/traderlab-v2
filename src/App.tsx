@@ -895,96 +895,247 @@ function AiBadge({ status, onTest, latency }: { status: string; onTest: () => vo
 
 // ── CandlestickChart ──────────────────────────────────────────────────────────
 function CandlestickChart({
-  candles, indicators, wyckoff, showIndicators,
+  candles, indicators, wyckoff, showIndicators, lastSignal,
 }: {
   candles: Candle[];
   indicators: Indicators | null;
   wyckoff: WyckoffAnalysis | null;
   showIndicators: boolean;
+  lastSignal?: Signal | null;
 }) {
-  const W = 640, H = 220, PL = 52, PR = 8, PT = 10, PB = 22;
+  // Layout: area de precio (80%) + barras de volumen (20%)
+  const W = 680, H_TOTAL = 280, H_VOL = 44, PL = 56, PR = 10, PT = 12, PB_PRICE = 4;
+  const H_PRICE = H_TOTAL - H_VOL - 8;
   const data = candles.slice(-80);
   if (!data.length) {
     return (
-      <div style={{ width: "100%", height: H, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontSize: 12 }}>
-        Sin datos de velas — conecta el bridge MT5
+      <div style={{ width:"100%", height:H_TOTAL, display:"flex", alignItems:"center",
+        justifyContent:"center", color:"var(--muted)", fontSize:12, gap:8 }}>
+        <span style={{ fontSize:20 }}>📡</span>
+        Sin datos de velas — conectá el bridge MT5
       </div>
     );
   }
-  const hi = Math.max(...data.map(c => c.h));
-  const lo = Math.min(...data.map(c => c.l));
+  const hi    = Math.max(...data.map(c => c.h));
+  const lo    = Math.min(...data.map(c => c.l));
   const range = hi - lo || 1;
-  const cW = (W - PL - PR) / data.length;
-  const bW = Math.max(1.5, cW * 0.6);
-  const py = (p: number) => PT + ((hi - p) / range) * (H - PT - PB);
+  const cW    = (W - PL - PR) / data.length;
+  const bW    = Math.max(1.5, cW * 0.65);
+  // Funciones de proyección para área precio
+  const py = (p: number) => PT + ((hi - p) / range) * (H_PRICE - PT - PB_PRICE);
   const px = (i: number) => PL + i * cW + cW / 2;
-  const ticks = Array.from({ length: 5 }, (_, i) => lo + (range / 4) * (4 - i));
+  // Volumen
+  const maxVol  = Math.max(...data.map(c => c.v ?? 0), 1);
+  const vyTop   = H_PRICE + 8;
+  const vyH     = H_VOL - 4;
+  const volBarH = (v: number) => (v / maxVol) * vyH;
+  // EMA rápida y lenta para el gráfico
+  const closes  = data.map(c => c.c);
+  const ema8arr  = closes.map((_, i) => {
+    if (i < 7) return null;
+    const k = 2 / (8 + 1);
+    let e = closes[i - 7];
+    for (let j = i - 6; j <= i; j++) e = closes[j] * k + e * (1 - k);
+    return e;
+  });
+  const ema21arr = closes.map((_, i) => {
+    if (i < 20) return null;
+    const k = 2 / (21 + 1);
+    let e = closes[i - 20];
+    for (let j = i - 19; j <= i; j++) e = closes[j] * k + e * (1 - k);
+    return e;
+  });
+  const ticks   = Array.from({ length: 6 }, (_, i) => lo + (range / 5) * (5 - i));
+  // Precio actual (última vela)
+  const lastPrice = data[data.length - 1]?.c ?? 0;
+  const lastBull  = data[data.length - 1]?.c >= data[data.length - 1]?.o;
+  const digits    = lastPrice >= 100 ? 2 : lastPrice >= 1 ? 4 : 5;
+
+  // Wyckoff event labels mejorados con emojis
+  const wyckoffEmoji: Record<string, string> = {
+    "SC": "🔥 SC", "AR": "↗ AR", "ST": "⚠ ST", "SOS": "🚀 SOS", "SOW": "💀 SOW",
+    "LPS": "✅ LPS", "LPSY": "❌ LPSY", "BC": "🔔 BC", "UT": "⬆ UT", "UTAD": "🔥 UTAD",
+    "ICE": "🧊 ICE", "PSY": "📌 PSY", "PSA": "📌 PSA",
+  };
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, display: "block" }}>
-      <rect width={W} height={H} fill="transparent" />
+    <svg viewBox={`0 0 ${W} ${H_TOTAL}`} style={{ width:"100%", height:H_TOTAL, display:"block" }}>
+      {/* Fondo */}
+      <rect width={W} height={H_TOTAL} fill="transparent" />
+
+      {/* Grid horizontal */}
       {ticks.map((t, i) => (
         <g key={i}>
-          <line x1={PL} x2={W - PR} y1={py(t)} y2={py(t)} stroke="rgba(255,255,255,0.04)" strokeWidth={1} />
-          <text x={PL - 4} y={py(t) + 3.5} textAnchor="end" fontSize={9} fill="rgba(156,163,184,0.5)">
-            {t >= 1000 ? t.toFixed(0) : t >= 1 ? t.toFixed(2) : t.toFixed(4)}
+          <line x1={PL} x2={W - PR} y1={py(t)} y2={py(t)}
+            stroke="rgba(255,255,255,0.05)" strokeWidth={1} />
+          <text x={PL - 5} y={py(t) + 3.5} textAnchor="end" fontSize={9.5}
+            fill="rgba(148,163,184,0.6)" fontFamily="'JetBrains Mono',monospace">
+            {t >= 1000 ? t.toFixed(0) : t >= 1 ? t.toFixed(digits-1) : t.toFixed(digits)}
           </text>
         </g>
       ))}
+
+      {/* Zona soporte Wyckoff */}
       {wyckoff?.supportZone && (
         <rect x={PL} width={W - PL - PR}
-          y={py(wyckoff.supportZone[1])} height={Math.max(1, py(wyckoff.supportZone[0]) - py(wyckoff.supportZone[1]))}
-          fill="rgba(16,185,129,0.06)" />
+          y={py(wyckoff.supportZone[1])}
+          height={Math.max(2, py(wyckoff.supportZone[0]) - py(wyckoff.supportZone[1]))}
+          fill="rgba(16,185,129,0.10)" stroke="rgba(16,185,129,0.3)" strokeWidth={0.5} strokeDasharray="3,2" />
       )}
       {wyckoff?.resistanceZone && (
         <rect x={PL} width={W - PL - PR}
-          y={py(wyckoff.resistanceZone[1])} height={Math.max(1, py(wyckoff.resistanceZone[0]) - py(wyckoff.resistanceZone[1]))}
-          fill="rgba(239,68,68,0.06)" />
+          y={py(wyckoff.resistanceZone[1])}
+          height={Math.max(2, py(wyckoff.resistanceZone[0]) - py(wyckoff.resistanceZone[1]))}
+          fill="rgba(239,68,68,0.10)" stroke="rgba(239,68,68,0.3)" strokeWidth={0.5} strokeDasharray="3,2" />
       )}
+
+      {/* SL / TP de la última señal activa */}
+      {lastSignal && lastSignal.stopLoss > 0 && (() => {
+        const slY  = py(lastSignal.stopLoss);
+        const tp1Y = lastSignal.tp1 ? py(lastSignal.tp1) : null;
+        const tp2Y = py(lastSignal.tp2 ?? lastSignal.takeProfit);
+        const isLong = lastSignal.direction === "LONG";
+        return (
+          <g>
+            {/* SL — línea roja */}
+            <line x1={PL} x2={W-PR} y1={slY} y2={slY} stroke="#ef4444" strokeWidth={1.5} strokeDasharray="5,3" opacity={0.8} />
+            <rect x={W-PR-36} y={slY-9} width={36} height={13} fill="#ef4444" fillOpacity={0.85} rx={3} />
+            <text x={W-PR-18} y={slY+1} textAnchor="middle" fontSize={8.5} fill="white" fontWeight={800}>SL</text>
+            {/* TP2 — línea verde */}
+            <line x1={PL} x2={W-PR} y1={tp2Y} y2={tp2Y} stroke="#10b981" strokeWidth={1.5} strokeDasharray="5,3" opacity={0.8} />
+            <rect x={W-PR-36} y={tp2Y-9} width={36} height={13} fill="#10b981" fillOpacity={0.85} rx={3} />
+            <text x={W-PR-18} y={tp2Y+1} textAnchor="middle" fontSize={8.5} fill="white" fontWeight={800}>TP</text>
+            {/* TP1 */}
+            {tp1Y && (
+              <>
+                <line x1={PL} x2={W-PR} y1={tp1Y} y2={tp1Y} stroke="#34d399" strokeWidth={1} strokeDasharray="3,4" opacity={0.6} />
+                <rect x={W-PR-36} y={tp1Y-9} width={36} height={13} fill="#34d399" fillOpacity={0.7} rx={3} />
+                <text x={W-PR-18} y={tp1Y+1} textAnchor="middle" fontSize={8.5} fill="white" fontWeight={700}>TP1</text>
+              </>
+            )}
+            {/* Zona TP-entry sombreada */}
+            <rect x={PL} width={W-PL-PR-38}
+              y={isLong ? tp2Y : py(lastSignal.entry)}
+              height={Math.abs(tp2Y - py(lastSignal.entry))}
+              fill="rgba(16,185,129,0.06)" />
+            {/* Zona entry-SL sombreada */}
+            <rect x={PL} width={W-PL-PR-38}
+              y={isLong ? py(lastSignal.entry) : slY}
+              height={Math.abs(py(lastSignal.entry) - slY)}
+              fill="rgba(239,68,68,0.06)" />
+            {/* Marcador de entry */}
+            <line x1={PL} x2={W-PR-38} y1={py(lastSignal.entry)} y2={py(lastSignal.entry)}
+              stroke="#f59e0b" strokeWidth={1} strokeDasharray="2,4" opacity={0.7} />
+            <text x={PL+4} y={py(lastSignal.entry)-3} fontSize={8.5} fill="#f59e0b" fontWeight={700}>
+              ENTRY {isLong ? "▲" : "▼"}
+            </text>
+          </g>
+        );
+      })()}
+
+      {/* Indicadores técnicos */}
       {showIndicators && indicators && (
         <>
-          <path d={data.map((_, i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.bbUpper)}`).join(" ")}
-            fill="none" stroke="rgba(99,102,241,0.35)" strokeWidth={1} strokeDasharray="3,3" />
-          <path d={data.map((_, i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.bbLower)}`).join(" ")}
-            fill="none" stroke="rgba(99,102,241,0.35)" strokeWidth={1} strokeDasharray="3,3" />
-          <path d={data.map((_, i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwap)}`).join(" ")}
-            fill="none" stroke="rgba(245,158,11,0.7)" strokeWidth={1.5} />
-          <path d={data.map((_, i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwapUpperBand1)}`).join(" ")}
-            fill="none" stroke="rgba(245,158,11,0.3)" strokeWidth={1} strokeDasharray="2,3" />
-          <path d={data.map((_, i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwapLowerBand1)}`).join(" ")}
-            fill="none" stroke="rgba(245,158,11,0.3)" strokeWidth={1} strokeDasharray="2,3" />
+          {/* BB superior e inferior */}
+          <path d={data.map((_,i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.bbUpper)}`).join(" ")}
+            fill="none" stroke="rgba(99,102,241,0.4)" strokeWidth={1} strokeDasharray="3,3" />
+          <path d={data.map((_,i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.bbLower)}`).join(" ")}
+            fill="none" stroke="rgba(99,102,241,0.4)" strokeWidth={1} strokeDasharray="3,3" />
+          {/* VWAP */}
+          <path d={data.map((_,i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwap)}`).join(" ")}
+            fill="none" stroke="rgba(245,158,11,0.85)" strokeWidth={2} />
+          {/* VWAP bands */}
+          <path d={data.map((_,i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwapUpperBand1)}`).join(" ")}
+            fill="none" stroke="rgba(245,158,11,0.35)" strokeWidth={1} strokeDasharray="2,3" />
+          <path d={data.map((_,i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwapLowerBand1)}`).join(" ")}
+            fill="none" stroke="rgba(245,158,11,0.35)" strokeWidth={1} strokeDasharray="2,3" />
         </>
       )}
+
+      {/* EMA 8 y EMA 21 — siempre visibles */}
+      <path d={ema8arr.map((v,i) => v !== null ? `${i===0||ema8arr[i-1]===null?"M":"L"} ${px(i)} ${py(v)}` : "").filter(Boolean).join(" ")}
+        fill="none" stroke="rgba(99,102,241,0.9)" strokeWidth={1.5} />
+      <path d={ema21arr.map((v,i) => v !== null ? `${i===0||ema21arr[i-1]===null?"M":"L"} ${px(i)} ${py(v)}` : "").filter(Boolean).join(" ")}
+        fill="none" stroke="rgba(251,191,36,0.7)" strokeWidth={1.5} />
+
+      {/* Velas */}
       {data.map((c, i) => {
         const bull = c.c >= c.o;
         const col  = bull ? "#10b981" : "#ef4444";
         const bTop = py(Math.max(c.o, c.c));
         const bBot = py(Math.min(c.o, c.c));
+        const bodyH = Math.max(1.5, bBot - bTop);
         return (
           <g key={i}>
-            <line x1={px(i)} x2={px(i)} y1={py(c.h)} y2={py(c.l)} stroke={col} strokeWidth={1} opacity={0.7} />
-            <rect x={px(i) - bW / 2} y={bTop} width={bW} height={Math.max(1, bBot - bTop)}
-              fill={bull ? "rgba(16,185,129,0.85)" : "rgba(239,68,68,0.85)"} stroke={col} strokeWidth={0.5} />
+            <line x1={px(i)} x2={px(i)} y1={py(c.h)} y2={py(c.l)} stroke={col} strokeWidth={1} opacity={0.8} />
+            <rect x={px(i) - bW/2} y={bTop} width={bW} height={bodyH}
+              fill={bull ? "rgba(16,185,129,0.9)" : "rgba(239,68,68,0.9)"}
+              stroke={col} strokeWidth={0.5} rx={0.5} />
           </g>
         );
       })}
+
+      {/* Línea de precio actual */}
+      <line x1={PL} x2={W-PR} y1={py(lastPrice)} y2={py(lastPrice)}
+        stroke={lastBull ? "#10b981" : "#ef4444"} strokeWidth={1} strokeDasharray="2,3" opacity={0.6} />
+      <rect x={W-PR-52} y={py(lastPrice)-9} width={52} height={14} rx={3}
+        fill={lastBull ? "#10b981" : "#ef4444"} fillOpacity={0.9} />
+      <text x={W-PR-26} y={py(lastPrice)+1.5} textAnchor="middle" fontSize={8.5}
+        fill="white" fontWeight={800} fontFamily="'JetBrains Mono',monospace">
+        {lastPrice.toFixed(digits)}
+      </text>
+
+      {/* Eventos Wyckoff con emojis */}
       {wyckoff?.events.map((ev, i) => {
         const idx = Math.min(ev.candleIndex, data.length - 1);
+        const label = wyckoffEmoji[ev.label] ?? ev.label;
+        const isLast = ev.candleIndex >= data.length - 20;
         return (
           <g key={i}>
-            <line x1={px(idx)} x2={px(idx)} y1={PT} y2={H - PB} stroke={ev.color} strokeWidth={1} strokeDasharray="2,3" opacity={0.5} />
-            <text x={px(idx)} y={py(ev.price) - 5} textAnchor="middle" fontSize={8} fill={ev.color} fontWeight={700}>{ev.label}</text>
+            <line x1={px(idx)} x2={px(idx)} y1={PT} y2={H_PRICE - PB_PRICE}
+              stroke={ev.color} strokeWidth={1.5} strokeDasharray="3,3" opacity={0.6} />
+            <rect x={px(idx) - 2} y={PT - 2} width={4} height={4} fill={ev.color} opacity={0.8} />
+            {isLast && (
+              <text x={px(idx)} y={py(ev.price) - 6} textAnchor="middle" fontSize={9}
+                fill={ev.color} fontWeight={800}>{label}</text>
+            )}
           </g>
         );
       })}
+
+      {/* Eje X — timestamps */}
       {data.map((c, i) => {
-        if (i % 15 !== 0) return null;
+        const step = data.length > 60 ? 20 : data.length > 30 ? 10 : 5;
+        if (i % step !== 0) return null;
         const d = new Date(c.t * 1000);
         return (
-          <text key={i} x={px(i)} y={H - 5} textAnchor="middle" fontSize={8} fill="rgba(156,163,184,0.4)">
+          <text key={i} x={px(i)} y={H_PRICE + 5} textAnchor="middle" fontSize={8.5}
+            fill="rgba(148,163,184,0.45)">
             {`${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}`}
           </text>
         );
       })}
+
+      {/* Barras de volumen */}
+      {data.map((c, i) => {
+        const bull = c.c >= c.o;
+        const bh   = volBarH(c.v ?? 0);
+        return (
+          <rect key={i}
+            x={px(i) - bW/2} y={vyTop + vyH - bh} width={bW} height={Math.max(1, bh)}
+            fill={bull ? "rgba(16,185,129,0.45)" : "rgba(239,68,68,0.45)"} rx={0.5} />
+        );
+      })}
+
+      {/* Separador precio / volumen */}
+      <line x1={PL} x2={W-PR} y1={H_PRICE+2} y2={H_PRICE+2}
+        stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
+
+      {/* Etiqueta EMA en el gráfico */}
+      <rect x={PL+2} y={PT} width={70} height={14} fill="rgba(0,0,0,0.4)" rx={3} />
+      <text x={PL+6} y={PT+10} fontSize={8.5} fill="rgba(99,102,241,0.9)" fontWeight={700}>EMA8</text>
+      <text x={PL+30} y={PT+10} fontSize={8.5} fill="rgba(148,163,184,0.5)"> · </text>
+      <text x={PL+36} y={PT+10} fontSize={8.5} fill="rgba(251,191,36,0.8)" fontWeight={700}>EMA21</text>
     </svg>
   );
 }
@@ -2033,7 +2184,31 @@ function calcScalpingRisk(
       return { htf, ltf, exec, atr, hasRealTF: hasReal };
     }
 
-    // Intradía: MAs tendenciales
+    // Intradía: usar candles4h/1d reales si existen, sino fallback 1m
+    const c4h = candles4hRef.current[a] ?? [];
+    const c1d = candles1dRef.current[a] ?? [];
+
+    if (c4h.length >= 8) {
+      // HTF real: EMA8/21 sobre velas 4H
+      const closes4h = c4h.map((c: Candle) => c.c);
+      const atr4h    = Math.max(calcAtr(c4h, 14), atr);
+      const e8_4h    = ema(closes4h, 8);
+      const e21_4h   = ema(closes4h, 21);
+      const htf      = (e8_4h - e21_4h) / atr4h;
+
+      // LTF: últimas 20 velas 1m (momentum reciente) o 1D si hay
+      const c1dArr = c1d.length >= 5 ? c1d.map((c: Candle) => c.c) : [];
+      const ltfRaw = c1dArr.length >= 5
+        ? (ema(c1dArr, 3) - ema(c1dArr, 8)) / atr
+        : (avg(vals.slice(-8)) - avg(vals.slice(-20))) / atr;
+
+      // Exec: momentum 1m reciente (últimas 5 velas)
+      const n    = vals.length;
+      const exec = n >= 5 ? (vals[n-1] - vals[n-5]) / atr : 0;
+      return { htf, ltf: ltfRaw, exec, atr, hasRealTF: true };
+    }
+
+    // Fallback: 1m solamente
     const ma10 = avg(vals.slice(-10));
     const ma20 = avg(vals.slice(-20));
     const ma50 = vals.length >= 50 ? avg(vals.slice(-50)) : avg(vals);
@@ -2043,6 +2218,7 @@ function calcScalpingRisk(
       ltf:  (ma10 - ma20) / atr,
       exec: ((execSlice[execSlice.length - 1] ?? 0) - (execSlice[0] ?? 0)) / atr,
       atr,
+      hasRealTF: false,
     };
   }
 
@@ -2057,7 +2233,7 @@ function calcScalpingRisk(
     const hour      = now.getUTCHours();
     const dow       = now.getUTCDay(); // 0=dom, 6=sab
     const isWeekend = dow === 0 || dow === 6;
-    const isNY      = !isWeekend && hour >= 13 && hour < 21;
+    const isNY      = !isWeekend && hour >= 13 && hour < 22;  // NY extendido 13-22 UTC
     const isLondon  = !isWeekend && hour >= 7  && hour < 13;
     const isAsia    = hour >= 0  && hour < 7;
 
@@ -2463,19 +2639,50 @@ function calcScalpingRisk(
     // Si spread > 35% del TP → setup caro (penaliza confianza)
     const estTpDist = Math.max(mtf.atr * (currentMode === "scalping" ? lrn.scalpingTpAtr : lrn.intradayTpAtr), spread * 2);
     const spreadCostRatio = spread / Math.max(estTpDist, 1e-9);
+    // Bonus Wyckoff: distribución/acumulación alineada con dirección
+    const wyckoffBonus = (() => {
+      if (currentMode !== "intradia") return 0;
+      if (wyckoff.bias === "neutral") return 0;
+      const aligned =
+        (wyckoff.bias === "distribution" && finalDirection === "SHORT") ||
+        (wyckoff.bias === "accumulation" && finalDirection === "LONG");
+      const conflicted =
+        (wyckoff.bias === "distribution" && finalDirection === "LONG") ||
+        (wyckoff.bias === "accumulation" && finalDirection === "SHORT");
+      return aligned ? 14 : conflicted ? -10 : 0;
+    })();
+
+    // Bonus RSI extremo (sobrecompra/sobreventa alineado)
+    const rsiBonus = (() => {
+      if (!ind) return 0;
+      const rsiOversold   = ind.rsi < 35 && finalDirection === "LONG";
+      const rsiOverbought = ind.rsi > 65 && finalDirection === "SHORT";
+      return (rsiOversold || rsiOverbought) ? 8 : 0;
+    })();
+
+    // Bonus precio bajo/sobre VWAP alineado con dirección
+    const vwapBonus = (() => {
+      if (!ind || !price || !ind.vwap) return 0;
+      const belowVwap = price < ind.vwap && finalDirection === "LONG";
+      const aboveVwap = price > ind.vwap && finalDirection === "SHORT";
+      return (belowVwap || aboveVwap) ? 5 : -3;
+    })();
+
     const confidence = clamp(
-      52                                                          // base ligeramente más alta
-      + mtfStrength * 8
-      + (confirmed ? confirmStrength * 18 : -3)                  // penalización leve si no confirma
-      + (ind.rsiDivergence !== "none" ? 5 : 0)
+      54                                                          // base sólida
+      + mtfStrength * 10                                         // peso mayor al MTF
+      + (confirmed ? confirmStrength * 20 : 0)                   // confirmación pesa más
+      + (ind.rsiDivergence !== "none" ? 7 : 0)                  // divergencia RSI
       + mcScore
       + ofSetupBonus
+      + wyckoffBonus                                             // Wyckoff alineado = +14
+      + rsiBonus                                                 // RSI extremo = +8
+      + vwapBonus                                               // VWAP posición = ±5
       - divergencePenalty
-      - (mcConflict ? 8 : 0)                                     // reducido de 15 → 8
-      + (currentMode === "intradia" && wyckoff.bias !== "neutral" ? 5 : 0)
-      - (currentMode === "scalping" ? spreadPct * 30 : spreadPct * 12)  // reducido de 55/20
-      - (spreadCostRatio > 0.5 ? 6 : spreadCostRatio > 0.35 ? 3 : 0),  // umbral más alto
-      46, 96                                                      // mínimo 46 (era 50)
+      - (mcConflict ? 8 : 0)
+      - (currentMode === "scalping" ? spreadPct * 25 : spreadPct * 10)
+      - (spreadCostRatio > 0.5 ? 5 : spreadCostRatio > 0.35 ? 2 : 0),
+      44, 96                                                     // piso 44 (permisivo)
     );
 
     // ── Paso 5: Sizing — Wyckoff como multiplicador solo en intradía ──────────
@@ -2697,10 +2904,14 @@ function calcScalpingRisk(
       const systemPrompt = `You are an algorithmic trading system managing a REAL funded account.
 
 IDENTITY AND MANDATE:
+- You are a SECONDARY VALIDATOR, not the primary decision engine. The quantitative system already decided to open.
+- Your ONLY job: confirm the trade is safe (risk rules OK) OR identify a specific structural contradiction.
 - You manage $${initialCap} USDT of real capital. Every dollar lost is permanent until earned back.
 - The initial capital ($${initialCap}) is the absolute floor — if equity approaches it, you stop trading.
 - Your mandate: GROW capital with controlled risk. Not preserve it at all costs, not gamble it.
 - You are NOT risk-averse — you are RISK-CALIBRATED. Edge × frequency = profit.
+- DEFAULT TO OPEN: if no hard rule is broken and no structural contradiction exists → answer OPEN.
+- A veto (SKIP) must be justified by a SPECIFIC rule violation, not by general uncertainty or missing data.
 
 ${fewTrades ? "⚠ COLD START MODE (< 15 real trades): Statistical metrics (EV, Kelly) are NOT reliable yet. Base decision primarily on RR ratio and signal confidence score. DO NOT skip valid setups due to negative EV when sample is too small." : ""}
 
@@ -2739,8 +2950,11 @@ SKIP  → EV negative OR RR < 1.2 OR specific structural contradiction (e.g. Pha
 
 MODE RULES:
 - SCALPING: MTF momentum + Stoch aligned = OPEN if DD < 3%, EV positive, AND spread < 35% of TP. Frequency is the edge.
-- INTRADAY: require MTF + 1 indicator + Wyckoff not contradicting. Phase D distribution = hard SKIP.
-- NEVER skip a scalp setup purely due to macro uncertainty unless a hard rule is triggered.
+- INTRADAY SHORT: Wyckoff distribution (Phase C/D/E) = STRONG CONFIRMATION for SHORT. Distribution after UTAD = highest quality short setup. DO NOT skip shorts with Wyckoff distribution context.
+- INTRADAY LONG: Wyckoff accumulation (Phase A/B/C) = STRONG CONFIRMATION for LONG.
+- Wyckoff ONLY vetoes when direction CONTRADICTS the phase. Never vetoes aligned trades.
+- NEVER skip a setup purely due to: low Kelly (no history), high correlation, or missing optional data.
+- Cold start (<15 trades): Kelly and EV are statistically meaningless. Ignore them. Judge by RR and confidence only.
 
 CFD SPREAD RULES (broker cobra spread bid-ask en cada operación, sin comisión separada):
 - El spread es una pérdida GARANTIZADA al entrar. El precio debe recuperarlo antes de generar ganancia.
@@ -2771,7 +2985,7 @@ Asset: ${signal.asset} | Mode: ${signal.mode.toUpperCase()} | Direction: ${signa
 Entry: ${(signal.entry ?? 0).toFixed(4)} | SL: ${(signal.stopLoss ?? 0).toFixed(4)} | TP: ${(signal.takeProfit ?? 0).toFixed(4)}
 RR: ${rrRatio.toFixed(2)}:1 [${rrQuality}] | Risk USDT: $${(equitySnap * riskPerTrade).toFixed(3)}
 Expected value if opened: $${expectedValue} [${evSign}]
-Confidence: ${(signal.confidence ?? 0).toFixed(1)}% | Kelly suggests: ${riskSnap.kellyFraction > 0.01 ? "OPEN" : "SKIP (no edge)"}
+Confidence: ${(signal.confidence ?? 0).toFixed(1)}% | Kelly suggests: ${riskSnap.kellyFraction > 0.01 ? "OPEN" : fewTrades ? "OPEN (cold start — ignore Kelly)" : "SKIP (no edge)"}
 
 CFD SPREAD (broker cobra spread, no comisión):
 - Spread: $${spreadCostA.toFixed(4)} (${(sigSpread.spreadPct ?? 0).toFixed(3)}%) | Sesión: ${sigSpread.sessionLabel} | Vol alta: ${sigSpread.isHighVolume ? "SÍ ⚠" : "no"}
@@ -2788,11 +3002,17 @@ VWAP: ${signal.entry > signal.indicators.vwap ? "SOBRE" : "BAJO"} (${((signal.en
 BB Squeeze: ${signal.indicators.bbSqueeze ? "SÍ — expansión de volatilidad inminente" : "NO"}
 Vol Delta: ${(signal.indicators.volumeDeltaPct ?? 0).toFixed(1)}% (${signal.indicators.volumeDeltaPct > 0 ? "presión compradora" : "presión vendedora"})
 ${signal.mode === "intradia"
-  ? `Wyckoff: ${signal.wyckoff.bias} | Fase: ${signal.wyckoff.phase} | ${signal.wyckoff.narrative}`
+  ? `Wyckoff: ${signal.wyckoff.bias} | Fase: ${signal.wyckoff.phase} | ${signal.wyckoff.narrative}${signal.wyckoff.bias === "distribution" && signal.direction === "SHORT" ? " ← DISTRIBUTION+SHORT = ALIGNED, strong setup" : signal.wyckoff.bias === "accumulation" && signal.direction === "LONG" ? " ← ACCUMULATION+LONG = ALIGNED, strong setup" : signal.wyckoff.bias !== "neutral" && ((signal.wyckoff.bias === "distribution" && signal.direction === "LONG") || (signal.wyckoff.bias === "accumulation" && signal.direction === "SHORT")) ? " ← WARNING: direction contradicts Wyckoff" : ""}`
   : "Wyckoff: N/A (scalping)"}
 ${signal.mode === "scalping" ? `
 ORDER FLOW (scalping — señal más importante):
 ${signal.rationale.includes("Control:") || signal.rationale.includes("TOROS") || signal.rationale.includes("OSOS") ? signal.rationale : "Ver rationale"}` : ""}
+
+${signal.wyckoff?.bias === "distribution" && signal.direction === "SHORT"
+  ? "⚡ SETUP CONFIRMATION: Distribution Wyckoff + SHORT = structurally aligned. This is a PRIMARY short setup, not a contrarian trade."
+  : signal.wyckoff?.bias === "accumulation" && signal.direction === "LONG"
+  ? "⚡ SETUP CONFIRMATION: Accumulation Wyckoff + LONG = structurally aligned. Primary long setup."
+  : ""}
 
 RISK CHECK FOR THIS TRADE:
 - Drawdown now: ${currentDD}% (limit 5%) → ${parseFloat(currentDD) > 4 ? "⚠ NEAR LIMIT" : "✓ OK"}
@@ -3146,10 +3366,15 @@ Rationale from system: ${signal.rationale}`;
     // ── Decisión primaria: motor cuantitativo local ─────────────────────────
     const lrnSnap = learningRef.current;
     const prof    = getSessionProfile();
-    // Fuera de NY (finde/Asia/post-NY): piso más permisivo (señales menos limpias)
-    const floor   = mode === "scalping"
+    // Floor adaptativo: Wyckoff alineado → más permisivo, sin datos → más estricto
+    const hasWyckoffBias = mode === "intradia" &&
+      (wyckoffMap[targetAsset]?.bias === "distribution" ||
+       wyckoffMap[targetAsset]?.bias === "accumulation");
+    const floor = mode === "scalping"
       ? Math.max(44, lrnSnap.confidenceFloor - 4 + prof.confAdjust)
-      : Math.max(50, lrnSnap.confidenceFloor);
+      : hasWyckoffBias
+        ? Math.max(46, lrnSnap.confidenceFloor - 4)  // Wyckoff claro → piso más bajo
+        : Math.max(50, lrnSnap.confidenceFloor);       // sin contexto → más estricto
     const rrActual = Math.abs(signal.tp2 - signal.entry) /
                      Math.max(Math.abs(signal.entry - signal.stopLoss), 1e-9);
 
@@ -3168,12 +3393,16 @@ Rationale from system: ${signal.rationale}`;
       return;
     }
 
-    if (signal.confidence < floor) {
+    // Si el trader pasó overrides manuales de SL/TP → confiar en su análisis técnico
+    // Solo verificar RR mínimo con los valores reales
+    const hasManualOverrides = !!(overrides?.tp || overrides?.sl);
+    if (!hasManualOverrides && signal.confidence < floor) {
       if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — conf ${(signal.confidence ?? 0).toFixed(0)}% < piso ${floor.toFixed(0)}% | ${signal.rationale.slice(0,60)}`, "warning");
       return;
     }
-    if (rrActual < 1.5) {
-      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — RR ${rrActual.toFixed(2)} < 1.5 mínimo`, "warning");
+    const minRR = mode === "scalping" ? 1.5 : 1.3;
+    if (rrActual < minRR) {
+      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — RR ${rrActual.toFixed(2)} < ${minRR} | SL=${(signal.stopLoss??0).toFixed(4)} TP=${(signal.tp2??0).toFixed(4)}`, "warning");
       return;
     }
 
@@ -4354,19 +4583,25 @@ Rationale from system: ${signal.rationale}`;
                     indicators={showIndicators ? currentIndicators : null}
                     wyckoff={currentWyckoff}
                     showIndicators={showIndicators}
+                    lastSignal={lastSignal?.asset === asset ? lastSignal : null}
                   />
                 </div>
-                {/* Legend */}
-                {showIndicators && (
-                  <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 12, color: "var(--muted)", flexWrap: "wrap" }}>
-                    <span style={{ color: "#f59e0b" }}>━ VWAP</span>
-                    <span style={{ color: "rgba(245,158,11,0.5)" }}>- - VWAP ±1σ/2σ</span>
-                    <span style={{ color: "rgba(99,102,241,0.6)" }}>- - BB(20,2)</span>
-                    <span style={{ color: "rgba(16,185,129,0.5)" }}>░ Zona soporte Wyckoff</span>
-                    <span style={{ color: "rgba(239,68,68,0.5)" }}>░ Zona resistencia Wyckoff</span>
-                    <span style={{ color: "rgba(245,158,11,0.4)" }}>▌ Climax vol.</span>
-                  </div>
-                )}
+                {/* Legend mejorada */}
+                <div style={{ display:"flex", gap:10, marginTop:5, fontSize:10.5, flexWrap:"wrap", alignItems:"center" }}>
+                  <span style={{ color:"rgba(99,102,241,0.9)", fontWeight:700 }}>━ EMA8</span>
+                  <span style={{ color:"rgba(251,191,36,0.8)", fontWeight:700 }}>━ EMA21</span>
+                  {showIndicators && <>
+                    <span style={{ color:"#f59e0b" }}>━ VWAP</span>
+                    <span style={{ color:"rgba(99,102,241,0.6)" }}>┄ BB(20,2)</span>
+                  </>}
+                  <span style={{ color:"rgba(16,185,129,0.7)" }}>░ S Wyckoff</span>
+                  <span style={{ color:"rgba(239,68,68,0.7)" }}>░ R Wyckoff</span>
+                  {lastSignal?.asset === asset && <>
+                    <span style={{ color:"#10b981", fontWeight:700 }}>┄ TP</span>
+                    <span style={{ color:"#ef4444", fontWeight:700 }}>┄ SL</span>
+                    <span style={{ color:"#f59e0b" }}>┄ Entry</span>
+                  </>}
+                </div>
               </div>
 
               {/* Indicators */}
@@ -4404,77 +4639,129 @@ Rationale from system: ${signal.rationale}`;
                 </div>
               )}
 
-              {/* Last signal */}
-              {lastSignal && (
-                <div className="card" style={{ borderLeft: `3px solid ${lastSignal.direction === "LONG" ? "#10b981" : "#ef4444"}`, padding: "10px 12px" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                    <p className="label">Última señal</p>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      {/* Diagnóstico inline de por qué abre/no abre */}
-                      {(() => { try {
-                        const lrn = learningRef.current;
-                        const floor = lastSignal.mode === "scalping"
-                          ? Math.max(46, lrn.confidenceFloor - 4)
-                          : Math.max(50, lrn.confidenceFloor);
-                        const rr = Math.abs(lastSignal.tp2 - lastSignal.entry) /
-                                   Math.max(Math.abs(lastSignal.entry - lastSignal.stopLoss), 1e-9);
-                        const confOk = lastSignal.confidence >= floor;
-                        const rrOk   = rr >= 1.5;
-                        return (
-                          <div style={{ fontSize: 10, display: "flex", gap: 5 }}>
-                            <span style={{ padding: "2px 6px", borderRadius: 4, fontWeight: 700,
-                              background: confOk ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
-                              color: confOk ? "#10b981" : "#ef4444" }}>
-                              conf {(lastSignal.confidence ?? 0).toFixed(0)}% {confOk ? "✓" : `✗ (piso ${floor})`}
-                            </span>
-                            <span style={{ padding: "2px 6px", borderRadius: 4, fontWeight: 700,
-                              background: rrOk ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
-                              color: rrOk ? "#10b981" : "#ef4444" }}>
-                              RR {(rr ?? 0).toFixed(2)} {rrOk ? "✓" : "✗"}
-                            </span>
+              {/* Last signal — panel visual mejorado */}
+              {lastSignal && (() => { try {
+                const lrn      = learningRef.current;
+                const isLong   = lastSignal.direction === "LONG";
+                const dirColor = isLong ? "#10b981" : "#ef4444";
+                const dirEmoji = isLong ? "🐂" : "🐻";
+                const hasWyk   = lastSignal.mode === "intradia" &&
+                  (wyckoffMap[lastSignal.asset]?.bias === "distribution" ||
+                   wyckoffMap[lastSignal.asset]?.bias === "accumulation");
+                const floor    = lastSignal.mode === "scalping"
+                  ? Math.max(44, lrn.confidenceFloor - 4)
+                  : hasWyk ? Math.max(46, lrn.confidenceFloor - 4) : Math.max(50, lrn.confidenceFloor);
+                const rr       = Math.abs(lastSignal.tp2 - lastSignal.entry) /
+                                 Math.max(Math.abs(lastSignal.entry - lastSignal.stopLoss), 1e-9);
+                const minRR    = lastSignal.mode === "scalping" ? 1.5 : 1.3;
+                const confOk   = lastSignal.confidence >= floor;
+                const rrOk     = rr >= minRR;
+                const canTrade = confOk && rrOk;
+                const digits   = lastSignal.entry >= 100 ? 2 : lastSignal.entry >= 1 ? 4 : 5;
+                const fmt      = (n: number) => n.toFixed(digits);
+                return (
+                  <div className="card" style={{
+                    borderLeft: `4px solid ${dirColor}`,
+                    background: `linear-gradient(135deg, rgba(${isLong?"16,185,129":"239,68,68"},0.06) 0%, transparent 60%)`,
+                    padding:"12px 14px",
+                  }}>
+                    {/* Header señal */}
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                        <span style={{ fontSize:28 }}>{dirEmoji}</span>
+                        <div>
+                          <div style={{ fontSize:15, fontWeight:900, color:dirColor, letterSpacing:"0.04em" }}>
+                            {isLong ? "◀ LARGO" : "▶ CORTO"} · {lastSignal.asset}
                           </div>
-                        );
-                      } catch(e){console.error("[render]",e);return null;}})()}
-                    </div>
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginBottom: 8 }}>
-                    {/* Entrada + SL */}
-                    {[["Entrada", (lastSignal.entry ?? 0).toFixed(2), "var(--text)"], ["Stop Loss", (lastSignal.stopLoss ?? 0).toFixed(2), "#ef4444"]].map(([k, v, c]) => (
-                      <div key={k as string} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 6, padding: "5px 8px", textAlign: "center" }}>
-                        <p style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{k}</p>
-                        <p style={{ fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: c as string }}>{v}</p>
+                          <div style={{ fontSize:10.5, color:"var(--muted)", marginTop:1 }}>
+                            {lastSignal.mode === "scalping" ? "⚡ Scalping" : "📊 Intradía"} · {lastSignal.wyckoffSizeMult > 1 ? `Wyckoff ×${lastSignal.wyckoffSizeMult.toFixed(2)}` : ""}
+                          </div>
+                        </div>
                       </div>
-                    ))}
-                    {/* RR calculado */}
-                    <div style={{ background: "rgba(99,102,241,0.08)", borderRadius: 6, padding: "5px 8px", textAlign: "center" }}>
-                      <p style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.07em" }}>RR</p>
-                      <p style={{ fontWeight: 800, fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: "#818cf8" }}>
-                        {(Math.abs(lastSignal.tp2 - lastSignal.entry) / Math.max(Math.abs(lastSignal.entry - lastSignal.stopLoss), 0.001)).toFixed(2)}×
-                      </p>
-                    </div>
-                  </div>
-                  {/* TPs escalonados */}
-                  <div style={{ display: "grid", gridTemplateColumns: lastSignal.tp3 ? "1fr 1fr 1fr" : "1fr 1fr", gap: 5, marginBottom: 8 }}>
-                    {[
-                      { label: lastSignal.mode === "scalping" ? "TP1 (rápido)" : "TP1", val: lastSignal.tp1, color: "#10b981" },
-                      { label: lastSignal.mode === "scalping" ? "TP2 (objetivo)" : "TP2", val: lastSignal.tp2, color: "#059669" },
-                      ...(lastSignal.tp3 ? [{ label: "TP3 (extensión)", val: lastSignal.tp3, color: "#047857" }] : []),
-                    ].map(({ label, val, color }) => (
-                      <div key={label} style={{ background: "rgba(16,185,129,0.06)", borderRadius: 6, padding: "5px 8px", textAlign: "center", border: "1px solid rgba(16,185,129,0.15)" }}>
-                        <p style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase" }}>{label}</p>
-                        <p style={{ fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", fontSize: 11.5, color }}>{(val ?? 0).toFixed(2)}</p>
+                      {/* Semáforo go/no-go */}
+                      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:3 }}>
+                        <div style={{
+                          width:36, height:36, borderRadius:"50%",
+                          background: canTrade ? "#10b981" : "#ef4444",
+                          display:"flex", alignItems:"center", justifyContent:"center",
+                          fontSize:18, boxShadow:`0 0 12px ${canTrade?"#10b981":"#ef4444"}60`,
+                        }}>
+                          {canTrade ? "✅" : "🛑"}
+                        </div>
+                        <span style={{ fontSize:9, color:"var(--muted)", fontWeight:700 }}>
+                          {canTrade ? "TRADE OK" : "BLOQUEADO"}
+                        </span>
                       </div>
-                    ))}
-                  </div>
-                  <p style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 4 }}>{lastSignal.rationale}</p>
-                  {lastSignal.aiRationale && (
-                    <p style={{ fontSize: 10.5, color: "#a5b4fc", background: "rgba(99,102,241,0.06)", padding: "5px 8px", borderRadius: 6, marginTop: 4 }}>
-                      🤖 IA: {lastSignal.aiRationale}
-                      {lastSignal.aiRiskNotes && <span style={{ color: "#f59e0b" }}> — ⚠️ {lastSignal.aiRiskNotes}</span>}
+                    </div>
+
+                    {/* Badges confianza + RR */}
+                    <div style={{ display:"flex", gap:6, marginBottom:10, flexWrap:"wrap" }}>
+                      <span style={{ padding:"3px 10px", borderRadius:20, fontWeight:800, fontSize:11,
+                        background: confOk ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
+                        color: confOk ? "#10b981" : "#ef4444",
+                        border: `1px solid ${confOk?"rgba(16,185,129,0.3)":"rgba(239,68,68,0.3)"}` }}>
+                        🎯 Conf {(lastSignal.confidence ?? 0).toFixed(0)}%
+                        {confOk ? ` ✓` : ` ✗ (piso ${floor})`}
+                      </span>
+                      <span style={{ padding:"3px 10px", borderRadius:20, fontWeight:800, fontSize:11,
+                        background: rrOk ? "rgba(99,102,241,0.15)" : "rgba(239,68,68,0.15)",
+                        color: rrOk ? "#818cf8" : "#ef4444",
+                        border: `1px solid ${rrOk?"rgba(99,102,241,0.3)":"rgba(239,68,68,0.3)"}` }}>
+                        ⚖ RR {(rr??0).toFixed(2)}×
+                        {rrOk ? ` ✓` : ` ✗ (<${minRR})`}
+                      </span>
+                      {lastSignal.isReversalSetup && (
+                        <span style={{ padding:"3px 10px", borderRadius:20, fontWeight:800, fontSize:11,
+                          background:"rgba(245,158,11,0.15)", color:"#f59e0b",
+                          border:"1px solid rgba(245,158,11,0.3)" }}>
+                          🔄 Reversal ×{lastSignal.reversalScore}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Grid Entry / SL / RR + TPs */}
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:5, marginBottom:8 }}>
+                      {[
+                        { label:"Entry", value:fmt(lastSignal.entry), color:"#f59e0b", icon:"📍" },
+                        { label:"Stop Loss", value:fmt(lastSignal.stopLoss), color:"#ef4444", icon:"🛑" },
+                        { label:"TP1", value:fmt(lastSignal.tp1 ?? lastSignal.tp2), color:"#34d399", icon:"🎯" },
+                        { label:"TP2", value:fmt(lastSignal.tp2), color:"#10b981", icon:"🏆" },
+                      ].map(({ label, value, color, icon }) => (
+                        <div key={label} style={{ background:"rgba(255,255,255,0.04)", borderRadius:7,
+                          padding:"6px 8px", textAlign:"center", border:"1px solid rgba(255,255,255,0.06)" }}>
+                          <p style={{ fontSize:9.5, color:"var(--muted)", marginBottom:2 }}>{icon} {label}</p>
+                          <p style={{ fontWeight:800, fontFamily:"'JetBrains Mono',monospace",
+                            fontSize:11, color }}>{value}</p>
+                        </div>
+                      ))}
+                    </div>
+                    {lastSignal.tp3 && (
+                      <div style={{ background:"rgba(4,120,87,0.1)", borderRadius:6, padding:"4px 10px",
+                        fontSize:11, color:"#047857", fontWeight:700, marginBottom:6, display:"flex",
+                        justifyContent:"space-between", border:"1px solid rgba(4,120,87,0.2)" }}>
+                        <span>🚀 TP3 Extensión</span>
+                        <span style={{ fontFamily:"'JetBrains Mono',monospace" }}>{fmt(lastSignal.tp3)}</span>
+                      </div>
+                    )}
+
+                    {/* Rationale */}
+                    <p style={{ fontSize:10.5, color:"rgba(148,163,184,0.8)", marginBottom: lastSignal.aiRationale ? 5 : 0,
+                      lineHeight:"1.4", background:"rgba(255,255,255,0.02)", padding:"5px 8px", borderRadius:5 }}>
+                      📋 {lastSignal.rationale}
                     </p>
-                  )}
-                </div>
-              )}
+                    {lastSignal.aiRationale && (
+                      <p style={{ fontSize:10.5, color:"#a5b4fc", background:"rgba(99,102,241,0.07)",
+                        padding:"5px 8px", borderRadius:6, marginTop:4, lineHeight:"1.4",
+                        border:"1px solid rgba(99,102,241,0.15)" }}>
+                        🤖 IA: {lastSignal.aiRationale}
+                        {lastSignal.aiRiskNotes && (
+                          <span style={{ color:"#f59e0b" }}> · ⚠️ {lastSignal.aiRiskNotes}</span>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                );
+              } catch(e) { console.error("[render signal panel]", e); return null; }})()}
 
               {/* Posiciones abiertas */}
               <div>
