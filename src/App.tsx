@@ -577,8 +577,8 @@ You speak to your operator in Spanish. Be direct, quantitative, and honest — n
 
 ACCOUNT STATE:
 - Equity: $${stats.total > 0 ? (100 + stats.pnl).toFixed(2) : "100.00"} USDT (initial: $100)
-- P&L total: $${stats.pnl.toFixed(2)} | Trades: ${stats.total} | Win rate: ${stats.winRate.toFixed(1)}%
-- Profit factor: ${stats.profitFactor.toFixed(2)} | Sharpe: ${stats.sharpe.toFixed(2)} | Max DD: ${stats.maxDrawdown?.toFixed(1) ?? "N/A"}%
+- P&L total: $${stats.pnl.toFixed(2)} | Trades: ${stats.total} | Win rate: ${(stats.winRate ?? 0).toFixed(1)}%
+- Profit factor: ${(stats.profitFactor ?? 0).toFixed(2)} | Sharpe: ${(stats.sharpe ?? 0).toFixed(2)} | Max DD: ${stats.maxDrawdown?.toFixed(1) ?? "N/A"}%
 - Avg win: $${chatAvgW.toFixed(3)} | Avg loss: $${chatAvgL.toFixed(3)}
 - Expected value/trade: $${chatEV}
 - Kelly fraction: ${(chatKelly*100).toFixed(1)}% of capital
@@ -599,7 +599,7 @@ ${realTrades.slice(0,5).map(t =>
   `  ${t.asset} ${t.direction} ${t.mode.toUpperCase()} | ${t.result} | PnL: $${t.pnl.toFixed(3)}`
 ).join("\n") || "None yet"}
 
-LAST SIGNAL: ${lastSignal ? `${lastSignal.asset} ${lastSignal.direction} ${lastSignal.mode} conf:${lastSignal.confidence.toFixed(0)}% | ${lastSignal.rationale}` : "None"}
+LAST SIGNAL: ${lastSignal ? `${lastSignal.asset} ${lastSignal.direction} ${lastSignal.mode} conf:${(lastSignal.confidence ?? 0).toFixed(0)}% | ${lastSignal.rationale}` : "None"}
 
 BEHAVIOR RULES FOR CHAT:
 - When asked about risk, always cite actual numbers (EV, Kelly, ruina, DD)
@@ -2698,7 +2698,7 @@ ACCOUNT STATE RIGHT NOW:
 - Consecutive losses: ${consecLoss} (above 5 = mandatory pause)
 - Expected value per trade: $${expectedValue} [${evSign}]
 - Kelly optimal fraction: ${kellyStr}
-- Win rate: ${stats.winRate.toFixed(1)}% | Profit factor: ${stats.profitFactor.toFixed(2)} | Sharpe: ${stats.sharpe.toFixed(2)}
+- Win rate: ${(stats.winRate ?? 0).toFixed(1)}% | Profit factor: ${(stats.profitFactor ?? 0).toFixed(2)} | Sharpe: ${(stats.sharpe ?? 0).toFixed(2)}
 - Open positions: ${openCount} | Margin deployed: ${exposurePct}% of equity
 
 RISK RULES (non-negotiable):
@@ -4121,9 +4121,9 @@ Rationale from system: ${signal.rationale}`;
               color: (mt5Enabled && mt5Positions.length > 0
                 ? mt5Positions.reduce((a, p) => a + p.profit, 0)
                 : unrealized) >= 0 ? "#10b981" : "#ef4444" },
-            { label: "Win rate", value: `${stats.winRate.toFixed(1)}%`, color: stats.winRate >= 50 ? "#10b981" : "#ef4444" },
-            { label: "Factor ganancia", value: stats.profitFactor.toFixed(2), color: stats.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
-            { label: "Sharpe", value: stats.sharpe.toFixed(2), color: stats.sharpe >= 1 ? "#10b981" : "var(--text)" },
+            { label: "Win rate", value: `${(stats.winRate ?? 0).toFixed(1)}%`, color: stats.winRate >= 50 ? "#10b981" : "#ef4444" },
+            { label: "Factor ganancia", value: (stats.profitFactor ?? 0).toFixed(2), color: stats.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
+            { label: "Sharpe", value: (stats.sharpe ?? 0).toFixed(2), color: stats.sharpe >= 1 ? "#10b981" : "var(--text)" },
             { label: "Trades reales", value: realTrades.length, color: "var(--muted)" },
             { label: mt5Enabled && mt5Margin !== null ? "Margen usado": "Margen usado",
               value: mt5Enabled && mt5Margin !== null ? `$${mt5Margin.toFixed(2)}` : money(openPositions.reduce((a,p)=>a+p.marginUsed,0)),
@@ -4222,10 +4222,10 @@ Rationale from system: ${signal.rationale}`;
                     const dp = asset === "BTCUSD" || asset === "ETHUSD" ? 2 : asset === "XAUUSD" ? 2 : 4;
                     return [[
                       ["Precio", (prices[asset] ?? 0).toFixed(dp)],
-                      ["Bid", ss ? ss.bid.toFixed(dp) : "-"],
-                      ["Ask", ss ? ss.ask.toFixed(dp) : "-"],
-                      ["Spread $", ss ? `$${ss.spread.toFixed(dp === 2 ? 2 : 4)}` : "-"],
-                      ["Spread", ss ? `${ss.spreadPct.toFixed(3)}% ${mt5SpreadMap[asset] ? "📡 real" : "~ estimado"}` : "-"],
+                      ["Bid", ss && ss.bid != null ? (ss.bid).toFixed(dp) : "-"],
+                      ["Ask", ss && ss.ask != null ? (ss.ask).toFixed(dp) : "-"],
+                      ["Spread $", ss && ss.spread != null ? `$${ss.spread.toFixed(dp === 2 ? 2 : 4)}` : "-"],
+                      ["Spread", ss && ss.spreadPct != null ? `${ss.spreadPct.toFixed(3)}% ${mt5SpreadMap[asset] ? "📡 real" : "~ estimado"}` : "-"],
                       ["Sesión", ss ? ss.sessionLabel : "-"],
                       ["Vol", ss?.isHighVolume ? "⚠ ALTA" : "Normal"],
                       ["Leverage", `${getLeverage(asset)}× ${mt5LeverageMap[asset] ? "📡" : "~"}`],
@@ -4260,14 +4260,14 @@ Rationale from system: ${signal.rationale}`;
                   {bestHours.map(({ hour, edge }) => (
                     <div key={hour} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "2px 0", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
                       <span style={{ color: "var(--muted)" }}>{hour}:00</span>
-                      <span style={{ color: edge >= 0 ? "#10b981" : "#ef4444", fontWeight: 600 }}>{edge >= 0 ? "+" : ""}{edge.toFixed(2)}</span>
+                      <span style={{ color: edge >= 0 ? "#10b981" : "#ef4444", fontWeight: 600 }}>{(edge ?? 0) >= 0 ? "+" : ""}{(edge ?? 0).toFixed(2)}</span>
                     </div>
                   ))}
                 </div>
               )}
               <div className="card" style={{ fontSize: 11 }}>
                 <p className="label" style={{ marginBottom: 5 }}>Modelo (solo trades reales)</p>
-                {[["Trailing ATR", learning.atrTrailMult.toFixed(2)], ["TP scalp", `${learning.scalpingTpAtr.toFixed(2)} ATR`], ["TP intradía", `${learning.intradayTpAtr.toFixed(2)} ATR`], ["Piso conf.", `${learning.confidenceFloor.toFixed(0)}%`], ["Escala riesgo", `${learning.riskScale.toFixed(2)}×`]].map(([k, v]) => (
+                {[["Trailing ATR", (learning.atrTrailMult ?? 0.35).toFixed(2)], ["TP scalp", `${(learning.scalpingTpAtr ?? 2.4).toFixed(2)} ATR`], ["TP intradía", `${(learning.intradayTpAtr ?? 5.0).toFixed(2)} ATR`], ["Piso conf.", `${(learning.confidenceFloor ?? 52).toFixed(0)}%`], ["Escala riesgo", `${(learning.riskScale ?? 1).toFixed(2)}×`]].map(([k, v]) => (
                   <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
                     <span style={{ color: "var(--muted)" }}>{k}</span>
                     <span style={{ fontFamily: "'JetBrains Mono',monospace" }}>{v}</span>
@@ -4375,12 +4375,12 @@ Rationale from system: ${signal.rationale}`;
                             <span style={{ padding: "2px 6px", borderRadius: 4, fontWeight: 700,
                               background: confOk ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
                               color: confOk ? "#10b981" : "#ef4444" }}>
-                              conf {lastSignal.confidence.toFixed(0)}% {confOk ? "✓" : `✗ (piso ${floor})`}
+                              conf {(lastSignal.confidence ?? 0).toFixed(0)}% {confOk ? "✓" : `✗ (piso ${floor})`}
                             </span>
                             <span style={{ padding: "2px 6px", borderRadius: 4, fontWeight: 700,
                               background: rrOk ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
                               color: rrOk ? "#10b981" : "#ef4444" }}>
-                              RR {rr.toFixed(2)} {rrOk ? "✓" : "✗"}
+                              RR {(rr ?? 0).toFixed(2)} {rrOk ? "✓" : "✗"}
                             </span>
                           </div>
                         );
@@ -4389,7 +4389,7 @@ Rationale from system: ${signal.rationale}`;
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginBottom: 8 }}>
                     {/* Entrada + SL */}
-                    {[["Entrada", lastSignal.entry.toFixed(2), "var(--text)"], ["Stop Loss", lastSignal.stopLoss.toFixed(2), "#ef4444"]].map(([k, v, c]) => (
+                    {[["Entrada", (lastSignal.entry ?? 0).toFixed(2), "var(--text)"], ["Stop Loss", (lastSignal.stopLoss ?? 0).toFixed(2), "#ef4444"]].map(([k, v, c]) => (
                       <div key={k as string} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 6, padding: "5px 8px", textAlign: "center" }}>
                         <p style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{k}</p>
                         <p style={{ fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: c as string }}>{v}</p>
@@ -4412,7 +4412,7 @@ Rationale from system: ${signal.rationale}`;
                     ].map(({ label, val, color }) => (
                       <div key={label} style={{ background: "rgba(16,185,129,0.06)", borderRadius: 6, padding: "5px 8px", textAlign: "center", border: "1px solid rgba(16,185,129,0.15)" }}>
                         <p style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase" }}>{label}</p>
-                        <p style={{ fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", fontSize: 11.5, color }}>{val.toFixed(2)}</p>
+                        <p style={{ fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", fontSize: 11.5, color }}>{(val ?? 0).toFixed(2)}</p>
                       </div>
                     ))}
                   </div>
@@ -4455,7 +4455,7 @@ Rationale from system: ${signal.rationale}`;
                             </div>
                             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                               <span style={{ fontWeight: 700, fontSize: 15, color: pnlColor }}>
-                                {p.profit >= 0 ? "+" : ""}{p.profit.toFixed(2)} USD
+                                {(p.profit ?? 0) >= 0 ? "+" : ""}{(p.profit ?? 0).toFixed(2)} USD
                               </span>
                               <button
                                 onClick={() => closeInMT5ByTicket(p.ticket, p.asset)}
@@ -4466,10 +4466,10 @@ Rationale from system: ${signal.rationale}`;
                             </div>
                           </div>
                           <div style={{ display: "flex", gap: 14, fontSize: 11, color: "var(--muted)", flexWrap: "wrap" }}>
-                            <span>Entrada: <strong style={{ color: "var(--ink)" }}>{p.open_price.toFixed(p.open_price > 100 ? 2 : 4)}</strong></span>
-                            <span>Actual: <strong style={{ color: pnlColor }}>{p.current.toFixed(p.current > 100 ? 2 : 4)}</strong></span>
-                            {p.sl > 0 && <span>SL: <strong style={{ color: "#ef4444" }}>{p.sl.toFixed(p.sl > 100 ? 2 : 4)}</strong></span>}
-                            {p.tp > 0 && <span>TP: <strong style={{ color: "#10b981" }}>{p.tp.toFixed(p.tp > 100 ? 2 : 4)}</strong></span>}
+                            <span>Entrada: <strong style={{ color: "var(--ink)" }}>{(p.open_price ?? 0).toFixed((p.open_price ?? 0) > 100 ? 2 : 4)}</strong></span>
+                            <span>Actual: <strong style={{ color: pnlColor }}>{(p.current ?? 0).toFixed((p.current ?? 0) > 100 ? 2 : 4)}</strong></span>
+                            {(p.sl ?? 0) > 0 && <span>SL: <strong style={{ color: "#ef4444" }}>{(p.sl ?? 0).toFixed((p.sl ?? 0) > 100 ? 2 : 4)}</strong></span>}
+                            {(p.tp ?? 0) > 0 && <span>TP: <strong style={{ color: "#10b981" }}>{(p.tp ?? 0).toFixed((p.tp ?? 0) > 100 ? 2 : 4)}</strong></span>}
                             <span>Vol: <strong>{p.volume}</strong></span>
                             <span style={{ marginLeft: "auto", color: "#6366f1" }}>
                               {new Date(p.time).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })}
@@ -4519,7 +4519,7 @@ Rationale from system: ${signal.rationale}`;
               <div className="card">
                 <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 13 }}>Estadísticas — trades reales</p>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
-                  {[["Trades", stats.total], ["Win rate", `${stats.winRate.toFixed(1)}%`], ["Expectativa", money(stats.expectancy)], ["Factor gan.", stats.profitFactor.toFixed(2)], ["Sharpe", stats.sharpe.toFixed(2)], ["Max DD", `${stats.maxDrawdown.toFixed(1)}%`], ["P&L total", money(stats.pnl)], ["Posiciones", openPositions.length], ["Kelly %", riskMetrics.kellyFraction > 0 ? `${(riskMetrics.kellyFraction*100).toFixed(1)}%` : "N/D"], ["Ruina", riskMetrics.ruinProb !== undefined ? `${riskMetrics.ruinProb.toFixed(0)}%` : "N/D"]].map(([l, v]) => (
+                  {[["Trades", stats.total], ["Win rate", `${(stats.winRate ?? 0).toFixed(1)}%`], ["Expectativa", money(stats.expectancy)], ["Factor gan.", (stats.profitFactor ?? 0).toFixed(2)], ["Sharpe", (stats.sharpe ?? 0).toFixed(2)], ["Max DD", `${(stats.maxDrawdown ?? 0).toFixed(1)}%`], ["P&L total", money(stats.pnl)], ["Posiciones", openPositions.length], ["Kelly %", riskMetrics.kellyFraction > 0 ? `${(riskMetrics.kellyFraction*100).toFixed(1)}%` : "N/D"], ["Ruina", riskMetrics.ruinProb !== undefined ? `${(riskMetrics.ruinProb ?? 0).toFixed(0)}%` : "N/D"]].map(([l, v]) => (
                     <div key={l} className="metric"><span className="label" style={{ fontSize: 11, fontWeight: 600 }}>{l}</span><strong style={{ fontSize: 13 }}>{v}</strong></div>
                   ))}
                 </div>
@@ -4576,7 +4576,7 @@ Rationale from system: ${signal.rationale}`;
                 <p>Fuente: MT5 Bridge / PrimeXBT</p>
                 <p>Velas 1m/5m/15m/4H/1D en tiempo real</p>
                 <p>Wyckoff: velas 4H + 1D (contexto macro)</p>
-                <p>Trail: {learning.atrTrailMult.toFixed(2)} ATR</p>
+                <p>Trail: {(learning.atrTrailMult ?? 0.35).toFixed(2)} ATR</p>
               </div>
             </div>
           </div>
@@ -4624,7 +4624,7 @@ Rationale from system: ${signal.rationale}`;
                     <div key={key} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.07)" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
                         <span style={{ fontWeight: 700, fontSize: 12 }}>{label}</span>
-                        <span style={{ fontWeight: 800, fontSize: 15, color: "#6366f1" }}>{val.toFixed(2)}</span>
+                        <span style={{ fontWeight: 800, fontSize: 15, color: "#6366f1" }}>{(val ?? 0).toFixed(2)}</span>
                       </div>
                       <input type="range" min={min} max={max} step={step} value={val}
                         onChange={e => {
@@ -4799,7 +4799,7 @@ Rationale from system: ${signal.rationale}`;
                           <div style={{ color: "#a5b4fc", fontWeight: 700, marginBottom: 4 }}>Última señal generada:</div>
                           {[
                             ["Confianza", `${(lastSignal.confidence ?? 0).toFixed(1)}% (piso ${floor}%)`, (lastSignal.confidence ?? 0) >= floor],
-                            ["RR",        `${rr.toFixed(2)} (mín 1.5)`, rr >= 1.5],
+                            ["RR",        `${(rr ?? 0).toFixed(2)} (mín 1.5)`, rr >= 1.5],
                             ["Dirección", lastSignal.direction, true],
                             ["ATR",       (lastSignal.atr ?? 0).toFixed(4), (lastSignal.atr ?? 0) > 0],
                           ].map(([k, v, ok]) => (
@@ -4819,10 +4819,10 @@ Rationale from system: ${signal.rationale}`;
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 12 }}>
                 {[
-                  { label: "Win rate actual",      value: `${stats.winRate.toFixed(1)}%`,                                      ok: stats.winRate >= 40 },
+                  { label: "Win rate actual",      value: `${(stats.winRate ?? 0).toFixed(1)}%`,                                      ok: stats.winRate >= 40 },
                   { label: "Trades reales",         value: String(realTrades.filter(t => t.source === "real").length),          ok: realTrades.length >= 5 },
-                  { label: "Piso confianza actual", value: `${learning.confidenceFloor.toFixed(0)}%`,                          ok: learning.confidenceFloor <= 58 },
-                  { label: "Escala riesgo",         value: `${learning.riskScale.toFixed(2)}×`,                               ok: learning.riskScale >= 0.8 },
+                  { label: "Piso confianza actual", value: `${(learning.confidenceFloor ?? 52).toFixed(0)}%`,                          ok: learning.confidenceFloor <= 58 },
+                  { label: "Escala riesgo",         value: `${(learning.riskScale ?? 1).toFixed(2)}×`,                               ok: learning.riskScale >= 0.8 },
                   { label: "Equity usado",          value: mt5Equity !== null ? `$${mt5Equity.toFixed(2)} (MT5 real)` : `$${equity.toFixed(2)} (simulado)`, ok: mt5Equity !== null },
                   { label: "Margen libre",          value: mt5FreeMargin !== null ? `$${mt5FreeMargin.toFixed(2)}` : "N/D",    ok: mt5FreeMargin === null || mt5FreeMargin > 0 },
                   { label: "Bridge conectado",      value: mt5Status === "connected" ? "✅ Sí" : "❌ No",                     ok: mt5Status === "connected" },
@@ -5014,7 +5014,7 @@ Rationale from system: ${signal.rationale}`;
                               const textColor = isDiag ? "#a5b4fc" : abs >= 0.75 ? "#ef4444" : abs >= 0.5 ? "#f59e0b" : "#10b981";
                               return (
                                 <td key={colA} style={{ padding:"4px 6px", textAlign:"center", background:bg, fontWeight: abs >= 0.6 ? 800 : 500, color: textColor, fontSize:10, borderRadius:3 }}>
-                                  {isDiag ? "◆" : corr.toFixed(2)}
+                                  {isDiag ? "◆" : co(rr ?? 0).toFixed(2)}
                                 </td>
                               );
                             })}
@@ -5089,7 +5089,7 @@ Rationale from system: ${signal.rationale}`;
                               <span key={sym2} style={{ marginLeft:8,
                                 color: Math.abs(corr) >= 0.75 ? "#ef4444" : Math.abs(corr) >= 0.5 ? "#f59e0b" : "#10b981",
                                 fontWeight: Math.abs(corr) >= 0.75 ? 800 : 500 }}>
-                                {sym2}: {corr >= 0 ? "+" : ""}{corr.toFixed(2)}
+                                {sym2}: {corr >= 0 ? "+" : ""}{co(rr ?? 0).toFixed(2)}
                               </span>
                             ))
                           }
