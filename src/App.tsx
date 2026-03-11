@@ -173,7 +173,7 @@ type ScalpingRisk = {
   streak: number;
 };
 
-type AppTab = "trading" | "backtest" | "aprendizaje" | "activos" | "configuracion";
+type AppTab = "trading" | "aprendizaje" | "activos" | "configuracion" | "historial";
 
 // ── Wyckoff ──
 type WyckoffPhase = "A" | "B" | "C" | "D" | "E" | "unknown";
@@ -786,7 +786,23 @@ function chatAssetIntelContext(intel: Record<string, AssetIntelligence>): string
 }
 
 function useLocalStorage<T>(key: string, initial: T): [T, React.Dispatch<React.SetStateAction<T>>] {
-  return useState<T>(initial);
+  const [val, setVal] = useState<T>(() => {
+    try {
+      const stored = localStorage.getItem(key);
+      if (stored !== null) return JSON.parse(stored) as T;
+    } catch { /* ignore */ }
+    return initial;
+  });
+  const setAndStore: React.Dispatch<React.SetStateAction<T>> = (action) => {
+    setVal(prev => {
+      const next = typeof action === "function"
+        ? (action as (p: T) => T)(prev)
+        : action;
+      try { localStorage.setItem(key, JSON.stringify(next)); } catch { /* storage full */ }
+      return next;
+    });
+  };
+  return [val, setAndStore];
 }
 
 
@@ -1562,17 +1578,18 @@ export function App() {
   function removeToast(id: number) { setToasts(prev => prev.filter(t => t.id !== id)); }
 
   async function testAiConnection() {
-    if (!apiKey.trim() || !usingGroq) { pushToast("Ingrese API Key Groq y active el modo Groq.", "warning"); return; }
+    if (!apiKey.trim()) { pushToast("Ingrese la API Key de Groq en Config.", "warning"); return; }
+    if (!usingGroq)     { pushToast("Activá el modo Groq en Config.", "warning"); return; }
     setAiStatus("testing");
     const t0 = Date.now();
-    // Probar modelos en orden hasta encontrar uno activo
+    const prevModel = groqModel; // guardar para restaurar si todo falla
+    // Modelos Groq 2025 — en orden de preferencia velocidad/capacidad
     const CANDIDATES = [
-      "llama3-70b-8192",
-      "llama3-8b-8192",
       "llama-3.1-8b-instant",
+      "llama3-8b-8192",
       "llama-3.3-70b-versatile",
+      "llama3-70b-8192",
       "gemma2-9b-it",
-      "mixtral-8x7b-32768",
     ];
     let chosenModel = "";
     let lastStatus = 0;
@@ -1602,19 +1619,23 @@ export function App() {
         break; // Error de red — no tiene sentido probar más modelos
       }
     }
-    try {
-      if (!chosenModel) throw new Error(lastDetail || `Ningún modelo disponible (último HTTP ${lastStatus})`);
+    if (chosenModel) {
       setGroqModel(chosenModel);
-      setAiLatency(Date.now() - t0); setAiStatus("ok");
-      pushToast(`✅ Groq OK — ${chosenModel} — ${Date.now() - t0}ms`, "success");
-    } catch (e) {
-      setAiStatus("error");
-      const msg = e instanceof Error ? e.message : String(e);
-      // "Failed to fetch" = CORS o sin internet
-      if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
-        pushToast("❌ Groq: sin conexión o CORS bloqueado. Verificá internet.", "error");
-      } else {
-        pushToast(`❌ Groq: ${msg}`, "error");
+      setAiLatency(Date.now() - t0);
+      setAiStatus("ok");
+      pushToast(`✅ Groq OK — ${chosenModel} (${Date.now() - t0}ms)`, "success");
+    } else {
+      // No cambiar a "error" si había una conexión previa — solo mostrar warning
+      const wasConnected = prevModel && aiStatus === "ok";
+      setAiStatus(wasConnected ? "ok" : "error");
+      const hint = lastStatus === 401 ? "API Key inválida"
+        : lastStatus === 400 ? "Modelo no disponible — intentá con otro"
+        : lastStatus === 429 ? "Rate limit — esperá 60s"
+        : lastDetail || `HTTP ${lastStatus}`;
+      pushToast(`⚠ Groq: ${hint}`, "warning");
+      if (wasConnected) {
+        setGroqModel(prevModel); // restaurar modelo anterior
+        pushToast(`ℹ Groq sigue conectado con el modelo anterior: ${prevModel}`, "info");
       }
     }
   }
@@ -4265,7 +4286,7 @@ Rationale from system: ${signal.rationale}`;
   // ─── Render ────────────────────────────────────────────────────────────────
   const NAV = [
     { id: "trading" as AppTab, label: "Trading", icon: "📈" },
-    { id: "backtest" as AppTab, label: "Backtest", icon: "🔬" },
+    { id: "historial" as AppTab, label: "Historial", icon: "📒" },
     { id: "aprendizaje" as AppTab, label: "Aprendizaje", icon: "🧠" },
     { id: "activos" as AppTab, label: "Activos IA", icon: "🌐" },
     { id: "configuracion" as AppTab, label: "Config", icon: "⚙️" },
@@ -4577,7 +4598,7 @@ Rationale from system: ${signal.rationale}`;
                     )}
                   </div>
                 </div>
-                <div style={{ borderRadius: 8, overflow: "hidden", background: "rgba(0,0,0,0.25)", padding: "6px 3px 3px" }}>
+                <div onWheel={e => e.preventDefault()} style={{ borderRadius: 8, overflow: "hidden", background: "rgba(0,0,0,0.25)", padding: "6px 3px 3px" }}>
                   <CandlestickChart
                     candles={visibleCandles}
                     indicators={showIndicators ? currentIndicators : null}
@@ -4921,11 +4942,181 @@ Rationale from system: ${signal.rationale}`;
         )}
 
         {/* ━━━━━━━━━ BACKTEST ━━━━━━━━━ */}
-        {appTab === "backtest" && (
-          <ErrorBoundary key="backtest-tab"><BacktestTab liveReady={liveReady} backtestSize={backtestSize} setBacktestSize={setBacktestSize}
-            riskPct={riskPct} setRiskPct={setRiskPct} runBacktest={runBacktest}
-            lastBacktest={lastBacktest} backtestTrades={backtestTrades} /></ErrorBoundary>
-        )}
+        {appTab === "historial" && (() => { try {
+          const totalPnl  = realTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
+          const wins      = realTrades.filter(t => t.pnl > 0);
+          const losses    = realTrades.filter(t => t.pnl <= 0);
+          const winRate   = realTrades.length > 0 ? wins.length / realTrades.length * 100 : 0;
+          const avgWin    = wins.length > 0 ? wins.reduce((s,t)=>s+(t.pnl??0),0) / wins.length : 0;
+          const avgLoss   = losses.length > 0 ? Math.abs(losses.reduce((s,t)=>s+(t.pnl??0),0) / losses.length) : 0;
+          const pf        = avgLoss > 0 ? (avgWin * wins.length) / (avgLoss * losses.length) : 0;
+          const digits    = (n:number, asset?:string) => {
+            const p = prices[asset ?? ""] ?? n;
+            return p >= 100 ? 2 : p >= 1 ? 4 : 5;
+          };
+          return (
+            <div style={{ maxWidth: 1000, display: "flex", flexDirection: "column", gap: 14 }}>
+
+              {/* ── Métricas resumen ── */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px,1fr))", gap: 10 }}>
+                {[
+                  { label: "Total trades", value: realTrades.length, color: "var(--text)", icon: "📊" },
+                  { label: "Win Rate", value: `${winRate.toFixed(1)}%`, color: winRate >= 50 ? "#10b981" : "#ef4444", icon: "🎯" },
+                  { label: "P&L neto", value: `${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`, color: totalPnl >= 0 ? "#10b981" : "#ef4444", icon: "💰" },
+                  { label: "Avg ganancia", value: `$${avgWin.toFixed(2)}`, color: "#10b981", icon: "📈" },
+                  { label: "Avg pérdida", value: `-$${avgLoss.toFixed(2)}`, color: "#ef4444", icon: "📉" },
+                  { label: "Profit factor", value: pf.toFixed(2), color: pf >= 1.5 ? "#10b981" : pf >= 1 ? "#f59e0b" : "#ef4444", icon: "⚖" },
+                ].map(({ label, value, color, icon }) => (
+                  <div key={label} className="card" style={{ textAlign: "center", padding: "12px 10px" }}>
+                    <div style={{ fontSize: 18, marginBottom: 4 }}>{icon}</div>
+                    <p style={{ fontSize: 10, color: "var(--muted)", marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.07em" }}>{label}</p>
+                    <p style={{ fontWeight: 800, fontSize: 18, color, fontFamily: "'JetBrains Mono',monospace" }}>{value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* ── Tabla de trades ── */}
+              <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>
+                  <h3 style={{ fontWeight: 800, fontSize: 14, margin: 0 }}>📒 Historial de trades</h3>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <span style={{ fontSize: 11, color: "var(--muted)" }}>{realTrades.length} operaciones</span>
+                    {realTrades.length > 0 && (
+                      <button onClick={() => {
+                        if (window.confirm("¿Borrar TODO el historial? Esta acción no se puede deshacer.")) {
+                          setRealTrades([]);
+                          pushToast("🗑 Historial borrado", "info");
+                        }
+                      }} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 5,
+                        border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.08)",
+                        color: "#ef4444", cursor: "pointer", fontWeight: 700 }}>
+                        🗑 Limpiar
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {realTrades.length === 0 ? (
+                  <div style={{ textAlign: "center", padding: "40px 20px", color: "var(--muted)" }}>
+                    <div style={{ fontSize: 32, marginBottom: 10 }}>📭</div>
+                    <p style={{ fontSize: 13 }}>Sin trades registrados aún.</p>
+                    <p style={{ fontSize: 11 }}>Los trades ejecutados vía MT5 aparecerán aquí automáticamente.</p>
+                  </div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: "rgba(255,255,255,0.03)" }}>
+                          {["#", "Activo", "Dir", "Modo", "Entry", "Exit", "P&L", "P&L%", "Resultado", "Fecha"].map(h => (
+                            <th key={h} style={{ padding: "9px 12px", textAlign: "left", fontSize: 10,
+                              textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--muted)",
+                              borderBottom: "1px solid var(--border)", whiteSpace: "nowrap" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[...realTrades].reverse().map((t, i) => {
+                          const isWin = t.pnl > 0;
+                          const pnlColor = isWin ? "#10b981" : "#ef4444";
+                          const dp = t.entry >= 100 ? 2 : t.entry >= 1 ? 4 : 5;
+                          return (
+                            <tr key={t.id ?? i} style={{ borderBottom: "1px solid rgba(255,255,255,0.03)",
+                              background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.01)" }}>
+                              <td style={{ padding: "8px 12px", color: "var(--muted)", fontSize: 11 }}>{realTrades.length - i}</td>
+                              <td style={{ padding: "8px 12px", fontWeight: 700 }}>{t.asset}</td>
+                              <td style={{ padding: "8px 12px" }}>
+                                <span style={{ fontSize: 12, fontWeight: 800,
+                                  color: t.direction === "LONG" ? "#10b981" : "#ef4444" }}>
+                                  {t.direction === "LONG" ? "🐂 L" : "🐻 S"}
+                                </span>
+                              </td>
+                              <td style={{ padding: "8px 12px", fontSize: 10, color: "var(--muted)",
+                                background: t.mode === "scalping" ? "rgba(99,102,241,0.06)" : "transparent" }}>
+                                {t.mode === "scalping" ? "⚡ Scalp" : "📊 Intradía"}
+                              </td>
+                              <td style={{ padding: "8px 12px", fontFamily: "'JetBrains Mono',monospace", fontSize: 11 }}>
+                                {(t.entry ?? 0).toFixed(dp)}
+                              </td>
+                              <td style={{ padding: "8px 12px", fontFamily: "'JetBrains Mono',monospace", fontSize: 11 }}>
+                                {(t.exit ?? 0).toFixed(dp)}
+                              </td>
+                              <td style={{ padding: "8px 12px", fontWeight: 800, color: pnlColor,
+                                fontFamily: "'JetBrains Mono',monospace" }}>
+                                {(t.pnl ?? 0) >= 0 ? "+" : ""}${(t.pnl ?? 0).toFixed(2)}
+                              </td>
+                              <td style={{ padding: "8px 12px", fontWeight: 700, color: pnlColor }}>
+                                {(t.pnlPct ?? 0) >= 0 ? "+" : ""}{(t.pnlPct ?? 0).toFixed(2)}%
+                              </td>
+                              <td style={{ padding: "8px 12px" }}>
+                                <span style={{ padding: "2px 8px", borderRadius: 10, fontSize: 10, fontWeight: 800,
+                                  background: isWin ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
+                                  color: pnlColor }}>
+                                  {isWin ? "✅ WIN" : "❌ LOSS"}
+                                </span>
+                              </td>
+                              <td style={{ padding: "8px 12px", fontSize: 10, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                                {t.closedAt ? new Date(t.closedAt).toLocaleDateString("es", { day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit" }) : "–"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Curva de equity ── */}
+              {realTrades.length >= 2 && (() => {
+                const equityCurve = realTrades.reduce((acc: number[], t) => {
+                  acc.push((acc[acc.length-1] ?? balance) + (t.pnl ?? 0));
+                  return acc;
+                }, [balance]);
+                const minEq = Math.min(...equityCurve);
+                const maxEq = Math.max(...equityCurve);
+                const rangeEq = maxEq - minEq || 1;
+                const W = 900, H = 120, PL = 55, PR = 10, PT = 10, PB = 22;
+                const pxEq = (i: number) => PL + (i / (equityCurve.length - 1)) * (W - PL - PR);
+                const pyEq = (v: number) => PT + ((maxEq - v) / rangeEq) * (H - PT - PB);
+                const pathD = equityCurve.map((v,i) => `${i===0?"M":"L"} ${pxEq(i)} ${pyEq(v)}`).join(" ");
+                const lastEq = equityCurve[equityCurve.length - 1];
+                const isUp   = lastEq >= balance;
+                return (
+                  <div className="card">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <h3 style={{ fontWeight: 800, fontSize: 13, margin: 0 }}>📈 Curva de equity</h3>
+                      <span style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 800,
+                        color: isUp ? "#10b981" : "#ef4444", fontSize: 14 }}>
+                        ${lastEq.toFixed(2)}
+                      </span>
+                    </div>
+                    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:"100%", height: H }}>
+                      <rect width={W} height={H} fill="transparent" />
+                      {[0,1,2,3].map(i => {
+                        const v = minEq + (rangeEq/3)*i;
+                        return <g key={i}>
+                          <line x1={PL} x2={W-PR} y1={pyEq(v)} y2={pyEq(v)} stroke="rgba(255,255,255,0.05)" strokeWidth={1} />
+                          <text x={PL-4} y={pyEq(v)+3} textAnchor="end" fontSize={9} fill="rgba(148,163,184,0.5)" fontFamily="monospace">${v.toFixed(0)}</text>
+                        </g>;
+                      })}
+                      {/* Línea base (capital inicial) */}
+                      <line x1={PL} x2={W-PR} y1={pyEq(balance)} y2={pyEq(balance)}
+                        stroke="rgba(255,255,255,0.12)" strokeWidth={1} strokeDasharray="4,3" />
+                      {/* Área bajo curva */}
+                      <path d={`${pathD} L ${pxEq(equityCurve.length-1)} ${pyEq(minEq)} L ${pxEq(0)} ${pyEq(minEq)} Z`}
+                        fill={`rgba(${isUp?"16,185,129":"239,68,68"},0.08)`} />
+                      {/* Línea de equity */}
+                      <path d={pathD} fill="none"
+                        stroke={isUp ? "#10b981" : "#ef4444"} strokeWidth={2} strokeLinejoin="round" />
+                      {/* Punto actual */}
+                      <circle cx={pxEq(equityCurve.length-1)} cy={pyEq(lastEq)} r={4}
+                        fill={isUp ? "#10b981" : "#ef4444"} />
+                    </svg>
+                  </div>
+                );
+              })()}
+            </div>
+          );
+        } catch(e) { console.error("[render historial]", e); return null; }})()}
 
         {/* ━━━━━━━━━ APRENDIZAJE ━━━━━━━━━ */}
         {appTab === "aprendizaje" && (
