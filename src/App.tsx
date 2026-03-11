@@ -4079,7 +4079,7 @@ Rationale from system: ${signal.rationale}`;
             {feedStatus}
           </div>
           {/* Badge sesión activa */}
-          {(() => {
+          {(() => { try {
             const sp = getSessionProfile();
             const bgMap: Record<string,string> = {
               "NY":             "rgba(16,185,129,0.15)",
@@ -4105,7 +4105,7 @@ Rationale from system: ${signal.rationale}`;
                 {sp.isCryptoOnly && <span style={{ marginLeft: 5, opacity: 0.8 }}>BTC·ETH</span>}
               </div>
             );
-          })()}
+          } catch(e){console.error("[render]",e);return null;}})()}
         </div>
       </nav>
 
@@ -4180,7 +4180,7 @@ Rationale from system: ${signal.rationale}`;
               <div className="card">
                 <p className="label" style={{ marginBottom: 5 }}>Activo</p>
                 <select className="sel" value={asset} onChange={e => setAsset(e.target.value as Asset)} style={{ width: "100%" }}>
-                  {(() => {
+                  {(() => { try {
                     // Categorías dinámicas — usa availableSymbols si hay datos del broker
                     // sino usa los assets fijos con grupos hardcodeados
                     const CAT_LABEL: Record<string, string> = {
@@ -4222,10 +4222,10 @@ Rationale from system: ${signal.rationale}`;
                           ))}
                         </optgroup>
                       ));
-                  })()}
+                  } catch(e){console.error("[render]",e);return null;}})()}
                 </select>
                 <div style={{ marginTop: 8, fontSize: 11 }}>
-                  {(()=>{
+                  {(()=>{ try {
                     const ss = spreadSnapshot[asset];
                     const dp = asset === "BTCUSD" || asset === "ETHUSD" ? 2 : asset === "XAUUSD" ? 2 : 4;
                     return [[
@@ -4238,7 +4238,7 @@ Rationale from system: ${signal.rationale}`;
                       ["Vol", ss?.isHighVolume ? "⚠ ALTA" : "Normal"],
                       ["Leverage", `${getLeverage(asset)}× ${mt5LeverageMap[asset] ? "📡" : "~"}`],
                     ]];
-                  })()[0].map(([k, v]) => (
+                  } catch(e){console.error("[render]",e);return null;}})()[0].map(([k, v]) => (
                     <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
                       <span style={{ color: "var(--muted)" }}>{k}</span>
                       <span style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>{v}</span>
@@ -4369,7 +4369,7 @@ Rationale from system: ${signal.rationale}`;
                     <p className="label">Última señal</p>
                     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                       {/* Diagnóstico inline de por qué abre/no abre */}
-                      {(() => {
+                      {(() => { try {
                         const lrn = learningRef.current;
                         const floor = lastSignal.mode === "scalping"
                           ? Math.max(46, lrn.confidenceFloor - 4)
@@ -4392,7 +4392,7 @@ Rationale from system: ${signal.rationale}`;
                             </span>
                           </div>
                         );
-                      })()}
+                      } catch(e){console.error("[render]",e);return null;}})()}
                     </div>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginBottom: 8 }}>
@@ -4756,7 +4756,7 @@ Rationale from system: ${signal.rationale}`;
               <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>🔍 Diagnóstico en tiempo real</p>
 
               {/* Señal en vivo para debug */}
-              {(() => {
+              {(() => { try {
                 const dbgAsset = asset;
                 const dbgSeries = series[dbgAsset] ?? [];
                 const dbgCandles = candles[dbgAsset] ?? [];
@@ -4823,7 +4823,7 @@ Rationale from system: ${signal.rationale}`;
               })()}
                   </div>
                 );
-              })()}
+              } catch(e) { return <span style={{color:"#ef4444",fontSize:10}}>⚠ error render diag: {String(e)}</span>; } })()}
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 12 }}>
                 {[
@@ -5022,7 +5022,7 @@ Rationale from system: ${signal.rationale}`;
                               const textColor = isDiag ? "#a5b4fc" : abs >= 0.75 ? "#ef4444" : abs >= 0.5 ? "#f59e0b" : "#10b981";
                               return (
                                 <td key={colA} style={{ padding:"4px 6px", textAlign:"center", background:bg, fontWeight: abs >= 0.6 ? 800 : 500, color: textColor, fontSize:10, borderRadius:3 }}>
-                                  {isDiag ? "◆" : co(rr ?? 0).toFixed(2)}
+                                  {isDiag ? "◆" : (corr ?? 0).toFixed(2)}
                                 </td>
                               );
                             })}
