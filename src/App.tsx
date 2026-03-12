@@ -1606,6 +1606,7 @@ export function App() {
   const [mt5Enabled,  setMt5Enabled]  = useLocalStorage<boolean>("tl_mt5_enabled", false);
   const [mt5Url,      setMt5Url]      = useLocalStorage<string>("tl_mt5_url", "http://localhost:8000");
   const [mt5Status,   setMt5Status]   = useState<"disconnected"|"connected"|"error"|"testing">("disconnected");
+  const mt5StatusRef = React.useRef<"disconnected"|"connected"|"error"|"testing">("disconnected");
   const [mt5Account,  setMt5Account]  = useState<string|null>(null);
   const [mt5Balance,  setMt5Balance]  = useState<number|null>(null);
   const [mt5Equity,      setMt5Equity]      = useState<number|null>(null);
@@ -4010,17 +4011,23 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
 
   async function createSignalAndExecute(mode: Mode, targetAsset: Asset, autoLabel = false, overrides?: { tp?: number; sl?: number }) {
     if (!liveReady) {
-      pushToast("⟳ Sincronizando datos antes de generar señal...", "info");
-      await syncRealData();
-      if (!liveReady) {
-        const hint = mt5Enabled && mt5Status !== "connected"
-          ? "Bridge configurado pero no conectado — hacé 'Test conexión' en ⚙ Config"
-          : !mt5Enabled
-            ? "Activá el bridge MT5 en ⚙ Config y conectá antes de operar"
-            : "Sin datos del bridge — verificá que bridge.py esté corriendo";
-        pushToast(`⚠ ${hint}`, "warning");
+      if (!mt5Enabled) {
+        if (!autoLabel) pushToast("⚠ Activá el bridge MT5 en ⚙ Config antes de operar", "warning");
         return;
       }
+      // Intentar reconectar + sync automáticamente (race condition al arrancar)
+      if (!autoLabel) pushToast("⟳ Reconectando bridge y sincronizando...", "info");
+      try {
+        const ok = await testMT5Bridge();
+        if (ok) await syncRealData(mt5Url);
+      } catch { /* ignorar */ }
+      // Verificar liveReady después del intento
+      if (!liveReady && mt5StatusRef.current !== "connected") {
+        if (!autoLabel) pushToast("⚠ Bridge no responde — verificá que bridge.py esté corriendo", "warning");
+        return;
+      }
+      // Si el bridge conectó pero liveReady todavía false (setState async), continuar igual
+      // Los datos ya están en los refs
     }
     if (circuitOpenRef.current) {
       if (!autoLabel) pushToast("🔴 Circuit breaker activo — límite de pérdida diaria alcanzado. Reactivá el autoScan manualmente cuando estés listo.", "error");
@@ -4343,10 +4350,11 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
     } catch { /* sync silencioso — no interrumpir el flujo */ }
   }
 
-  async function testMT5Bridge() {
+  async function testMT5Bridge(): Promise<boolean> {
     setMt5Status("testing");
+    const currentUrl = mt5Url;   // capturar antes de cualquier await — evita stale closure
     try {
-      const r = await fetch(`${mt5Url}/status`, { signal: AbortSignal.timeout(5000) });
+      const r = await fetch(`${currentUrl}/status`, { signal: AbortSignal.timeout(6000) });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json() as {
         connected: boolean; account?: string; balance?: number;
@@ -4354,25 +4362,51 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
       };
       if (d.connected) {
         setMt5Status("connected");
+        mt5StatusRef.current = "connected";
         setMt5Account(d.account ?? null);
         setMt5Balance(d.balance ?? null);
         if (d.equity !== undefined) setMt5Equity(d.equity);
-        // Cargar catálogo de símbolos disponibles en el broker
-        void fetchMT5Symbols();
-        // Sincronizar posiciones inmediatamente al conectar
+        void fetchMT5SymbolsDirect();
         await syncMT5State();
+        // Sync de datos inmediato con URL explícita — no esperar que useState se propague
+        void syncRealData(currentUrl);
         pushToast(
-          `✅ MT5 — Cta ${d.account} | Balance $${d.balance?.toFixed(0)} | ${d.demo ? "DEMO ✓" : "⚠ REAL"} | ${d.broker ?? ""}`,
+          `✅ MT5 — Cta ${d.account} | $${d.balance?.toFixed(0)} | ${d.demo ? "DEMO ✓" : "⚠ REAL"} | ${d.broker ?? ""}`,
           "success"
         );
+        return true;
       } else {
         setMt5Status("error");
-        pushToast("MT5: bridge activo pero MT5 no conectado a PrimeXBT", "warning");
+        mt5StatusRef.current = "error";
+        pushToast("MT5: bridge activo pero MT5 no conectado — abrí MetaTrader 5", "warning");
+        return false;
       }
-    } catch {
+    } catch (e) {
       setMt5Status("error");
-      pushToast("MT5: bridge no disponible en " + mt5Url, "error");
+      mt5StatusRef.current = "error";
+      const msg = e instanceof Error ? e.message : String(e);
+      pushToast(`MT5: bridge no responde en ${mt5Url} (${msg})`, "error");
+      return false;
     }
+  }
+
+  // fetchMT5SymbolsDirect — sin guard mt5Status (para llamar justo después de conectar)
+  async function fetchMT5SymbolsDirect() {
+    try {
+      const r = await fetch(`${mt5Url}/symbols`, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) return;
+      const data = await r.json() as {
+        symbols: Array<{
+          name: string; spread: number; bid: number; ask: number;
+          digits: number; contract_size: number;
+          volume_min: number; volume_step: number;
+          trade_allowed: boolean;
+        }>;
+        total?: number;
+      };
+      const syms = data.symbols ?? [];
+      pushToast(`📋 ${syms.length} símbolos cargados del broker`, "info");
+    } catch { /* ignorar */ }
   }
 
   // ── MT5: enviar señal de apertura ─────────────────────────────────────────
@@ -4528,7 +4562,7 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
     // ─── fetchMT5Symbols: lee activos disponibles del broker ──────────────────
   // Llama a /symbols del bridge (nuevo endpoint) y actualiza la lista de activos
   async function fetchMT5Symbols() {
-    if (mt5Status !== "connected") return;
+    if (mt5Status !== "connected" && mt5StatusRef.current !== "connected") return;
     try {
       const r = await fetch(`${mt5Url}/symbols`, { signal: AbortSignal.timeout(8000) });
       if (!r.ok) return;
@@ -4746,11 +4780,13 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
     setCorrelationMatrix(matrix);
   }
 
-  async function syncRealData() {
+  async function syncRealData(forceUrl?: string) {
     setIsSyncing(true);
-    const usingBridge = mt5Enabled && mt5Status === "connected";
+    // Usar ref síncrono — no depender de useState que puede ser stale
+    const isConn = mt5StatusRef.current === "connected" || mt5Status === "connected";
+    const usingBridge = mt5Enabled && isConn;
+    const effectiveUrl = forceUrl ?? mt5Url;
 
-    // Sin bridge: marcar como no listo pero NO bloquear con toast agresivo en cada sync
     if (!usingBridge) {
       setFeedStatus(mt5Enabled
         ? "⚠ Bridge configurado pero no conectado — abrí bridge.py y hacé 'Test conexión'"
@@ -4758,10 +4794,10 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
       );
       setLiveReady(false);
       setIsSyncing(false);
-      return;   // sin toast — el status bar en el header ya lo muestra
+      return;
     }
     try {
-      const payload = await fetchRealMarketSnapshot(prevPricesRef.current, mt5Url, true);
+      const payload = await fetchRealMarketSnapshot(prevPricesRef.current, effectiveUrl, true);
 
       setPrices(payload.prices);
       setSeries(prev => {
@@ -4792,7 +4828,7 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
           const mtfFetches = await Promise.allSettled(
             assets.map(async (a) => {
               const r = await fetch(
-                `${mt5Url}/candles_mtf/${a}?limit_5m=70&limit_15m=55&limit_4h=150&limit_1d=90`,
+                `${effectiveUrl}/candles_mtf/${a}?limit_5m=70&limit_15m=55&limit_4h=150&limit_1d=90`,
                 { signal: AbortSignal.timeout(8000) }
               );
               if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -4988,15 +5024,16 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
   // Al arrancar: si mt5Enabled estaba guardado, reconectar automáticamente
   useEffect(() => {
     if (mt5Enabled) {
-      // Reconectar bridge guardado sin esperar input del usuario
-      void testMT5Bridge().then(() => {
-        // Si conectó OK, hacer sync inmediato
-        void syncRealData();
-      });
-    } else {
-      // Sin bridge — sync fallará suavemente (liveReady queda false, sin toast molesto)
-      void syncRealData();
+      void (async () => {
+        const ok = await testMT5Bridge();
+        if (ok) {
+          // Pasar URL explícita — evita stale closure de mt5Url en el primer render
+          await syncRealData(mt5Url);
+        }
+        // Si no conectó: el banner en la UI explica qué hacer
+      })();
     }
+    // Sin bridge activo: no hacer nada — evitar toast molesto al arrancar
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);  // solo al montar
   // Sync de posiciones MT5 cada 1 segundo si hay posiciones abiertas
@@ -5724,11 +5761,33 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
                         <span style={{ fontSize: 9, color: "var(--muted)" }}>Calibra cada 15min</span>
                       </div>
                     </div>
-                    {calibNow?.macroNote && (
-                      <p style={{ fontSize: 11, color: "#a5b4fc", marginBottom: 8, padding: "5px 8px",
-                        background: "rgba(99,102,241,0.08)", borderRadius: 6, borderLeft: "2px solid #6366f1" }}>
-                        {calibNow.macroNote}
-                      </p>
+                    {(calibNow?.macroNote || calibNow?.corrNote) && (
+                      <div style={{ marginBottom: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+                        {calibNow?.macroNote && <p style={{ fontSize: 11, color: "#a5b4fc", padding: "5px 8px",
+                          background: "rgba(99,102,241,0.08)", borderRadius: 6, borderLeft: "2px solid #6366f1", margin: 0 }}>
+                          🌐 {calibNow.macroNote}
+                        </p>}
+                        {calibNow?.corrNote && <p style={{ fontSize: 11, color: "#fbbf24", padding: "5px 8px",
+                          background: "rgba(251,191,36,0.06)", borderRadius: 6, borderLeft: "2px solid #f59e0b", margin: 0 }}>
+                          🔗 {calibNow.corrNote}
+                        </p>}
+                      </div>
+                    )}
+                    {portfolioRisk && portfolioRisk.currentRiskScore > 0 && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+                        padding: "6px 10px", borderRadius: 7,
+                        background: portfolioRisk.currentRiskScore > 0.6 ? "rgba(239,68,68,0.08)" : "rgba(255,255,255,0.03)",
+                        border: `1px solid ${portfolioRisk.currentRiskScore > 0.6 ? "rgba(239,68,68,0.2)" : "var(--border)"}` }}>
+                        <span style={{ fontSize: 11 }}>
+                          {portfolioRisk.currentRiskScore > 0.6 ? "🔴" : portfolioRisk.currentRiskScore > 0.3 ? "🟡" : "🟢"}
+                        </span>
+                        <span style={{ fontSize: 11, color: "var(--text-2)" }}>
+                          Riesgo corr: <strong style={{ color: portfolioRisk.currentRiskScore > 0.6 ? "#ef4444" : "var(--text)" }}>
+                            {(portfolioRisk.currentRiskScore*100).toFixed(0)}%
+                          </strong>
+                          {portfolioRisk.worstCombo.length > 0 && ` · ⚠ ${portfolioRisk.worstCombo.map(a=>a.replace("USD","")).join("+")} correlacionados`}
+                        </span>
+                      </div>
                     )}
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
                       {assets.slice(0,4).map(a => {
