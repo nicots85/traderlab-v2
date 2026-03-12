@@ -426,6 +426,74 @@ const volStep: Record<string, number> = {
 // XAUUSD ~3300 usd: ATR 1m mínimo = 1.5 usd
 // BTC ~95000 usd: ATR 1m mínimo = 50 usd
 
+
+// ─── Regime Filter ────────────────────────────────────────────────────────────
+type MarketRegime = "trending_up" | "trending_down" | "ranging" | "expanding" | "unknown";
+type RegimeAnalysis = {
+  regime:        MarketRegime;
+  atrRatio:      number;   // ATR_current / ATR_20period
+  adxProxy:      number;   // 0–1 proxy de tendencia
+  strategy:      "momentum" | "mean_reversion" | "both" | "none";
+  confAdjust:    number;   // ajuste al floor de confianza
+  sizeAdjust:    number;   // multiplicador de sizing 0.5–1.5
+  note:          string;
+};
+
+// ─── Walk-forward per-asset calibration ──────────────────────────────────────
+type AssetCalibration = {
+  symbol:         string;
+  n:              number;    // trades totales
+  wr:             number;    // win rate 0-1
+  avgRR:          number;    // RR promedio realizado
+  sharpe20:       number;    // Sharpe rolling 20 trades
+  floorAdj:       number;    // ajuste al floor: positivo = más estricto
+  kellyF:         number;    // Kelly fraccionario 0-1
+  lastUpdated:    number;    // timestamp
+};
+
+// ─── Z-score signal normalization ────────────────────────────────────────────
+type SignalHistory = {
+  asset: string;
+  scores: number[];          // últimos 100 confidence scores
+  mean:   number;
+  std:    number;
+};
+
+// ─── Correlación de trades (P&L, timing, régimen) ───────────────────────────
+type TradeCorrelation = {
+  pairKey:        string;          // "BTCUSD_ETHUSD"
+  pricePearson:   number;          // correlación de precio (series)
+  pnlPearson:     number;          // correlación de P&L entre trades simultáneos
+  avgSimultaneous: number;         // promedio de trades abiertos al mismo tiempo
+  bothWin:        number;          // % ambos ganan cuando simultáneos
+  bothLose:       number;          // % ambos pierden (riesgo sistémico)
+  diverge:        number;          // % uno gana otro pierde (descorrelación natural)
+  riskScore:      number;          // 0-1 riesgo de concentración
+  lastUpdated:    number;
+};
+
+type PortfolioRiskState = {
+  maxDrawdownSimul: number;        // max DD cuando múltiples posiciones abiertas
+  bestCombo:        string[];      // par de activos con mayor divergencia
+  worstCombo:       string[];      // par con mayor concentración de riesgo
+  currentRiskScore: number;        // 0-1 riesgo total del portfolio ahora
+  groqInsights:     string;        // último análisis de Groq sobre correlaciones
+  lastAnalysis:     number;        // timestamp último análisis
+};
+
+// ─── Groq Calibrator state (nuevo rol) ───────────────────────────────────────
+type GroqCalibration = {
+  timestamp:      number;
+  regime:         Record<string, string>;
+  floorOverrides: Record<string, number>;
+  sizeOverrides:  Record<string, number>;
+  corrBlacklist:  string[];        // pares bloqueados por alta correlación: ["BTCUSD_ETHUSD"]
+  corrSizeAdj:    Record<string, number>;  // asset → reducción de size por correlación
+  macroNote:      string;
+  corrNote:       string;          // análisis de correlación de Groq
+  nextRunAt:      number;
+};
+
 const initialLearning: LearningModel = {
   riskScale: 1, confidenceFloor: 52,
   scalpingTpAtr: 2.4,
@@ -471,6 +539,80 @@ function calcAtrFromSeries(arr: number[], lookback: number): number {
   if (data.length < 2) return 0;
   return avg(data.slice(1).map((v, i) => Math.abs(v - data[i])));
 }
+
+// ── Regime Filter: detecta si el mercado está en tendencia, rango o expansión ──
+function detectRegime(series: number[]): { regime: "trend"|"range"|"expansion"|"unknown"; atrRatio: number } {
+  if (series.length < 55) return { regime: "unknown", atrRatio: 1 };
+  const atrCurrent    = calcAtrFromSeries(series.slice(-14), 14);
+  const atrHistorical = calcAtrFromSeries(series.slice(-50), 50);
+  if (atrHistorical < 1e-10) return { regime: "unknown", atrRatio: 1 };
+  const atrRatio = atrCurrent / atrHistorical;
+  return {
+    atrRatio,
+    regime: atrRatio > 1.30 ? "expansion" : atrRatio < 0.70 ? "range" : "trend",
+  };
+}
+
+// ── Z-Score de la señal contra historial ─────────────────────────────────────
+function calcSignalZScore(score: number, history: number[]): number {
+  if (history.length < 8) return 0;
+  const mu  = history.reduce((a, b) => a + b, 0) / history.length;
+  const sig = Math.sqrt(history.reduce((a, b) => a + (b - mu) ** 2, 0) / history.length);
+  return sig < 1e-6 ? 0 : (score - mu) / sig;
+}
+
+// ── Multi-factor vote: 4 factores ortogonales ─────────────────────────────────
+function calcMultiFactorVote(
+  series: number[],
+  candles: { o:number; h:number; l:number; c:number; v?:number }[],
+  direction: "LONG"|"SHORT",
+  atr: number,
+): { votes: number; factors: Record<string,boolean>; score: number } {
+  const n  = series.length;
+  const cn = candles.length;
+  const factors: Record<string,boolean> = { ema: false, momentum: false, volatility: false, volume: false };
+  if (n >= 21) {
+    const e8  = ema(series.slice(-21), 8);
+    const e21 = ema(series.slice(-21), 21);
+    factors.ema = direction === "LONG" ? e8 > e21 : e8 < e21;
+  }
+  if (n >= 9) {
+    const roc3 = (series[n-1] - series[n-4]) / Math.max(series[n-4], 1e-9);
+    const roc8 = (series[n-1] - series[n-9]) / Math.max(series[n-9], 1e-9);
+    factors.momentum = direction === "LONG" ? (roc3 > 0 && roc8 > 0) : (roc3 < 0 && roc8 < 0);
+  }
+  if (n >= 50) {
+    const atrNow  = calcAtrFromSeries(series.slice(-14), 14);
+    const atrHist = calcAtrFromSeries(series.slice(-50), 50);
+    factors.volatility = atrNow > atrHist * 0.8;
+  } else { factors.volatility = atr > 0; }
+  if (cn >= 10) {
+    const slice = candles.slice(-10);
+    let obv = 0;
+    slice.forEach((c, i) => {
+      if (i === 0) return;
+      const vol = c.v ?? 1;
+      obv += c.c > slice[i-1].c ? vol : c.c < slice[i-1].c ? -vol : 0;
+    });
+    factors.volume = direction === "LONG" ? obv > 0 : obv < 0;
+  } else { factors.volume = true; }
+  const votes = Object.values(factors).filter(Boolean).length;
+  return { votes, factors, score: votes / 4 };
+}
+
+// ── Kelly fraccionario (Half-Kelly para producción) ───────────────────────────
+function calcKellyFraction(trades: { pnl: number; rr?: number }[]): number {
+  if (trades.length < 10) return 0.5;
+  const wins   = trades.filter(t => t.pnl > 0);
+  const losses = trades.filter(t => t.pnl <= 0);
+  if (!wins.length || !losses.length) return 0.5;
+  const p   = wins.length / trades.length;
+  const q   = 1 - p;
+  const b   = wins.reduce((a, t) => a + (t.rr ?? 1.5), 0) / wins.length;
+  const f   = (p * b - q) / Math.max(b, 0.1);
+  return Math.max(0.1, Math.min(0.25, f));
+}
+
 // ─── Modelo de spread CFD realista ───────────────────────────────────────────
 type SpreadSnapshot = {
   spread: number; spreadPct: number; bid: number; ask: number;
@@ -1460,9 +1602,9 @@ export function App() {
   const [showIndicators, setShowIndicators] = useState(true);
   const [maxDailyLoss, setMaxDailyLoss] = useLocalStorage("tl_maxDailyLoss", 3);   // % del balance
   const [maxDailyGain, setMaxDailyGain] = useLocalStorage("tl_maxDailyGain", 6);   // % del balance
-  // ── MT5 Bridge ────────────────────────────────────────────────────────────
-  const [mt5Enabled,  setMt5Enabled]  = useState(false);
-  const [mt5Url,      setMt5Url]      = useState("http://localhost:8000");
+  // ── MT5 Bridge — persistidos en localStorage ──────────────────────────────
+  const [mt5Enabled,  setMt5Enabled]  = useLocalStorage<boolean>("tl_mt5_enabled", false);
+  const [mt5Url,      setMt5Url]      = useLocalStorage<string>("tl_mt5_url", "http://localhost:8000");
   const [mt5Status,   setMt5Status]   = useState<"disconnected"|"connected"|"error"|"testing">("disconnected");
   const [mt5Account,  setMt5Account]  = useState<string|null>(null);
   const [mt5Balance,  setMt5Balance]  = useState<number|null>(null);
@@ -1472,6 +1614,19 @@ export function App() {
   const [mt5MarginLevel, setMt5MarginLevel] = useState<number|null>(null);
   const [mt5Positions,   setMt5Positions]   = useState<MT5Position[]>([]);
   const [mt5History,     setMt5History]     = useState<ClosedTrade[]>([]);
+
+  // ─── Motor cuant — nuevos estados ─────────────────────────────────────────
+  // ─── Correlación de trades ────────────────────────────────────────────────
+  const [tradeCorrelations, setTradeCorrelations] = useLocalStorage<Record<string, TradeCorrelation>>("tl_trade_corr", {});
+  const [portfolioRisk,     setPortfolioRisk]      = useLocalStorage<PortfolioRiskState | null>("tl_portfolio_risk", null);
+  const tradeCorrelationsRef = React.useRef<Record<string, TradeCorrelation>>({});
+
+  const [regimeMap,        setRegimeMap]        = useState<Record<string, RegimeAnalysis>>({});
+  const [assetCalib,       setAssetCalib]        = useLocalStorage<Record<string, AssetCalibration>>("tl_asset_calib", {});
+  const [signalHistMap,    setSignalHistMap]      = useLocalStorage<Record<string, SignalHistory>>("tl_sig_hist", {});
+  const [groqCalib,        setGroqCalib]          = useLocalStorage<GroqCalibration | null>("tl_groq_calib", null);
+  const [lastCalibRun,     setLastCalibRun]       = useState<number>(0);
+  const regimeRef          = React.useRef<Record<string, RegimeAnalysis>>({});
 
   // Indicadores, Wyckoff y control de mercado calculados por activo
   const [indicatorsMap, setIndicatorsMap] = useState<Partial<Record<Asset, Indicators>>>({});
@@ -1733,7 +1888,34 @@ export function App() {
     const hourEdge: Record<number, number> = {};
     Object.entries(hourMap).forEach(([h, vs]) => { hourEdge[Number(h)] = avg(vs); });
     const minTrades = real.length;
-    const floorAdjust = minTrades >= 10 ? clamp(52 + (0.5 - wr) * 16, 48, 62) : 52;
+    // ── Walk-forward validation: rolling 20 trades ────────────────────────────
+    // Usa solo los últimos 20 para no dejar que el pasado lejano domine
+    const rolling  = real.slice(-20);
+    const rollingWR = rolling.length >= 5
+      ? rolling.filter(t => t.pnl > 0).length / rolling.length
+      : wr;
+    const rollingRR  = rolling.length >= 5
+      ? rolling.reduce((a, t) => {
+          const rr = (t as ClosedTrade & { rr?: number }).rr ?? 1.5;
+          return a + rr;
+        }, 0) / rolling.length
+      : 1.5;
+    const rollingExp = rolling.length >= 5
+      ? rolling.reduce((a, t) => a + t.pnl, 0) / rolling.length
+      : 0;
+
+    // Floor adaptativo: alto WR → bajar piso (buscar más señales), bajo WR → subir piso
+    // Rango 46-60: nunca demasiado permisivo ni demasiado estricto
+    const floorFromWR = 52 + (0.5 - rollingWR) * 20;     // WR 60% → 46, WR 40% → 54
+    const floorFromRR = rollingRR < 1.3 ? 2 : -1;        // si RR bajo, más estricto
+    const floorAdjust = minTrades >= 5
+      ? clamp(floorFromWR + floorFromRR, 46, 60)
+      : 52;
+
+    // Kelly fraccionario calibrado con el historial real
+    const kellyFrac = calcKellyFraction(
+      rolling.map(t => ({ pnl: t.pnl, rr: (t as ClosedTrade & { rr?: number }).rr }))
+    );
     // ── AssetEdge legacy ──────────────────────────────────────────────────────
     const assetEdge: Partial<Record<string, AssetEdge>> = { ...learningRef.current.assetEdge };
     real.forEach(t => {
@@ -1745,11 +1927,14 @@ export function App() {
       ae.byHour[h] = (ae.byHour[h] ?? 0) + t.pnl;
     });
     setLearning({
-      riskScale: clamp(0.8 + wr * 0.6 + Math.max(exp, 0) * 0.03, 0.7, 1.5),
+      // Kelly calibra el riskScale: half-kelly para producción
+      riskScale: clamp(kellyFrac * 2, 0.7, 1.5),
       confidenceFloor: floorAdjust,
-      scalpingTpAtr: clamp(2.0 + wr * 0.8, 1.8, 3.2),
-      intradayTpAtr: clamp(4.5 + wr * 1.5, 4.0, 7.0),
-      atrTrailMult: clamp(0.25 + wr * 0.3, 0.2, 0.6),
+      // TP ATR basado en RR realizado: si el mercado da más, ampliar
+      scalpingTpAtr: clamp(1.8 + rollingRR * 0.3, 1.8, 3.5),
+      intradayTpAtr: clamp(3.5 + rollingRR * 0.8, 3.5, 8.0),
+      // Trail: más ajustado si WR alto (más trades ganan → proteger más)
+      atrTrailMult: clamp(0.2 + rollingWR * 0.4, 0.2, 0.6),
       hourEdge, assetEdge,
     });
     // ── AssetIntelligence: reconstruir desde cero con todos los trades reales ─
@@ -2472,6 +2657,481 @@ function calcScalpingRisk(
     return 1.0;
   }
 
+
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MOTOR DE CORRELACIÓN DE TRADES
+  // Analiza P&L, timing y descorrelación entre activos
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── calcTradeCorrelations: analiza trades históricos par a par ──────────────
+  function calcTradeCorrelations(trades: ClosedTrade[]): Record<string, TradeCorrelation> {
+    if (trades.length < 4) return tradeCorrelationsRef.current;
+
+    const result: Record<string, TradeCorrelation> = { ...tradeCorrelationsRef.current };
+    const assetList = [...new Set(trades.map(t => t.asset))];
+
+    for (let i = 0; i < assetList.length; i++) {
+      for (let j = i + 1; j < assetList.length; j++) {
+        const a = assetList[i];
+        const b = assetList[j];
+        const key = `${a}_${b}`;
+
+        const tradesA = trades.filter(t => t.asset === a);
+        const tradesB = trades.filter(t => t.asset === b);
+        if (tradesA.length < 2 || tradesB.length < 2) continue;
+
+        // Encontrar trades simultáneos (overlapping por openedAt/closedAt)
+        const simultaneous: Array<{ pnlA: number; pnlB: number }> = [];
+        for (const ta of tradesA) {
+          for (const tb of tradesB) {
+            const openA  = new Date(ta.openedAt).getTime();
+            const closeA = new Date(ta.closedAt).getTime();
+            const openB  = new Date(tb.openedAt).getTime();
+            const closeB = new Date(tb.closedAt).getTime();
+            // Overlap: uno empieza antes de que el otro termine
+            const overlaps = openA < closeB && openB < closeA;
+            if (overlaps) simultaneous.push({ pnlA: ta.pnl, pnlB: tb.pnl });
+          }
+        }
+
+        // P&L Pearson sobre todos los trades (alinear por fecha de cierre)
+        const pnlA = tradesA.map(t => t.pnl);
+        const pnlB = tradesB.map(t => t.pnl);
+        const pnlPearson = calcPearsonCorrelation(
+          pnlA.map((v, i) => v + i * 0),  // usar como series
+          pnlB.map((v, i) => v + i * 0)
+        );
+
+        // Precio Pearson (ya calculado en correlationRef)
+        const pricePearson = correlationRef.current[a]?.[b] ?? 0;
+
+        // Estadísticas de simultaneidad
+        const n = simultaneous.length;
+        const bothWin  = n > 0 ? simultaneous.filter(s => s.pnlA > 0 && s.pnlB > 0).length / n : 0;
+        const bothLose = n > 0 ? simultaneous.filter(s => s.pnlA < 0 && s.pnlB < 0).length / n : 0;
+        const diverge  = n > 0 ? simultaneous.filter(s => (s.pnlA > 0) !== (s.pnlB > 0)).length / n : 0;
+
+        // Risk score: alto si ambos pierden juntos frecuentemente
+        // Risk = 0 (perfecto) si divergen siempre, 1 (malo) si siempre pierden juntos
+        const riskScore = Math.max(0, Math.min(1,
+          bothLose * 0.7 +           // pesa más las pérdidas conjuntas
+          Math.abs(pricePearson) * 0.2 +  // correlación de precio suma algo de riesgo
+          (1 - diverge) * 0.1        // menos divergencia = más riesgo
+        ));
+
+        result[key] = {
+          pairKey: key,
+          pricePearson,
+          pnlPearson,
+          avgSimultaneous: n,
+          bothWin,  bothLose,  diverge,
+          riskScore,
+          lastUpdated: Date.now(),
+        };
+      }
+    }
+    tradeCorrelationsRef.current = result;
+    return result;
+  }
+
+  // ── calcPortfolioRisk: estado de riesgo total del portfolio ──────────────────
+  function calcPortfolioRisk(
+    corrs: Record<string, TradeCorrelation>,
+    openPos: Position[]
+  ): PortfolioRiskState {
+    const prev = portfolioRisk;
+    if (Object.keys(corrs).length === 0) {
+      return prev ?? {
+        maxDrawdownSimul: 0, bestCombo: [], worstCombo: [],
+        currentRiskScore: 0, groqInsights: "", lastAnalysis: 0
+      };
+    }
+
+    // Riesgo actual: pares de posiciones abiertas
+    let currentRisk = 0;
+    if (openPos.length >= 2) {
+      for (let i = 0; i < openPos.length; i++) {
+        for (let j = i + 1; j < openPos.length; j++) {
+          const a = openPos[i].signal.asset;
+          const b = openPos[j].signal.asset;
+          const key = `${a}_${b}`;
+          const keyRev = `${b}_${a}`;
+          const corr = corrs[key] ?? corrs[keyRev];
+          if (corr) currentRisk = Math.max(currentRisk, corr.riskScore);
+        }
+      }
+    }
+
+    const sorted = Object.values(corrs).sort((a, b) => a.riskScore - b.riskScore);
+    const best   = sorted[0];
+    const worst  = sorted[sorted.length - 1];
+
+    return {
+      maxDrawdownSimul: prev?.maxDrawdownSimul ?? 0,
+      bestCombo:  best  ? best.pairKey.split("_")  : [],
+      worstCombo: worst ? worst.pairKey.split("_") : [],
+      currentRiskScore: currentRisk,
+      groqInsights: prev?.groqInsights ?? "",
+      lastAnalysis: prev?.lastAnalysis ?? 0,
+    };
+  }
+
+  // ── corrSizeMultiplier: reduce size si hay concentración de riesgo ───────────
+  // Retorna 0.5-1.0: cuánto reducir el tamaño de una nueva posición
+  function getCorrSizeMultiplier(asset: string, openPos: Position[]): number {
+    if (openPos.length === 0) return 1.0;
+
+    // Groq override si existe y es reciente
+    const groqAdj = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)
+      ? (groqCalib.corrSizeAdj?.[asset] ?? null) : null;
+    if (groqAdj !== null) return Math.max(0.3, Math.min(1.0, groqAdj));
+
+    let maxRisk = 0;
+    for (const pos of openPos) {
+      if (pos.signal.asset === asset) continue;
+      const key    = `${asset}_${pos.signal.asset}`;
+      const keyRev = `${pos.signal.asset}_${asset}`;
+      const corr   = tradeCorrelationsRef.current[key] ?? tradeCorrelationsRef.current[keyRev];
+      if (corr) maxRisk = Math.max(maxRisk, corr.riskScore);
+
+      // También usar correlación de precio en tiempo real
+      const pxCorr = Math.abs(correlationRef.current[asset]?.[pos.signal.asset] ?? 0);
+      // Misma dirección + alta correlación precio = riesgo concentración
+      if (pos.signal.direction === "LONG" && pxCorr > 0.80) maxRisk = Math.max(maxRisk, 0.75);
+      if (pos.signal.direction === "SHORT" && pxCorr > 0.80) maxRisk = Math.max(maxRisk, 0.75);
+    }
+
+    // Mapear riskScore → size multiplier
+    if (maxRisk > 0.75) return 0.40;   // alto riesgo sistémico → 40% del size
+    if (maxRisk > 0.50) return 0.60;   // riesgo moderado → 60%
+    if (maxRisk > 0.30) return 0.80;   // riesgo bajo → 80%
+    return 1.0;                         // sin correlación → size completo
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MOTOR CUANTITATIVO — funciones core
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── 1. Regime Filter: detecta régimen de mercado por activo ─────────────────
+  function calcRegime(asset: string): RegimeAnalysis {
+    const candles = candlesRef.current[asset] ?? [];
+    const series  = seriesRef.current[asset]  ?? [];
+    if (candles.length < 21 || series.length < 21) {
+      return { regime: "unknown", atrRatio: 1, adxProxy: 0.5,
+               strategy: "both", confAdjust: 0, sizeAdjust: 0.8, note: "Sin datos suficientes" };
+    }
+
+    // ATR ratio: ATR actual vs ATR 20 períodos
+    const atr1  = calcAtr(candles.slice(-14), 14);
+    const atr20 = calcAtr(candles.slice(-34, -14), 14);
+    const atrRatio = atr20 > 0 ? atr1 / atr20 : 1;
+
+    // ADX proxy: usando varianza normalizada de los closes
+    const closes   = candles.map(c => c.c);
+    const closes20 = closes.slice(-20);
+    const mean20   = closes20.reduce((a,b) => a+b, 0) / 20;
+    const std20    = Math.sqrt(closes20.reduce((s,v) => s + (v-mean20)**2, 0) / 20);
+    const cv       = std20 / (mean20 || 1);   // coeficiente de variación
+
+    // Dirección del trend: EMA8 vs EMA21
+    const e8  = ema(closes.slice(-30), 8);
+    const e21 = ema(closes.slice(-30), 21);
+    const trendDir = e8 > e21 ? 1 : -1;
+
+    // Slope de EMA21 normalizado
+    const e21prev = ema(closes.slice(-31, -1), 21);
+    const slope   = (e21 - e21prev) / (atr1 || 1);
+    const adxProxy = Math.min(Math.abs(slope) * 3 + cv * 20, 1);
+
+    let regime: MarketRegime;
+    let strategy: RegimeAnalysis["strategy"];
+    let confAdjust: number;
+    let sizeAdjust: number;
+    let note: string;
+
+    if (atrRatio > 1.4 && adxProxy > 0.55) {
+      regime     = trendDir > 0 ? "trending_up" : "trending_down";
+      strategy   = "momentum";
+      confAdjust = -4;   // más permisivo en tendencia clara
+      sizeAdjust = 1.2;  // más size en tendencia
+      note = `Tendencia ${trendDir > 0 ? "alcista" : "bajista"} confirmada (ATR×${atrRatio.toFixed(2)})`;
+    } else if (atrRatio > 1.6) {
+      regime     = "expanding";
+      strategy   = "momentum";
+      confAdjust = -2;
+      sizeAdjust = 0.9;  // reducir size en expansión extrema
+      note = `Expansión de volatilidad (ATR×${atrRatio.toFixed(2)}) — momentum`;
+    } else if (atrRatio < 0.7 || adxProxy < 0.3) {
+      regime     = "ranging";
+      strategy   = "mean_reversion";
+      confAdjust = +3;   // más estricto en rango
+      sizeAdjust = 0.7;
+      note = `Mercado lateral (ATR×${atrRatio.toFixed(2)}) — mean reversion`;
+    } else {
+      regime     = "unknown";
+      strategy   = "both";
+      confAdjust = 0;
+      sizeAdjust = 1.0;
+      note = `Régimen mixto — estrategia normal`;
+    }
+
+    return { regime, atrRatio, adxProxy, strategy, confAdjust, sizeAdjust, note };
+  }
+
+  // ── 2. Multi-factor vote: 4 factores ortogonales ─────────────────────────────
+  // Retorna { votes: 0-4, direction, passed }
+  function multifactorVote(asset: string, mode: Mode): {
+    votes: number; direction: "LONG" | "SHORT"; passed: boolean; detail: string
+  } {
+    const candles = candlesRef.current[asset] ?? [];
+    const series  = seriesRef.current[asset]  ?? [];
+    const ind     = indicatorsMap[asset];
+    const mtf     = getMtfScore(asset, mode);
+
+    if (candles.length < 21) return { votes: 0, direction: "LONG", passed: false, detail: "Sin datos" };
+
+    const closes = candles.map(c => c.c);
+    const vols   = candles.map(c => c.v);
+    const price  = closes[closes.length - 1];
+    const atr    = mtf.atr || price * 0.001;
+
+    // Factor 1: Precio (EMA crossover MTF)
+    const mtfSum    = mtf.htf + mtf.ltf + mtf.exec;
+    const f1_long   = mtfSum > 0.15;
+    const f1_short  = mtfSum < -0.15;
+
+    // Factor 2: Volumen (OBV delta)
+    let obv = 0;
+    for (let i = 1; i < candles.length; i++) {
+      obv += candles[i].c > candles[i-1].c ? candles[i].v : candles[i].c < candles[i-1].c ? -candles[i].v : 0;
+    }
+    const obvMean   = vols.slice(-20).reduce((a,b) => a+b,0) / 20;
+    const f2_long   = obv > 0;
+    const f2_short  = obv < 0;
+
+    // Factor 3: Volatilidad relativa (ATR ratio > 0.8 = mercado activo)
+    const atr20 = calcAtr(candles.slice(-34, -14), 14);
+    const f3_ok = atr20 > 0 ? (atr / atr20) > 0.75 : true;
+
+    // Factor 4: ROC momentum puro (3, 8, 21 períodos)
+    const n = closes.length;
+    const roc3  = n > 3  ? (closes[n-1] - closes[n-4])  / closes[n-4]  : 0;
+    const roc8  = n > 8  ? (closes[n-1] - closes[n-9])  / closes[n-9]  : 0;
+    const roc21 = n > 21 ? (closes[n-1] - closes[n-22]) / closes[n-22] : 0;
+    const rocScore = Math.sign(roc3) + Math.sign(roc8) + Math.sign(roc21);
+    const f4_long  = rocScore >= 2;
+    const f4_short = rocScore <= -2;
+
+    // RSI extremo como factor extra (bonus, no obligatorio)
+    const f5_long  = ind ? ind.rsi < 38 : false;
+    const f5_short = ind ? ind.rsi > 62 : false;
+
+    const longVotes  = [f1_long, f2_long, f3_ok, f4_long].filter(Boolean).length + (f5_long ? 0.5 : 0);
+    const shortVotes = [f1_short, f2_short, f3_ok, f4_short].filter(Boolean).length + (f5_short ? 0.5 : 0);
+
+    const direction: "LONG" | "SHORT" = longVotes >= shortVotes ? "LONG" : "SHORT";
+    const votes = direction === "LONG" ? longVotes : shortVotes;
+    const passed = votes >= 2.5 && f3_ok;  // mínimo 3 factores + volatilidad activa
+
+    const detail = `F1:EMA=${f1_long||f1_short?1:0} F2:OBV=${f2_long||f2_short?1:0} F3:Vol=${f3_ok?1:0} F4:ROC=${f4_long||f4_short?1:0} RSI±=${f5_long||f5_short?0.5:0} → ${votes.toFixed(1)}/4`;
+    return { votes, direction, passed, detail };
+  }
+
+  // ── 3. Kelly fraccionario por activo ──────────────────────────────────────────
+  function calcKellySize(asset: string, rrRatio: number): number {
+    const calib = assetCalib[asset];
+    if (!calib || calib.n < 5) return 0.5;  // sin datos: Kelly neutral
+    const p = calib.wr;
+    const b = Math.max(rrRatio, 0.5);
+    const q = 1 - p;
+    const rawKelly = (p * b - q) / b;
+    // Fracción del Kelly (25%) para evitar over-sizing
+    const fracKelly = Math.max(0.1, Math.min(rawKelly * 0.25, 1.0));
+    return fracKelly;
+  }
+
+  // ── 4. Z-score: normalizar confidence contra historial del activo ─────────────
+  function normalizeConfidenceZScore(asset: string, rawScore: number): number {
+    const hist = signalHistMap[asset];
+    if (!hist || hist.scores.length < 10) return rawScore;  // sin historial: usar raw
+    const z = hist.std > 0 ? (rawScore - hist.mean) / hist.std : 0;
+    // Mapear z a rango de confianza: z=0 → 55, z=2 → 85, z=-2 → 35
+    return Math.max(35, Math.min(95, 55 + z * 15));
+  }
+
+  // ── 5. Walk-forward: actualizar calibración tras cada trade ───────────────────
+  function updateWalkForward(trade: ClosedTrade) {
+    setAssetCalib(prev => {
+      const existing = prev[trade.asset] ?? {
+        symbol: trade.asset, n: 0, wr: 0.5, avgRR: 1.5,
+        sharpe20: 0, floorAdj: 0, kellyF: 0.5, lastUpdated: 0
+      };
+      const n    = existing.n + 1;
+      const isWin = trade.pnl > 0;
+      const rr   = (trade as ClosedTrade & {rr?:number}).rr ?? 1.5;
+      const newWr  = (existing.wr * existing.n + (isWin ? 1 : 0)) / n;
+      const newRR  = (existing.avgRR * existing.n + rr) / n;
+      // Ajuste al floor: WR < 40% → subir floor +4, WR > 55% → bajar -3
+      const floorAdj = newWr < 0.40 ? Math.min(existing.floorAdj + 2, 12)
+                     : newWr > 0.55 ? Math.max(existing.floorAdj - 1, -8)
+                     : existing.floorAdj;
+      const b      = Math.max(newRR, 0.5);
+      const rawK   = (newWr * b - (1-newWr)) / b;
+      const kellyF = Math.max(0.1, Math.min(rawK * 0.25, 1.0));
+      const updated: AssetCalibration = {
+        symbol: trade.asset, n, wr: newWr, avgRR: newRR,
+        sharpe20: existing.sharpe20, floorAdj, kellyF, lastUpdated: Date.now()
+      };
+      return { ...prev, [trade.asset]: updated };
+    });
+
+    // Actualizar historial de z-score
+    setSignalHistMap(prev => {
+      const rawConf = (trade as ClosedTrade & {confidence?:number}).confidence ?? 60;
+      const hist    = prev[trade.asset] ?? { asset: trade.asset, scores: [], mean: 60, std: 10 };
+      const scores  = [...hist.scores, rawConf].slice(-100);
+      const mean    = scores.reduce((a,b) => a+b,0) / scores.length;
+      const std     = Math.sqrt(scores.reduce((s,v) => s+(v-mean)**2,0) / scores.length) || 10;
+      return { ...prev, [trade.asset]: { asset: trade.asset, scores, mean, std } };
+    });
+  }
+
+  // ── 6. Groq como Calibrador (nuevo rol) — corre cada 15 min ──────────────────
+  // NO decide operaciones. Solo ajusta parámetros del motor.
+  async function runGroqCalibrator() {
+    if (!usingGroq || !apiKey.trim()) return;
+    if (!canCallGroq()) return;
+    const now = Date.now();
+    if (now - lastCalibRun < 15 * 60 * 1000) return;  // cada 15 min máximo
+
+    setLastCalibRun(now);
+    try {
+      trackGroqCall();
+      const calibCtx = assets.map(a => {
+        const r   = regimeRef.current[a];
+        const c   = assetCalib[a];
+        const p   = pricesRef.current[a];
+        const ind = indicatorsMap[a];
+        return `${a}: precio=${p?.toFixed(2)??"-"} régimen=${r?.regime??"?"} ` +
+               `WR=${c ? (c.wr*100).toFixed(1)+"%" : "N/A"} ` +
+               `trades=${c?.n??0} RSI=${ind?.rsi?.toFixed(1)??"?"} ` +
+               `ATRratio=${r?.atrRatio?.toFixed(2)??"?"} strategy=${r?.strategy??"?"}`;
+      }).join("
+");
+
+      // ── Contexto de correlaciones para Groq ────────────────────────────────
+      const corrCtx = Object.values(tradeCorrelations).slice(0, 6).map(c => {
+        const [a, b] = c.pairKey.split("_");
+        return `${a}↔${b}: precioCorr=${c.pricePearson.toFixed(2)} ` +
+               `pnlCorr=${c.pnlPearson.toFixed(2)} ` +
+               `ambosGanan=${(c.bothWin*100).toFixed(0)}% ` +
+               `ambosPierden=${(c.bothLose*100).toFixed(0)}% ` +
+               `divergen=${(c.diverge*100).toFixed(0)}% ` +
+               `riskScore=${c.riskScore.toFixed(2)} ` +
+               `nSimult=${c.avgSimultaneous}`;
+      }).join("
+") || "Sin historial de trades suficiente aún.";
+
+      // ── Últimos 10 trades para contexto ──────────────────────────────────────
+      const recentTrades = realTrades.slice(0, 10).map(t =>
+        `${t.asset} ${t.direction} ${t.mode}: ${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(2)} | ${t.result}`
+      ).join("
+") || "Sin trades aún.";
+
+      // ── Portfolio risk actual ─────────────────────────────────────────────────
+      const portRisk = portfolioRisk
+        ? `riesgoActual=${portfolioRisk.currentRiskScore.toFixed(2)} ` +
+          `mejorPar=${portfolioRisk.bestCombo.join("+")} ` +
+          `peorPar=${portfolioRisk.worstCombo.join("+")}`
+        : "Sin datos de portfolio.";
+
+      const systemPrompt = `Eres un gestor de riesgo cuantitativo especializado en correlaciones de portfolio.
+Analizás el estado de un motor de trading algorítmico, sus correlaciones históricas entre activos, y ajustás parámetros para MINIMIZAR el riesgo sistémico y MAXIMIZAR la diversificación.
+NUNCA sugerís abrir o cerrar trades específicos.
+
+Ajustás:
+- confidenceFloor por activo (rango 44-72): más alto = más exigente
+- sizeMultiplier por activo (0.3-1.5): reducir en activos correlacionados positivamente
+- corrSizeAdj por activo (0.3-1.0): cuánto reducir size cuando ya hay una posición abierta en activo correlacionado
+- corrBlacklist: pares que NO deben operarse simultáneamente (array de strings "BTCUSD_ETHUSD")
+- macro: nota de mercado <70 chars
+- corrNote: insight sobre correlaciones detectadas <100 chars
+
+REGLA CLAVE: Si dos activos tienen bothLose > 30%, recomendar reducir size de ambos cuando estén simultáneos.
+Si divergen > 50%, son buenos para combinar (descorrelación natural = menor riesgo sistémico).
+
+Respondé SOLO con JSON válido, sin texto adicional ni markdown:
+{"floors":{"BTCUSD":52},"sizes":{"BTCUSD":1.0},"corrSizeAdj":{"BTCUSD":0.7},"corrBlacklist":[],"macro":"nota","corrNote":"insight correlaciones"}`;
+
+      const userPrompt = `Estado del motor (${new Date().toUTCString()}):
+
+ACTIVOS:
+${calibCtx}
+
+CORRELACIONES DE TRADES (basado en historial real):
+${corrCtx}
+
+ÚLTIMOS TRADES:
+${recentTrades}
+
+PORTFOLIO RISK: ${portRisk}
+
+Ajustá los parámetros priorizando la descorrelación del portfolio.`;
+
+      const r = await fetch("/api/groq", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
+        body: JSON.stringify({
+          model: groqModel || "llama-3.1-8b-instant",
+          temperature: 0.1,
+          max_tokens: 350,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user",   content: userPrompt }
+          ],
+        }),
+      });
+      if (!r.ok) return;
+      const data = await r.json() as { choices: Array<{ message: { content: string } }> };
+      const txt  = data?.choices?.[0]?.message?.content?.trim() ?? "";
+      // Parsear JSON — si falla, ignorar sin romper nada
+      const parsed = JSON.parse(txt.replace(/```json|```/g, "").trim()) as {
+        floors?:       Record<string, number>;
+        sizes?:        Record<string, number>;
+        corrSizeAdj?:  Record<string, number>;
+        corrBlacklist?: string[];
+        macro?:        string;
+        corrNote?:     string;
+      };
+      const calib: GroqCalibration = {
+        timestamp: now,
+        regime: Object.fromEntries(assets.map(a => [a, regimeRef.current[a]?.regime ?? "unknown"])),
+        floorOverrides:  parsed.floors       ?? {},
+        sizeOverrides:   parsed.sizes        ?? {},
+        corrSizeAdj:     parsed.corrSizeAdj  ?? {},
+        corrBlacklist:   parsed.corrBlacklist ?? [],
+        macroNote:  parsed.macro    ?? "",
+        corrNote:   parsed.corrNote ?? "",
+        nextRunAt:  now + 15 * 60 * 1000,
+      };
+      setGroqCalib(calib);
+      // Guardar insights de correlación en portfolioRisk
+      if (parsed.corrNote || parsed.macro) {
+        setPortfolioRisk(prev => prev
+          ? { ...prev, groqInsights: parsed.corrNote ?? prev.groqInsights, lastAnalysis: now }
+          : { maxDrawdownSimul: 0, bestCombo: [], worstCombo: [], currentRiskScore: 0,
+              groqInsights: parsed.corrNote ?? "", lastAnalysis: now }
+        );
+      }
+      const toastMsg = [parsed.macro, parsed.corrNote].filter(Boolean).join(" · ");
+      if (toastMsg) pushToast(`🤖 ${toastMsg.slice(0, 90)}`, "info");
+      console.log("[GROQ-CALIB]", calib);
+    } catch (e) {
+      console.warn("[GROQ-CALIB] falló (ignorado):", e);
+    }
+  }
+
   function generateSignal(currentMode: Mode, currentAsset: Asset, overrides?: { tp?: number; sl?: number }): Signal {
     // Leer SIEMPRE de refs (no del closure state) para evitar stale data
     // Los refs se actualizan sincrónicamente en cada render via useEffect
@@ -2645,6 +3305,32 @@ function calcScalpingRisk(
       ? reversalData.reversalDir
       : direction;
 
+    // ── Paso 4a: Regime filter ───────────────────────────────────────────────
+    // Detectar régimen de mercado para adaptar la lógica de entrada
+    const regime = detectRegime(seriesRef.current[currentAsset] ?? []);
+
+    // ── Paso 4b: Multi-factor vote ────────────────────────────────────────────
+    // 4 factores ortogonales: EMA, momentum ROC, volatilidad, OBV
+    const mfv = calcMultiFactorVote(
+      seriesRef.current[currentAsset] ?? [],
+      _candles[currentAsset] ?? [],
+      finalDirection,
+      mtf.atr,
+    );
+
+    // ── Paso 4c: Penalización por régimen incompatible ────────────────────────
+    // Range + momentum fuerte → penalizar. Expansion + sin votos → penalizar.
+    const regimePenalty = (() => {
+      if (regime.regime === "unknown") return 0;
+      if (regime.regime === "range" && currentMode === "intradia") return -8;
+      if (regime.regime === "expansion" && mfv.votes < 2) return -12;
+      if (regime.regime === "trend" && mfv.votes >= 3) return 5; // bonus: régimen claro + votos alineados
+      return 0;
+    })();
+
+    // ── Paso 4d: Bonus multi-factor (reemplaza parte del bonus confirmador) ───
+    const mfvBonus = mfv.votes >= 3 ? mfv.votes * 4 : mfv.votes >= 2 ? mfv.votes * 2 : -5;
+
     // ── Paso 4: Calcular confianza ────────────────────────────────────────────
     // Score de control de mercado para scalping (0-20 puntos adicionales)
     const mcScore    = (of && currentMode === "scalping")
@@ -2699,11 +3385,13 @@ function calcScalpingRisk(
       + wyckoffBonus                                             // Wyckoff alineado = +14
       + rsiBonus                                                 // RSI extremo = +8
       + vwapBonus                                               // VWAP posición = ±5
+      + mfvBonus                                                 // multi-factor vote ±20
+      + regimePenalty                                            // régimen incompatible = -8/-12
       - divergencePenalty
       - (mcConflict ? 8 : 0)
       - (currentMode === "scalping" ? spreadPct * 25 : spreadPct * 10)
       - (spreadCostRatio > 0.5 ? 5 : spreadCostRatio > 0.35 ? 2 : 0),
-      44, 96                                                     // piso 44 (permisivo)
+      40, 96                                                     // piso 40 — más tráfico
     );
 
     // ── Paso 5: Sizing — Wyckoff como multiplicador solo en intradía ──────────
@@ -2868,215 +3556,95 @@ function calcScalpingRisk(
 
   async function aiDecision(signal: Signal): Promise<"OPEN" | "SKIP" | "WAIT"> {
     const lrn = learningRef.current;
-    if (!usingGroq || !apiKey.trim()) {
+    // Fallback local puro si no hay Groq
+    const localDecide = () => {
       const floor = signal.mode === "scalping"
-        ? Math.max(46, lrn.confidenceFloor - 6)
-        : Math.max(50, lrn.confidenceFloor - 2);
+        ? Math.max(44, lrn.confidenceFloor - 6)
+        : Math.max(48, lrn.confidenceFloor - 2);
       return signal.confidence >= floor ? "OPEN" : "SKIP";
-    }
-    // Rate limit check — si está pausado, usar decisión local
-    if (!canCallGroq()) {
-      const floor = signal.mode === "scalping"
-        ? Math.max(46, lrn.confidenceFloor - 6)
-        : Math.max(50, lrn.confidenceFloor - 2);
-      return signal.confidence >= floor ? "OPEN" : "SKIP";
-    }
+    };
+    if (!usingGroq || !apiKey.trim() || !canCallGroq()) return localDecide();
+
+    // Scalping: Groq NO veta nunca — la latencia supera el horizonte temporal
+    // Solo enriquece el rationale asincrónicamente
+    if (signal.mode === "scalping") return localDecide();
+
     try {
-      // ── Métricas de gestión de riesgo para el prompt ────────────────────────
-      const lrnSnap     = learningRef.current;
-      const equitySnap  = (mt5Enabled && mt5Equity !== null && mt5Equity > 0) ? mt5Equity : balance + unrealized;
-      const initialCap  = 100; // capital inicial fijo
-      const riskPerTrade = riskPct / 100;
-      const openCount   = openPositionsRef.current.length;
-      const rrRatio     = Math.abs(signal.takeProfit - signal.entry) /
-                          Math.max(Math.abs(signal.stopLoss - signal.entry), 1e-9);
-      // Riesgo de ruina simplificado (fórmula de Ralph Vince): R = ((1-edge)/(1+edge))^n
-      // donde edge = (wr/100 - (1-wr/100)/rrRatio) y n = trades restantes estimados
-      const wr01   = Math.max(stats.winRate / 100, 0.01);
-      const edge   = wr01 - (1 - wr01) / Math.max(rrRatio, 0.5);
-      const ruinRisk = stats.total >= 10
-        ? (edge > 0 ? Math.pow(Math.max((1 - edge) / (1 + edge), 0), 20) * 100 : 99).toFixed(1)
-        : "N/A (<10 trades)";
-      // Esperanza matemática por trade
-      const avgWin  = stats.total > 0 ? realTrades.filter(t=>t.pnl>0).reduce((a,t)=>a+t.pnl,0) / Math.max(realTrades.filter(t=>t.pnl>0).length,1) : 0;
-      const avgLoss = stats.total > 0 ? Math.abs(realTrades.filter(t=>t.pnl<=0).reduce((a,t)=>a+t.pnl,0) / Math.max(realTrades.filter(t=>t.pnl<=0).length,1)) : 0;
-      const expectedValue = (wr01 * avgWin - (1-wr01) * avgLoss).toFixed(3);
-      // Drawdown actual desde pico de equity
-      const peakEquity = Math.max(initialCap, equitySnap, ...realTrades.map((_,i) =>
-        initialCap + realTrades.slice(0,i+1).reduce((a,t)=>a+t.pnl,0)));
-      const currentDD  = ((peakEquity - equitySnap) / peakEquity * 100).toFixed(1);
-      // Exposición actual
-      const totalMargin = openPositionsRef.current.reduce((a,p)=>a+p.marginUsed,0);
-      const exposurePct = (totalMargin / equitySnap * 100).toFixed(1);
+      trackGroqCall();
+      const lrnSnap      = learningRef.current;
+      const equitySnap   = (mt5Enabled && mt5Equity !== null && mt5Equity > 0) ? mt5Equity : balance + unrealized;
+      const openCount    = openPositionsRef.current.length;
+      const rrRatio      = Math.abs(signal.takeProfit - signal.entry) /
+                           Math.max(Math.abs(signal.stopLoss - signal.entry), 1e-9);
+      const wr01         = Math.max(stats.winRate / 100, 0.01);
+      const edge         = wr01 - (1 - wr01) / Math.max(rrRatio, 0.5);
+      const fewTrades    = stats.total < 15;
+      const expectedValue = (wr01 * (stats.pnl / Math.max(stats.total, 1)) -
+                            (1 - wr01) * Math.abs(stats.pnl / Math.max(stats.total, 1))).toFixed(3);
+      const evSign       = fewTrades ? "N/A" : parseFloat(expectedValue) >= 0 ? "POSITIVE ✓" : "NEGATIVE ✗";
+      const peakEquity   = Math.max(100, equitySnap, ...realTrades.map((_,i2) =>
+        100 + realTrades.slice(0,i2+1).reduce((a,t)=>a+t.pnl,0)));
+      const currentDD    = ((peakEquity - equitySnap) / peakEquity * 100).toFixed(1);
+      const consecLoss   = calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain).streak;
 
-      // ── Métricas adicionales para el prompt ──────────────────────────────────
-      const riskSnap   = calcRiskMetrics(realTrades, balance, maxDailyLoss);
-      const kellyStr   = riskSnap.kellyFraction > 0
-        ? `${(riskSnap.kellyFraction * 100).toFixed(1)}% (WR ${(riskSnap.kellyWR*100).toFixed(0)}% / RR ${(riskSnap.kellyRR ?? 0).toFixed(2)})`
-        : "insuficiente data";
-      const consecLoss = calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain).streak;
-      const ruinPct    = (riskSnap.ruinProb ?? 0).toFixed(1);
-      // Con pocos trades, el EV histórico no es representativo — usar RR del motor
-      const fewTrades  = stats.total < 15;
-      const evSign     = fewTrades
-        ? "N/A (insufficient history — use RR and confidence)"
-        : parseFloat(expectedValue) >= 0 ? "POSITIVE ✓" : "NEGATIVE ✗";
+      const systemPrompt = `You are an algorithmic trading validator for a quant fund. You are a SECONDARY validator — the quant engine already approved this trade.
 
-      const systemPrompt = `You are an algorithmic trading system managing a REAL funded account.
+MANDATE:
+- DEFAULT TO OPEN. Only veto with a SPECIFIC documented reason.
+- A veto (SKIP) requires: (1) equity drawdown > 4% today, OR (2) more than 5 consecutive losses, OR (3) a clear macro event that directly contradicts the trade direction.
+- DO NOT veto due to: general uncertainty, low confidence scores, missing data, or "caution."
+- In COLD START (< 15 trades), always OPEN unless a hard risk rule is broken.
+${fewTrades ? "⚠ COLD START: < 15 trades. DO NOT apply statistical filters. Trust RR ratio." : ""}
 
-IDENTITY AND MANDATE:
-- You are a SECONDARY VALIDATOR, not the primary decision engine. The quantitative system already decided to open.
-- Your ONLY job: confirm the trade is safe (risk rules OK) OR identify a specific structural contradiction.
-- You manage $${initialCap} USDT of real capital. Every dollar lost is permanent until earned back.
-- The initial capital ($${initialCap}) is the absolute floor — if equity approaches it, you stop trading.
-- Your mandate: GROW capital with controlled risk. Not preserve it at all costs, not gamble it.
-- You are NOT risk-averse — you are RISK-CALIBRATED. Edge × frequency = profit.
-- DEFAULT TO OPEN: if no hard rule is broken and no structural contradiction exists → answer OPEN.
-- A veto (SKIP) must be justified by a SPECIFIC rule violation, not by general uncertainty or missing data.
+ACCOUNT:
+- Equity: $${equitySnap.toFixed(2)} | Drawdown from peak: ${currentDD}%
+- Consecutive losses: ${consecLoss} | Open positions: ${openCount}
+- EV per trade: $${expectedValue} [${evSign}]
 
-${fewTrades ? "⚠ COLD START MODE (< 15 real trades): Statistical metrics (EV, Kelly) are NOT reliable yet. Base decision primarily on RR ratio and signal confidence score. DO NOT skip valid setups due to negative EV when sample is too small." : ""}
+SIGNAL (intradía only):
+- Asset: ${signal.asset} | Direction: ${signal.direction}
+- Confidence: ${signal.confidence.toFixed(1)}% | RR: ${rrRatio.toFixed(2)}×
+- Entry: ${signal.entry.toFixed(5)} | SL: ${signal.stopLoss.toFixed(5)} | TP: ${signal.takeProfit.toFixed(5)}
+- Rationale: ${signal.rationale?.slice(0,120)}
+- Wyckoff: ${signal.rationale?.includes("Wyckoff") ? "aligned" : "neutral"}
 
-ACCOUNT STATE RIGHT NOW:
-- Equity: $${equitySnap.toFixed(2)} USDT | Initial capital: $${initialCap} USDT
-- Drawdown from peak: ${currentDD}% (hard limit: 5% daily, 15% overall)
-- Ruin probability next 30 trades: ${ruinPct}% (below 20% = healthy, above 50% = reduce size)
-- Consecutive losses: ${consecLoss} (above 5 = mandatory pause)
-- Expected value per trade: $${expectedValue} [${evSign}]
-- Kelly optimal fraction: ${kellyStr}
-- Win rate: ${(stats.winRate ?? 0).toFixed(1)}% | Profit factor: ${(stats.profitFactor ?? 0).toFixed(2)} | Sharpe: ${(stats.sharpe ?? 0).toFixed(2)}
-- Open positions: ${openCount} | Margin deployed: ${exposurePct}% of equity
+HARD STOP RULES (only these justify SKIP):
+1. Daily drawdown > 4%
+2. Consecutive losses > 5
+3. Open positions > 4
+4. RR < 1.0 (the quant engine already blocks < 1.3, so this shouldn't fire)
 
-RISK RULES (non-negotiable):
-1. Max risk per trade: ${(riskPerTrade * 100).toFixed(1)}% equity = $${(equitySnap * riskPerTrade).toFixed(3)} USDT
-2. Max simultaneous positions: 3 (currently ${openCount})
-3. Daily DD limit: 5% — current: ${currentDD}%
-4. Ruin floor: $${(initialCap * 0.70).toFixed(2)} (−30% from initial) → full stop
-5. If ${consecLoss} consecutive losses → WAIT on next signal regardless of quality
+Reply with EXACTLY one word: OPEN, SKIP, or WAIT`;
 
-CALIBRATED DECISION FRAMEWORK:
-You must avoid TWO opposite mistakes with equal discipline:
-
-MISTAKE A — OVER-TRADING (reckless):
-Opening when: RR < 1.5 | DD > 4% | EV negative | structure against direction | 5+ consecutive losses
-Consequence: destroys capital, hits ruin threshold, loses the funded account.
-
-MISTAKE B — UNDER-TRADING (fearful):
-Skipping when: signal has positive EV | RR ≥ 1.5 | DD within limits | momentum confirmed
-Consequence: starves the system of data, Kelly fraction never compounds, account stagnates.
-
-CORRECT DECISION LOGIC:
-OPEN  → EV positive + RR ≥ 1.5 + DD within limits + mode-specific confirmation + fewer than 3 positions
-WAIT  → DD > 4% OR consecutive losses = 5 OR EV marginally positive but structure unclear
-SKIP  → EV negative OR RR < 1.2 OR specific structural contradiction (e.g. Phase D distribution LONG)
-
-MODE RULES:
-- SCALPING: MTF momentum + Stoch aligned = OPEN if DD < 3%, EV positive, AND spread < 35% of TP. Frequency is the edge.
-- INTRADAY SHORT: Wyckoff distribution (Phase C/D/E) = STRONG CONFIRMATION for SHORT. Distribution after UTAD = highest quality short setup. DO NOT skip shorts with Wyckoff distribution context.
-- INTRADAY LONG: Wyckoff accumulation (Phase A/B/C) = STRONG CONFIRMATION for LONG.
-- Wyckoff ONLY vetoes when direction CONTRADICTS the phase. Never vetoes aligned trades.
-- NEVER skip a setup purely due to: low Kelly (no history), high correlation, or missing optional data.
-- Cold start (<15 trades): Kelly and EV are statistically meaningless. Ignore them. Judge by RR and confidence only.
-
-CFD SPREAD RULES (broker cobra spread bid-ask en cada operación, sin comisión separada):
-- El spread es una pérdida GARANTIZADA al entrar. El precio debe recuperarlo antes de generar ganancia.
-- En términos reales: TP neto = TP - spread; SL neto = SL + spread.
-- SCALPING: si spread > 35% del TP → requiere confianza ≥ 65% para abrir.
-- SCALPING: si spread > 50% del TP → SKIP, setup matemáticamente inviable.
-- Alta volatilidad/shock: spread se amplía 2-3×. Reducir frecuencia de scalp automáticamente.
-- Sesión ASIA/OFF/WEEKEND: spread +35-60%. Solo intradía con TP amplio es viable.
-- INTRADAY: spread típicamente <10% del TP — menos crítico pero sí afecta el EV.
-- EV neto = (WR × TP_neto) - (1-WR × SL_neto) — siempre calcular con spread incluido.
-
-Respond ONLY with valid JSON:
-{"decision":"OPEN"|"SKIP"|"WAIT","confidence_adjustment":number,"rationale":"string","risk_notes":"string"}
-- confidence_adjustment: integer −20 to +20. Use +10 to +20 only when multiple factors strongly confirm. Use −10 to −20 only when risk rules are near breach.
-- rationale: ≤ 130 chars Spanish — name the key edge or the specific reason to skip
-- risk_notes: ≤ 90 chars Spanish — EV, Kelly, RR, or DD status`;
-
-      const rrQuality = rrRatio >= 2.5 ? "EXCELLENT" : rrRatio >= 1.8 ? "GOOD" : rrRatio >= 1.3 ? "ACCEPTABLE" : "POOR";
-      const sigSpread   = calcCFDSpread(signal.asset, signal.entry, volumeShockRef.current);
-      const spreadCostA = sigSpread.spread;
-      const tpDist      = Math.abs(signal.takeProfit - signal.entry);
-      const slDistA     = Math.abs(signal.stopLoss - signal.entry);
-      const spreadRatioTP  = (spreadCostA / Math.max(tpDist,  1e-9) * 100).toFixed(1);
-      const spreadRatioSL  = (spreadCostA / Math.max(slDistA, 1e-9) * 100).toFixed(1);
-
-      const userMsg = `SIGNAL TO EVALUATE:
-Asset: ${signal.asset} | Mode: ${signal.mode.toUpperCase()} | Direction: ${signal.direction}
-Entry: ${(signal.entry ?? 0).toFixed(4)} | SL: ${(signal.stopLoss ?? 0).toFixed(4)} | TP: ${(signal.takeProfit ?? 0).toFixed(4)}
-RR: ${rrRatio.toFixed(2)}:1 [${rrQuality}] | Risk USDT: $${(equitySnap * riskPerTrade).toFixed(3)}
-Expected value if opened: $${expectedValue} [${evSign}]
-Confidence: ${(signal.confidence ?? 0).toFixed(1)}% | Kelly suggests: ${riskSnap.kellyFraction > 0.01 ? "OPEN" : fewTrades ? "OPEN (cold start — ignore Kelly)" : "SKIP (no edge)"}
-
-CFD SPREAD (broker cobra spread, no comisión):
-- Spread: $${spreadCostA.toFixed(4)} (${(sigSpread.spreadPct ?? 0).toFixed(3)}%) | Sesión: ${sigSpread.sessionLabel} | Vol alta: ${sigSpread.isHighVolume ? "SÍ ⚠" : "no"}
-- Spread vs TP: ${spreadRatioTP}% del objetivo (>35% = setup degradado, >50% = SKIP)
-- Spread vs SL: ${spreadRatioSL}% del stop (clave en scalping)
-- Desglose: base=$${(sigSpread.component.base ?? 0).toFixed(4)} + volumen=$${(sigSpread.component.volume ?? 0).toFixed(4)} + sesión=$${(sigSpread.component.session ?? 0).toFixed(4)}
-
-TECHNICAL CONTEXT:
-MTF → HTF: ${(signal.mtf.htf ?? 0).toFixed(2)} | LTF: ${(signal.mtf.ltf ?? 0).toFixed(2)} | Exec: ${(signal.mtf.exec ?? 0).toFixed(2)}
-${signal.mode === "scalping"
-  ? `Stoch %K: ${(signal.indicators.stochK ?? 0).toFixed(1)} / %D: ${(signal.indicators.stochD ?? 0).toFixed(1)} | ${signal.indicators.stochK > signal.indicators.stochD ? "K>D alcista" : "K<D bajista"}`
-  : `RSI: ${(signal.indicators.rsi ?? 0).toFixed(1)} | Divergencia: ${signal.indicators.rsiDivergence}`}
-VWAP: ${signal.entry > signal.indicators.vwap ? "SOBRE" : "BAJO"} (${((signal.entry - signal.indicators.vwap) / signal.indicators.vwap * 100).toFixed(2)}%)
-BB Squeeze: ${signal.indicators.bbSqueeze ? "SÍ — expansión de volatilidad inminente" : "NO"}
-Vol Delta: ${(signal.indicators.volumeDeltaPct ?? 0).toFixed(1)}% (${signal.indicators.volumeDeltaPct > 0 ? "presión compradora" : "presión vendedora"})
-${signal.mode === "intradia"
-  ? `Wyckoff: ${signal.wyckoff.bias} | Fase: ${signal.wyckoff.phase} | ${signal.wyckoff.narrative}${signal.wyckoff.bias === "distribution" && signal.direction === "SHORT" ? " ← DISTRIBUTION+SHORT = ALIGNED, strong setup" : signal.wyckoff.bias === "accumulation" && signal.direction === "LONG" ? " ← ACCUMULATION+LONG = ALIGNED, strong setup" : signal.wyckoff.bias !== "neutral" && ((signal.wyckoff.bias === "distribution" && signal.direction === "LONG") || (signal.wyckoff.bias === "accumulation" && signal.direction === "SHORT")) ? " ← WARNING: direction contradicts Wyckoff" : ""}`
-  : "Wyckoff: N/A (scalping)"}
-${signal.mode === "scalping" ? `
-ORDER FLOW (scalping — señal más importante):
-${signal.rationale.includes("Control:") || signal.rationale.includes("TOROS") || signal.rationale.includes("OSOS") ? signal.rationale : "Ver rationale"}` : ""}
-
-${signal.wyckoff?.bias === "distribution" && signal.direction === "SHORT"
-  ? "⚡ SETUP CONFIRMATION: Distribution Wyckoff + SHORT = structurally aligned. This is a PRIMARY short setup, not a contrarian trade."
-  : signal.wyckoff?.bias === "accumulation" && signal.direction === "LONG"
-  ? "⚡ SETUP CONFIRMATION: Accumulation Wyckoff + LONG = structurally aligned. Primary long setup."
-  : ""}
-
-RISK CHECK FOR THIS TRADE:
-- Drawdown now: ${currentDD}% (limit 5%) → ${parseFloat(currentDD) > 4 ? "⚠ NEAR LIMIT" : "✓ OK"}
-- Consecutive losses: ${consecLoss} (limit 5) → ${consecLoss >= 4 ? "⚠ CAUTION" : "✓ OK"}
-- Open positions: ${openCount}/3 → ${openCount >= 3 ? "⚠ AT LIMIT — must SKIP" : "✓ OK"}
-- EV signal: ${evSign}
-Rationale from system: ${signal.rationale}`;
-
-      if (!canGroqCall()) {
-        setMessages(prev => [...prev, { role: "ai", text: "⏸ Groq pausado por rate limit — esperá unos segundos.", ts: "" }]);
-        setLoading(false); return;
-      }
-      onGroqCall();
       const r = await fetch("/api/groq", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
         body: JSON.stringify({
-          model: groqModel, temperature: 0.15, max_tokens: 220,
-          messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMsg }],
+          model: groqModel || "llama-3.1-8b-instant",
+          temperature: 0.05, // casi determinista — no queremos creatividad aquí
+          max_tokens: 8,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: "Decision?" }
+          ],
         }),
       });
-      const data = await r.json() as { choices: Array<{ message: { content: string } }> };
-      const raw = data?.choices?.[0]?.message?.content ?? "{}";
-      const clean = raw.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(clean) as { decision: string; confidence_adjustment?: number; rationale?: string; risk_notes?: string };
-
-      // Guardar razonamiento de la IA en el signal (mutamos para pasarlo luego)
-      signal.aiRationale = parsed.rationale ?? "";
-      signal.aiRiskNotes = parsed.risk_notes ?? "";
-
-      const dec = String(parsed.decision ?? "").toUpperCase();
-      return dec === "OPEN" ? "OPEN" : dec === "WAIT" ? "WAIT" : "SKIP";
-    } catch (e) {
-      // Si es 429, activar pausa
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("429")) {
-        groqPausedRef.current = true;
-        setTimeout(() => { groqPausedRef.current = false; }, 60000);
+      if (!r.ok) {
+        if (r.status === 429) {
+          groqPausedRef.current = true;
+          const pauseUntil = Date.now() + 60000;
+          setGroqRateInfo(p => ({ ...p, paused: true, pauseUntil }));
+          setTimeout(() => { groqPausedRef.current = false; setGroqRateInfo(p => ({ ...p, paused: false, pauseUntil: 0 })); }, 60000);
+        }
+        return localDecide();
       }
-      const floorCatch = signal.mode === "scalping"
-        ? Math.max(48, learningRef.current.confidenceFloor - 4)
-        : learningRef.current.confidenceFloor;
-      return signal.confidence >= floorCatch ? "OPEN" : "SKIP";
+      const data = await r.json() as { choices: Array<{ message: { content: string } }> };
+      const reply = data?.choices?.[0]?.message?.content?.trim().toUpperCase() ?? "";
+      if (reply.includes("SKIP")) return "SKIP";
+      if (reply.includes("WAIT")) return "WAIT";
+      return "OPEN";
+    } catch {
+      return localDecide();
     }
   }
 
@@ -3110,16 +3678,119 @@ Rationale from system: ${signal.rationale}`;
     pushToast(`${icon} ${position.signal.asset} ${position.signal.direction} → ${exitLabel[result]}  ${pnl >= 0 ? "+" : ""}${money(pnl)}`, pnl >= 0 ? "success" : "error");
     setBalance(prev => prev + pnl);
     setOpenPositions(prev => prev.filter(p => p.id !== position.id));
+    const rrRealized = Math.abs(exit - position.signal.entry) /
+      Math.max(Math.abs(position.signal.stopLoss - position.signal.entry), 1e-9);
+    const closedTrade: ClosedTrade = {
+      id: position.id, asset: position.signal.asset, mode: position.signal.mode,
+      direction: position.signal.direction, entry: position.signal.entry, exit, pnl,
+      pnlPct: (pnl / Math.max(position.marginUsed, 0.01)) * 100,
+      result, openedAt: position.openedAt, closedAt: new Date().toISOString(), source: "real",
+    };
+    // ── Walk-forward + correlación: actualizar al cerrar ───────────────────
+    updateWalkForward({ ...closedTrade, rr: rrRealized, confidence: position.signal.confidence } as ClosedTrade & { rr: number; confidence: number });
     setRealTrades(prev => {
-      const next: ClosedTrade[] = [{
-        id: position.id, asset: position.signal.asset, mode: position.signal.mode,
-        direction: position.signal.direction, entry: position.signal.entry, exit, pnl,
-        pnlPct: (pnl / Math.max(position.marginUsed, 0.01)) * 100,
-        result, openedAt: position.openedAt, closedAt: new Date().toISOString(), source: "real",
-      }, ...prev].slice(0, 400);
+      const next: ClosedTrade[] = [closedTrade, ...prev].slice(0, 400);
       refreshLearning(next);
+      // Recalcular correlaciones de trades con el historial actualizado
+      try {
+        const newCorrs = calcTradeCorrelations(next);
+        setTradeCorrelations(newCorrs);
+        const newRisk = calcPortfolioRisk(newCorrs, openPositionsRef.current);
+        setPortfolioRisk(newRisk);
+      } catch (e) { console.warn("[TraderLab] corrCalc error:", e); }
       return next;
     });
+    // ── Groq Coach post-trade (asíncrono, no bloquea) ─────────────────────────
+    // Rol: analizar el trade cerrado y sugerir ajustes al learning model
+    // Se ejecuta en background — el resultado actualiza learningRef
+    if (usingGroq && apiKey.trim() && canCallGroq()) {
+      void (async () => {
+        try {
+          trackGroqCall();
+          const tradeResult = result === "TP" ? "WIN" : result === "SL" ? "LOSS" : "PARTIAL";
+          const rrActual    = Math.abs(exit - position.signal.entry) /
+                              Math.max(Math.abs(position.signal.stopLoss - position.signal.entry), 1e-9);
+          const allTrades   = [{ pnl, result, rr: rrActual }, ...realTrades.slice(0, 19)];
+          const recentWR    = allTrades.filter(t => t.pnl > 0).length / Math.max(allTrades.length, 1);
+          const recentRR    = allTrades.reduce((a, t) => a + ((t as { rr?: number }).rr ?? 0), 0) / Math.max(allTrades.length, 1);
+          const lrn         = learningRef.current;
+
+          const coachPrompt = `You are a quantitative trading model calibrator. A trade just closed. Analyze and suggest parameter adjustments.
+
+TRADE CLOSED:
+- Asset: ${position.signal.asset} | Mode: ${position.signal.mode} | Direction: ${position.signal.direction}
+- Result: ${tradeResult} | P&L: $${pnl.toFixed(2)} | RR achieved: ${rrActual.toFixed(2)}×
+- Confidence score was: ${position.signal.confidence.toFixed(1)}%
+- Rationale: ${position.signal.rationale?.slice(0, 120)}
+
+CURRENT MODEL PARAMS:
+- confidenceFloor: ${lrn.confidenceFloor.toFixed(1)}
+- riskScale: ${lrn.riskScale.toFixed(2)}
+- scalpingTpAtr: ${lrn.scalpingTpAtr.toFixed(2)}
+- intradayTpAtr: ${lrn.intradayTpAtr.toFixed(2)}
+- atrTrailMult: ${lrn.atrTrailMult.toFixed(2)}
+
+RECENT PERFORMANCE (last 20 trades):
+- Win rate: ${(recentWR * 100).toFixed(1)}% | Avg RR: ${recentRR.toFixed(2)}×
+
+TASK: Reply ONLY with a JSON object (no explanation, no markdown) adjusting 1-2 params based on this trade result.
+Rules:
+- If LOSS with high confidence (>65%): raise confidenceFloor by +0.5 to +1.5
+- If WIN with low confidence (<55%): lower confidenceFloor by -0.3 to -0.8
+- If RR achieved < 50% of target: lower scalpingTpAtr by -0.1 or intradayTpAtr by -0.2
+- If 3+ consecutive losses: raise confidenceFloor by +1, lower riskScale by -0.05
+- If WR > 60% last 20: lower confidenceFloor by -0.5
+- Keep all values in reasonable ranges: confidenceFloor 44-60, riskScale 0.5-1.5, scalpingTpAtr 1.5-4.0, intradayTpAtr 3.0-8.0, atrTrailMult 0.2-0.6
+- If no adjustment needed, return {}
+
+Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
+
+          const r2 = await fetch("/api/groq", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
+            body: JSON.stringify({
+              model: groqModel || "llama-3.1-8b-instant",
+              temperature: 0.1, max_tokens: 60,
+              messages: [
+                { role: "system", content: coachPrompt },
+                { role: "user", content: "Provide parameter adjustment JSON." }
+              ],
+            }),
+          });
+          if (r2.ok) {
+            const d2 = await r2.json() as { choices: Array<{ message: { content: string } }> };
+            const raw = d2?.choices?.[0]?.message?.content?.trim() ?? "{}";
+            const jsonStr = raw.replace(/```json|```/g, "").trim();
+            try {
+              const adj = JSON.parse(jsonStr) as Partial<typeof lrn>;
+              if (Object.keys(adj).length > 0) {
+                const clamped: typeof lrn = {
+                  ...lrn,
+                  confidenceFloor: adj.confidenceFloor !== undefined
+                    ? Math.max(44, Math.min(60, adj.confidenceFloor)) : lrn.confidenceFloor,
+                  riskScale: adj.riskScale !== undefined
+                    ? Math.max(0.5, Math.min(1.5, adj.riskScale)) : lrn.riskScale,
+                  scalpingTpAtr: adj.scalpingTpAtr !== undefined
+                    ? Math.max(1.5, Math.min(4.0, adj.scalpingTpAtr)) : lrn.scalpingTpAtr,
+                  intradayTpAtr: adj.intradayTpAtr !== undefined
+                    ? Math.max(3.0, Math.min(8.0, adj.intradayTpAtr)) : lrn.intradayTpAtr,
+                  atrTrailMult: adj.atrTrailMult !== undefined
+                    ? Math.max(0.2, Math.min(0.6, adj.atrTrailMult)) : lrn.atrTrailMult,
+                };
+                learningRef.current = clamped;
+                setLearning(clamped);
+                const changed = Object.entries(adj)
+                  .filter(([k]) => k in lrn)
+                  .map(([k, v]) => `${k}: ${(v as number).toFixed(2)}`)
+                  .join(", ");
+                if (changed) pushToast(`🧠 Groq Coach ajustó modelo: ${changed}`, "info");
+              }
+            } catch { /* JSON inválido — ignorar */ }
+          }
+        } catch { /* Coach falló — sin impacto en el trade */ }
+      })();
+    }
+
     // ── Circuit breaker: acumula P&L del día ────────────────────────────────
     {
       const today = new Date().toISOString().slice(0, 10);
@@ -3179,15 +3850,34 @@ Rationale from system: ${signal.rationale}`;
         }
       }
 
+      // ── Trailing ATR dinámico (Chandelier Exit) ─────────────────────────────
+      // ATR trailing: SL = peak/trough ± atr × multiplier dinámico
+      // El multiplier se adapta al progreso del trade (se ajusta a medida que gana)
+      const profitDistRaw = isLong ? tradable - pos.signal.entry : pos.signal.entry - tradable;
+      const tpDistRaw     = Math.abs(pos.signal.tp2 - pos.signal.entry) || Math.abs(pos.signal.takeProfit - pos.signal.entry);
+      const progressPct   = tpDistRaw > 0 ? Math.max(0, profitDistRaw / tpDistRaw) : 0;
+      // A mayor progreso → trailing más ajustado (protege más ganancia)
+      const dynMult = lrn.atrTrailMult * (progressPct > 0.75 ? 0.6 : progressPct > 0.5 ? 0.8 : 1.0);
+      const atrTrailCandidate = isLong
+        ? peak - pos.signal.atr * dynMult          // LONG: SL bajo el pico - ATR
+        : trough + pos.signal.atr * dynMult;        // SHORT: SL sobre el trough + ATR
+
+      // Tomar el mejor entre swing trailing y ATR trailing (el más favorable = más protector)
+      if (isLong && atrTrailCandidate > newSl && atrTrailCandidate < tradable - pos.signal.atr * 0.2)
+        newSl = atrTrailCandidate;
+      if (!isLong && atrTrailCandidate < newSl && atrTrailCandidate > tradable + pos.signal.atr * 0.2)
+        newSl = atrTrailCandidate;
+
       const trailMoved  = isLong ? newSl > currentSl : newSl < currentSl;
       const effectiveSl = newSl;
 
-      // ── Breakeven: mover SL a entrada cuando ganancia ≥ 50% del TP ──────────
+      // ── Breakeven: mover SL a entrada cuando ganancia ≥ 40% del TP ──────────
+      // (reducido de 50% a 40% — más agresivo al proteger capital)
       const tpDist      = Math.abs(pos.signal.takeProfit - pos.signal.entry);
       const profitDist  = isLong ? tradable - pos.signal.entry : pos.signal.entry - tradable;
       const profitRatio = tpDist > 0 ? profitDist / tpDist : 0;
-      const bePrice     = pos.signal.entry + (isLong ? 1 : -1) * (pos.signal.atr * 0.1); // entry + pequeño buffer
-      const shouldBE    = profitRatio >= 0.5 && (isLong ? newSl < bePrice : newSl > bePrice);
+      const bePrice     = pos.signal.entry + (isLong ? 1 : -1) * (pos.signal.atr * 0.08); // buffer mínimo
+      const shouldBE    = profitRatio >= 0.40 && (isLong ? newSl < bePrice : newSl > bePrice);
       if (shouldBE) {
         newSl = bePrice; // SL a breakeven
       }
@@ -3275,7 +3965,31 @@ Rationale from system: ${signal.rationale}`;
   ];
   function hasCorrConflict(asset: Asset, direction: Direction, positions: Position[]): boolean {
     if (positions.length === 0) return false;
-    // 1. Correlación dinámica aprendida (umbral 0.75 = altamente correlacionados)
+
+    // 0. Groq blacklist — pares explícitamente bloqueados por análisis histórico
+    if (groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)) {
+      const blacklisted = (groqCalib.corrBlacklist ?? []).some(pair => {
+        const [a, b] = pair.split("_");
+        return positions.some(p =>
+          (asset === a && p.signal.asset === b) ||
+          (asset === b && p.signal.asset === a)
+        );
+      });
+      if (blacklisted) return true;
+    }
+
+    // 1. Correlación de P&L histórica: si bothLose > 35% → conflicto
+    const tradeCorrConflict = positions.some(p => {
+      if (p.signal.asset === asset) return false;
+      const key    = `${asset}_${p.signal.asset}`;
+      const keyRev = `${p.signal.asset}_${asset}`;
+      const corr   = tradeCorrelationsRef.current[key] ?? tradeCorrelationsRef.current[keyRev];
+      // Solo bloquear si misma dirección y alta correlación de pérdidas
+      return corr && corr.bothLose > 0.35 && p.signal.direction === direction;
+    });
+    if (tradeCorrConflict) return true;
+
+    // 2. Correlación dinámica de precio (umbral 0.75)
     const dynConflict = positions.some(p => {
       if (p.signal.asset === asset) return false;
       if (p.signal.direction !== direction) return false;
@@ -3283,7 +3997,8 @@ Rationale from system: ${signal.rationale}`;
       return Math.abs(corr) >= 0.75;
     });
     if (dynConflict) return true;
-    // 2. Fallback estático para activos sin correlación calculada
+
+    // 3. Fallback estático para activos sin correlación calculada
     const group = CORR_GROUPS.find(g => g.includes(asset));
     if (!group) return false;
     return positions.some(p =>
@@ -3297,7 +4012,15 @@ Rationale from system: ${signal.rationale}`;
     if (!liveReady) {
       pushToast("⟳ Sincronizando datos antes de generar señal...", "info");
       await syncRealData();
-      if (!liveReady) { pushToast("⚠ Sin datos — verificá el bridge MT5 o la conexión a internet.", "warning"); return; }
+      if (!liveReady) {
+        const hint = mt5Enabled && mt5Status !== "connected"
+          ? "Bridge configurado pero no conectado — hacé 'Test conexión' en ⚙ Config"
+          : !mt5Enabled
+            ? "Activá el bridge MT5 en ⚙ Config y conectá antes de operar"
+            : "Sin datos del bridge — verificá que bridge.py esté corriendo";
+        pushToast(`⚠ ${hint}`, "warning");
+        return;
+      }
     }
     if (circuitOpenRef.current) {
       if (!autoLabel) pushToast("🔴 Circuit breaker activo — límite de pérdida diaria alcanzado. Reactivá el autoScan manualmente cuando estés listo.", "error");
@@ -3384,69 +4107,98 @@ Rationale from system: ${signal.rationale}`;
         return;
       }
     }
-    // ── Decisión primaria: motor cuantitativo local ─────────────────────────
-    const lrnSnap = learningRef.current;
-    const prof    = getSessionProfile();
-    // Floor adaptativo: Wyckoff alineado → más permisivo, sin datos → más estricto
-    const hasWyckoffBias = mode === "intradia" &&
-      (wyckoffMap[targetAsset]?.bias === "distribution" ||
-       wyckoffMap[targetAsset]?.bias === "accumulation");
-    const floor = mode === "scalping"
-      ? Math.max(44, lrnSnap.confidenceFloor - 4 + prof.confAdjust)
-      : hasWyckoffBias
-        ? Math.max(46, lrnSnap.confidenceFloor - 4)  // Wyckoff claro → piso más bajo
-        : Math.max(50, lrnSnap.confidenceFloor);       // sin contexto → más estricto
+    // ── Decisión primaria: motor cuantitativo multi-factor ─────────────────
+    const lrnSnap  = learningRef.current;
+    const prof     = getSessionProfile();
+    const regime   = regimeRef.current[targetAsset] ?? calcRegime(targetAsset);
+    const calib    = assetCalib[targetAsset];
+    const hasManualOverrides = !!(overrides?.tp || overrides?.sl);
     const rrActual = Math.abs(signal.tp2 - signal.entry) /
                      Math.max(Math.abs(signal.entry - signal.stopLoss), 1e-9);
 
-    // Log diagnóstico siempre visible (consola del navegador → F12)
+    // ── Multi-factor vote ─────────────────────────────────────────────────────
+    const mfv = multifactorVote(targetAsset, mode);
+
+    // ── Z-score normalización ─────────────────────────────────────────────────
+    const confNorm = normalizeConfidenceZScore(targetAsset, signal.confidence);
+
+    // ── Floor adaptativo: Groq > walk-forward > régimen > sesión > base ───────
+    const hasWyckoffBias = mode === "intradia" &&
+      (wyckoffMap[targetAsset]?.bias === "distribution" ||
+       wyckoffMap[targetAsset]?.bias === "accumulation");
+    const groqFloor  = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)
+      ? (groqCalib.floorOverrides[targetAsset] ?? null) : null;
+    const baseFloor  = mode === "scalping" ? 42 : 46;
+    const rawFloor   = baseFloor + regime.confAdjust + (hasWyckoffBias ? -3 : 0)
+                     + (calib?.floorAdj ?? 0) + prof.confAdjust;
+    const floor      = groqFloor ?? Math.max(38, Math.min(rawFloor, 68));
+
+    // ── NaN guard ─────────────────────────────────────────────────────────────
+    if (isNaN(signal.confidence) || isNaN(rrActual)) {
+      console.error(`[TraderLab] NaN — conf=${signal.confidence} RR=${rrActual} ${targetAsset}`);
+      pushToast(`⚠ ${targetAsset}: señal NaN — bridge ok?`, "error");
+      return;
+    }
+
+    // ── Regime strategy gate: rango intradía → solo mean-reversion ────────────
+    if (mode === "intradia" && regime.strategy === "ranging" && !hasManualOverrides) {
+      const rsiOK     = (signal.direction === "LONG" && (indicatorsMap[targetAsset]?.rsi ?? 50) < 38)
+                     || (signal.direction === "SHORT" && (indicatorsMap[targetAsset]?.rsi ?? 50) > 62);
+      if (!rsiOK && !hasWyckoffBias) {
+        if (!autoLabel) pushToast(`🔲 ${targetAsset}: rango — sin setup MR (RSI=${(indicatorsMap[targetAsset]?.rsi??50).toFixed(0)})`, "warning");
+        return;
+      }
+    }
+
+    // ── Multi-factor gate ─────────────────────────────────────────────────────
+    if (!hasManualOverrides && !mfv.passed) {
+      if (!autoLabel) pushToast(`⏭ ${targetAsset}: ${mfv.votes.toFixed(1)}/4 factores | ${mfv.detail}`, "warning");
+      return;
+    }
+
+    // ── Confidence gate (z-score normalizado) ────────────────────────────────
+    if (!hasManualOverrides && confNorm < floor) {
+      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — conf ${confNorm.toFixed(0)}% < ${floor.toFixed(0)} | régimen:${regime.regime} | MFV:${mfv.votes.toFixed(1)}/4`, "warning");
+      return;
+    }
+
+    // ── RR mínimo adaptativo por régimen ──────────────────────────────────────
+    const minRR = mode === "scalping"
+      ? (regime.regime === "trending_up" || regime.regime === "trending_down" ? 1.2 : 1.4)
+      : (regime.strategy === "ranging" ? 1.1 : 1.2);
+    if (rrActual < minRR) {
+      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — RR ${rrActual.toFixed(2)} < ${minRR} | ${regime.note}`, "warning");
+      return;
+    }
+
+    // Log diagnóstico F12
     console.log(
-      `[SIGNAL] ${targetAsset} ${mode} | price=${(signal.entry ?? 0).toFixed(2)}` +
-      ` | conf=${(signal.confidence ?? 0).toFixed(1)}% (piso=${floor})` +
-      ` | RR=${rrActual.toFixed(2)} | SL=${(signal.stopLoss ?? 0).toFixed(2)}` +
-      ` | TP1=${signal.tp1?.toFixed(2)} TP2=${signal.tp2?.toFixed(2)}` +
-      ` | ${signal.rationale?.slice(0,60)}`
+      `[SIGNAL] ${targetAsset} ${mode} | conf=${confNorm.toFixed(1)}%(piso=${floor})` +
+      ` | RR=${rrActual.toFixed(2)} | MFV=${mfv.votes.toFixed(1)}/4[${mfv.direction}]` +
+      ` | régimen=${regime.regime}(ATR×${regime.atrRatio.toFixed(2)})` +
+      ` | kelly=${calib?.kellyF?.toFixed(2)??"0.50"} WR=${calib?(calib.wr*100).toFixed(0)+"%" : "N/A"}` +
+      ` | groqFloor=${groqFloor ?? "local"} | ${signal.rationale?.slice(0,50)}`
     );
 
-    if (isNaN(signal.confidence) || isNaN(rrActual)) {
-      console.error(`[TraderLab] NaN detectado — conf=${signal.confidence} RR=${rrActual} para ${targetAsset}`);
-      pushToast(`⚠ ${targetAsset}: señal inválida (NaN) — verificá el bridge`, "error");
-      return;
+    // ── Groq como enricher puro (no veta, no bloquea, solo enriquece) ─────────
+    // En scalping: NUNCA esperar respuesta — latencia > horizonte de señal
+    // En intradía: enriquecer rationale en paralelo, timeout 3s
+    if (usingGroq && apiKey.trim() && canCallGroq() && mode === "intradia") {
+      // Fire-and-forget: no await, no veto
+      void (async () => {
+        try {
+          trackGroqCall();
+          const groqResult = await Promise.race([
+            aiDecision(signal),
+            new Promise<"TIMEOUT">((res) => setTimeout(() => res("TIMEOUT"), 3000)),
+          ]);
+          if (groqResult !== "TIMEOUT" && groqResult !== "OPEN" && groqResult !== "SKIP") {
+            // groqResult es string de rationale extendido
+            signal.aiRationale = String(groqResult).slice(0, 120);
+          }
+        } catch { /* ignorar — ejecución ya fue */ }
+      })();
     }
-
-    // Si el trader pasó overrides manuales de SL/TP → confiar en su análisis técnico
-    // Solo verificar RR mínimo con los valores reales
-    const hasManualOverrides = !!(overrides?.tp || overrides?.sl);
-    if (!hasManualOverrides && signal.confidence < floor) {
-      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — conf ${(signal.confidence ?? 0).toFixed(0)}% < piso ${floor.toFixed(0)}% | ${signal.rationale.slice(0,60)}`, "warning");
-      return;
-    }
-    const minRR = mode === "scalping" ? 1.5 : 1.3;
-    if (rrActual < minRR) {
-      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — RR ${rrActual.toFixed(2)} < ${minRR} | SL=${(signal.stopLoss??0).toFixed(4)} TP=${(signal.tp2??0).toFixed(4)}`, "warning");
-      return;
-    }
-
-    // ── Groq como enricher (async, no bloquea) ───────────────────────────────
-    // Corre en paralelo: si responde antes de ejecutar, ajusta rationale.
-    // Solo puede VETAR si detecta contradicción estructural fuerte (modo intradía).
-    let aiVeto = false;
-    if (usingGroq && apiKey.trim() && canCallGroq()) {
-      try {
-        trackGroqCall();
-        const groqResult = await Promise.race([
-          aiDecision(signal),
-          new Promise<"TIMEOUT">((res) => setTimeout(() => res("TIMEOUT"), 4000)),
-        ]);
-        if (groqResult === "SKIP" && mode === "intradia") {
-          // Veto estructural solo en intradía — scalping no se veta
-          aiVeto = true;
-          if (!autoLabel) pushToast(`🤖 Groq vetó ${targetAsset} intradía — ${signal.aiRationale ?? "contradicción macro"}`, "warning");
-        }
-        // WAIT → no veta, solo registra
-      } catch { /* si falla Groq, continuar */ }
-    }
-    if (aiVeto) return;
     const lrn = learningRef.current;
     const wyckoffMult = (signal as Signal & { _wyckoffMult?: number })._wyckoffMult ?? 1.0;
     // Ajustar sizing por riesgo de ruina en scalping
@@ -3460,7 +4212,19 @@ Rationale from system: ${signal.rationale}`;
     const reversalSizeMult = signal.isReversalSetup
       ? (signal.wyckoffSizeMult > 1.0 ? 0.75 : 0.5)  // Wyckoff alineado → más convicción
       : signal.wyckoffSizeMult;                         // tendencia → usar mult Wyckoff directo
-    const riskUsd = Math.max(0.5, equity * (riskPct / 100) * lrn.riskScale * wyckoffMult * riskMult * reversalSizeMult);
+    // ── Kelly × Regime × Correlación × Groq sizing ──────────────────────────
+    const kellyMult      = calcKellySize(targetAsset, rrActual);         // 0.1–1.0
+    const regimeSizeMult = regime.sizeAdjust;                             // 0.7–1.2
+    const corrSizeMult   = getCorrSizeMultiplier(targetAsset, openPositionsRef.current);  // 0.4–1.0
+    const groqSizeMult   = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)
+      ? (groqCalib.sizeOverrides[targetAsset] ?? 1.0) : 1.0;
+    const combinedSizeMult = kellyMult * regimeSizeMult * corrSizeMult * groqSizeMult;
+    // Log para auditoría de sizing
+    if (corrSizeMult < 1.0) console.log(
+      `[SIZING] ${targetAsset}: kelly=${kellyMult.toFixed(2)} regime=${regimeSizeMult.toFixed(2)}` +
+      ` corr=${corrSizeMult.toFixed(2)} groq=${groqSizeMult.toFixed(2)} combined=${combinedSizeMult.toFixed(2)}`
+    );
+    const riskUsd = Math.max(0.5, equity * (riskPct / 100) * lrn.riskScale * wyckoffMult * riskMult * reversalSizeMult * combinedSizeMult);
     // stopDistance mínimo: el mayor entre el SL calculado y 0.3% del precio
     // Evita que ATR pequeño en plata/gold genere sizes irreales
     const minStop = signal.entry * 0.003;
@@ -3986,13 +4750,15 @@ Rationale from system: ${signal.rationale}`;
     setIsSyncing(true);
     const usingBridge = mt5Enabled && mt5Status === "connected";
 
-    // Sin bridge: no operar
+    // Sin bridge: marcar como no listo pero NO bloquear con toast agresivo en cada sync
     if (!usingBridge) {
-      setFeedStatus("⚠ MT5 Bridge no conectado — activá el bridge en Configuración");
+      setFeedStatus(mt5Enabled
+        ? "⚠ Bridge configurado pero no conectado — abrí bridge.py y hacé 'Test conexión'"
+        : "⚠ Bridge MT5 no activado — activalo en ⚙ Config"
+      );
       setLiveReady(false);
       setIsSyncing(false);
-      if (!liveReady) pushToast("Bridge MT5 desconectado. Conectá el bridge para operar.", "warning");
-      return;
+      return;   // sin toast — el status bar en el header ya lo muestra
     }
     try {
       const payload = await fetchRealMarketSnapshot(prevPricesRef.current, mt5Url, true);
@@ -4064,6 +4830,17 @@ Rationale from system: ${signal.rationale}`;
           // Sin velas MTF — Wyckoff queda en neutral, scalping usa sintético
         }
       }
+
+      // ── Calcular régimen de mercado por activo ──────────────────────────────
+      const newRegimes: Record<string, RegimeAnalysis> = {};
+      assets.forEach(a => {
+        try { newRegimes[a] = calcRegime(a); } catch { /* ignorar */ }
+      });
+      regimeRef.current = newRegimes;
+      setRegimeMap(newRegimes);
+
+      // ── Groq Calibrador — corre en background cada 15 min ────────────────────
+      void runGroqCalibrator();
 
       const timeStr = new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
       setFeedStatus(`📡 ${timeStr} — ${payload.sourceNote}`);
@@ -4208,7 +4985,20 @@ Rationale from system: ${signal.rationale}`;
     if (opened > 0) pushToast(`🤖 ${prof.emoji} ${prof.name}: ${opened} posición(es) abierta(s)`, "success");
   }
 
-  useEffect(() => { void syncRealData(); }, []);
+  // Al arrancar: si mt5Enabled estaba guardado, reconectar automáticamente
+  useEffect(() => {
+    if (mt5Enabled) {
+      // Reconectar bridge guardado sin esperar input del usuario
+      void testMT5Bridge().then(() => {
+        // Si conectó OK, hacer sync inmediato
+        void syncRealData();
+      });
+    } else {
+      // Sin bridge — sync fallará suavemente (liveReady queda false, sin toast molesto)
+      void syncRealData();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);  // solo al montar
   // Sync de posiciones MT5 cada 1 segundo si hay posiciones abiertas
   useEffect(() => {
     if (!mt5Enabled || mt5Status !== "connected") return;
@@ -4283,7 +5073,19 @@ Rationale from system: ${signal.rationale}`;
     pushToast(`✅ Backtest: ${simulated.length} trades | WR ${((wins.length / simulated.length) * 100).toFixed(1)}%`, "success");
   }
 
-  // ─── Render ────────────────────────────────────────────────────────────────
+  // ─── Render ──────────────────────────────────────
+  // Historial de confidence scores por activo — para z-score normalizado
+  const signalScoreHistoryRef = React.useRef<Partial<Record<string, number[]>>>({});
+
+  // Ref para el contenedor del chart — preventDefault nativo (passive events)
+  const chartWrapRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    const el = chartWrapRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => e.preventDefault();
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, []);──────────────────────────
   const NAV = [
     { id: "trading" as AppTab, label: "Trading", icon: "📈" },
     { id: "historial" as AppTab, label: "Historial", icon: "📒" },
@@ -4426,6 +5228,46 @@ Rationale from system: ${signal.rationale}`;
         {/* ━━━━━━━━━ TRADING ━━━━━━━━━ */}
         {appTab === "trading" && (
           <ErrorBoundary key="trading-tab">
+
+          {/* ── Banner bridge desconectado ── */}
+          {!liveReady && (
+            <div style={{
+              marginBottom: 14, padding: "14px 20px",
+              borderRadius: 12,
+              background: mt5Enabled && mt5Status === "connected"
+                ? "rgba(245,158,11,0.08)"
+                : "rgba(239,68,68,0.08)",
+              border: `1px solid ${mt5Enabled && mt5Status === "connected" ? "rgba(245,158,11,0.3)" : "rgba(239,68,68,0.25)"}`,
+              display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
+            }}>
+              <span style={{ fontSize: 22 }}>
+                {mt5Enabled && mt5Status === "testing" ? "⏳" : mt5Enabled ? "⚠️" : "🔌"}
+              </span>
+              <div style={{ flex: 1 }}>
+                <p style={{ fontWeight: 700, fontSize: 13, marginBottom: 3 }}>
+                  {mt5Status === "testing" ? "Conectando al bridge MT5..." :
+                   mt5Enabled && mt5Status !== "connected" ? "Bridge MT5 configurado pero no conectado" :
+                   !mt5Enabled ? "Bridge MT5 no activado" :
+                   "Sin datos del bridge"}
+                </p>
+                <p style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                  {mt5Status === "testing" ? "Esperá unos segundos..." :
+                   mt5Enabled ? `URL: ${mt5Url} — Asegurate que bridge.py esté corriendo y hacé "Test conexión" en ⚙ Config` :
+                   'Andá a ⚙ Config → activá "Usar Bridge MT5" → ingresá la URL → "Test conexión"'}
+                </p>
+              </div>
+              <button onClick={() => {
+                void testMT5Bridge().then(() => void syncRealData());
+              }} style={{
+                padding: "8px 16px", borderRadius: 8, border: "none", cursor: "pointer",
+                background: "rgba(99,102,241,0.2)", color: "#a5b4fc",
+                fontWeight: 700, fontSize: 12, whiteSpace: "nowrap",
+              }}>
+                🔄 Reconectar
+              </button>
+            </div>
+          )}
+
           <div className="trading-grid">
 
             {/* Izq */}
@@ -4598,7 +5440,7 @@ Rationale from system: ${signal.rationale}`;
                     )}
                   </div>
                 </div>
-                <div onWheel={e => e.preventDefault()} style={{ borderRadius: 8, overflow: "hidden", background: "rgba(0,0,0,0.25)", padding: "6px 3px 3px" }}>
+                <div ref={chartWrapRef} style={{ borderRadius: 8, overflow: "hidden", background: "rgba(0,0,0,0.25)", padding: "6px 3px 3px" }}>
                   <CandlestickChart
                     candles={visibleCandles}
                     indicators={showIndicators ? currentIndicators : null}
@@ -4866,6 +5708,79 @@ Rationale from system: ${signal.rationale}`;
 
             {/* Der */}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+
+              {/* ── Panel Motor Cuant ── */}
+              {(() => { try {
+                const calibNow = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000) ? groqCalib : null;
+                return (
+                  <div className="card" style={{ padding: "12px 14px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                      <p style={{ fontWeight: 800, fontSize: 12, margin: 0 }}>⚡ Motor Cuant</p>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        {calibNow && <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 8,
+                          background: "rgba(99,102,241,0.12)", color: "#a5b4fc", fontWeight: 700 }}>
+                          🤖 Groq: {new Date(calibNow.timestamp).toLocaleTimeString("es",{hour:"2-digit",minute:"2-digit"})}
+                        </span>}
+                        <span style={{ fontSize: 9, color: "var(--muted)" }}>Calibra cada 15min</span>
+                      </div>
+                    </div>
+                    {calibNow?.macroNote && (
+                      <p style={{ fontSize: 11, color: "#a5b4fc", marginBottom: 8, padding: "5px 8px",
+                        background: "rgba(99,102,241,0.08)", borderRadius: 6, borderLeft: "2px solid #6366f1" }}>
+                        {calibNow.macroNote}
+                      </p>
+                    )}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                      {assets.slice(0,4).map(a => {
+                        const r   = regimeMap[a];
+                        const c   = assetCalib[a];
+                        const gf  = calibNow?.floorOverrides?.[a];
+                        const gs  = calibNow?.sizeOverrides?.[a];
+                        const regColor = !r ? "var(--muted)"
+                          : r.regime === "trending_up"   ? "#10b981"
+                          : r.regime === "trending_down" ? "#ef4444"
+                          : r.regime === "expanding"     ? "#f59e0b"
+                          : r.regime === "ranging"       ? "#6366f1"
+                          : "var(--muted)";
+                        const regIcon = !r ? "?" 
+                          : r.regime === "trending_up"   ? "↗"
+                          : r.regime === "trending_down" ? "↘"
+                          : r.regime === "expanding"     ? "⚡"
+                          : r.regime === "ranging"       ? "↔"
+                          : "·";
+                        return (
+                          <div key={a} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8,
+                            padding: "8px 10px", border: `1px solid rgba(255,255,255,0.06)` }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                              <span style={{ fontWeight: 800, fontSize: 11 }}>{a.replace("USD","")}</span>
+                              <span style={{ fontSize: 12, color: regColor, fontWeight: 700 }}>{regIcon}</span>
+                            </div>
+                            <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 3 }}>
+                              {r ? r.regime.replace("_"," ") : "—"}
+                            </div>
+                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                              {c && c.n > 0 && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4,
+                                background: c.wr > 0.55 ? "rgba(16,185,129,0.12)" : c.wr < 0.40 ? "rgba(239,68,68,0.1)" : "rgba(255,255,255,0.06)",
+                                color: c.wr > 0.55 ? "#10b981" : c.wr < 0.40 ? "#ef4444" : "var(--text-2)", fontWeight: 700 }}>
+                                WR {(c.wr*100).toFixed(0)}% ({c.n})
+                              </span>}
+                              {c && c.n > 0 && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4,
+                                background: "rgba(255,255,255,0.06)", color: "var(--text-2)", fontWeight: 600 }}>
+                                K {(c.kellyF*100).toFixed(0)}%
+                              </span>}
+                              {gf && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4,
+                                background: "rgba(99,102,241,0.12)", color: "#a5b4fc", fontWeight: 700 }}>
+                                🤖 piso {gf}
+                              </span>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              } catch(e) { return null; }})()}
+
               <AiChatPanel
                 apiKey={apiKey} usingGroq={usingGroq} groqModel={groqModel}
                 onGroqCall={trackGroqCall} canGroqCall={canCallGroq}
@@ -5065,6 +5980,128 @@ Rationale from system: ${signal.rationale}`;
                 )}
               </div>
 
+              {/* ── Panel Correlaciones de Trades ── */}
+              {Object.keys(tradeCorrelations).length > 0 && (() => { try {
+                const corrList = Object.values(tradeCorrelations).sort((a,b) => b.riskScore - a.riskScore);
+                return (
+                  <div className="card">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                      <h3 style={{ fontWeight: 800, fontSize: 13, margin: 0 }}>🔗 Correlación de Trades</h3>
+                      {portfolioRisk && (
+                        <span style={{ fontSize: 11, padding: "3px 10px", borderRadius: 8, fontWeight: 700,
+                          background: portfolioRisk.currentRiskScore > 0.6 ? "rgba(239,68,68,0.12)"
+                                    : portfolioRisk.currentRiskScore > 0.3 ? "rgba(245,158,11,0.1)"
+                                    : "rgba(16,185,129,0.1)",
+                          color: portfolioRisk.currentRiskScore > 0.6 ? "#ef4444"
+                               : portfolioRisk.currentRiskScore > 0.3 ? "#f59e0b" : "#10b981" }}>
+                          Riesgo portfolio: {(portfolioRisk.currentRiskScore * 100).toFixed(0)}%
+                        </span>
+                      )}
+                    </div>
+
+                    {portfolioRisk?.groqInsights && (
+                      <p style={{ fontSize: 11, color: "#a5b4fc", marginBottom: 12, padding: "7px 10px",
+                        background: "rgba(99,102,241,0.08)", borderRadius: 8, borderLeft: "2px solid #6366f1" }}>
+                        🤖 {portfolioRisk.groqInsights}
+                      </p>
+                    )}
+
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                        <thead>
+                          <tr style={{ background: "rgba(255,255,255,0.03)" }}>
+                            {["Par", "Precio ρ", "P&L ρ", "Ambos ✅", "Ambos ❌", "Divergen", "Riesgo", "Acción"].map(h => (
+                              <th key={h} style={{ padding: "8px 12px", textAlign: "left", fontSize: 10,
+                                textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--muted)",
+                                borderBottom: "1px solid var(--border)", whiteSpace: "nowrap" }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {corrList.map(c => {
+                            const [a, b] = c.pairKey.split("_");
+                            const isBlacklisted = groqCalib?.corrBlacklist?.includes(c.pairKey) ||
+                                                  groqCalib?.corrBlacklist?.includes(`${b}_${a}`);
+                            const riskColor = c.riskScore > 0.6 ? "#ef4444"
+                                            : c.riskScore > 0.3 ? "#f59e0b" : "#10b981";
+                            return (
+                              <tr key={c.pairKey} style={{ borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
+                                <td style={{ padding: "8px 12px", fontWeight: 800 }}>
+                                  {a.replace("USD","")}↔{b.replace("USD","")}
+                                  {isBlacklisted && <span style={{ marginLeft: 5, fontSize: 9, padding: "1px 5px",
+                                    borderRadius: 4, background: "rgba(239,68,68,0.15)", color: "#ef4444", fontWeight: 700 }}>
+                                    🚫 Groq
+                                  </span>}
+                                </td>
+                                <td style={{ padding: "8px 12px", fontFamily: "'JetBrains Mono',monospace",
+                                  color: Math.abs(c.pricePearson) > 0.7 ? "#f59e0b" : "var(--text)" }}>
+                                  {c.pricePearson.toFixed(2)}
+                                </td>
+                                <td style={{ padding: "8px 12px", fontFamily: "'JetBrains Mono',monospace",
+                                  color: c.pnlPearson > 0.5 ? "#f59e0b" : c.pnlPearson < -0.3 ? "#10b981" : "var(--text)" }}>
+                                  {c.pnlPearson.toFixed(2)}
+                                </td>
+                                <td style={{ padding: "8px 12px", color: "#10b981", fontWeight: 700 }}>
+                                  {(c.bothWin * 100).toFixed(0)}%
+                                </td>
+                                <td style={{ padding: "8px 12px", color: c.bothLose > 0.3 ? "#ef4444" : "var(--text)", fontWeight: c.bothLose > 0.3 ? 800 : 400 }}>
+                                  {(c.bothLose * 100).toFixed(0)}%
+                                </td>
+                                <td style={{ padding: "8px 12px", color: c.diverge > 0.5 ? "#10b981" : "var(--text)", fontWeight: c.diverge > 0.5 ? 700 : 400 }}>
+                                  {(c.diverge * 100).toFixed(0)}%
+                                </td>
+                                <td style={{ padding: "8px 12px" }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                    <div style={{ width: 50, height: 5, borderRadius: 3, background: "rgba(255,255,255,0.06)", overflow: "hidden" }}>
+                                      <div style={{ width: `${c.riskScore * 100}%`, height: "100%",
+                                        background: `linear-gradient(90deg, #10b981, ${riskColor})`, borderRadius: 3 }} />
+                                    </div>
+                                    <span style={{ color: riskColor, fontWeight: 700, fontSize: 11 }}>
+                                      {(c.riskScore * 100).toFixed(0)}
+                                    </span>
+                                  </div>
+                                </td>
+                                <td style={{ padding: "8px 12px" }}>
+                                  {c.bothLose > 0.35
+                                    ? <span style={{ fontSize: 10, color: "#ef4444", fontWeight: 700 }}>⚠ Reducir size</span>
+                                    : c.diverge > 0.5
+                                      ? <span style={{ fontSize: 10, color: "#10b981", fontWeight: 700 }}>✅ Buena combo</span>
+                                      : <span style={{ fontSize: 10, color: "var(--muted)" }}>Normal</span>
+                                  }
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {portfolioRisk && (portfolioRisk.bestCombo.length > 0 || portfolioRisk.worstCombo.length > 0) && (
+                      <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+                        {portfolioRisk.bestCombo.length > 0 && (
+                          <div style={{ flex: 1, padding: "8px 12px", borderRadius: 8,
+                            background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.2)" }}>
+                            <p style={{ fontSize: 10, color: "var(--muted)", marginBottom: 3 }}>✅ MEJOR COMBO (más descorrelacionados)</p>
+                            <p style={{ fontWeight: 800, fontSize: 13, color: "#10b981" }}>
+                              {portfolioRisk.bestCombo.map(a => a.replace("USD","")).join(" + ")}
+                            </p>
+                          </div>
+                        )}
+                        {portfolioRisk.worstCombo.length > 0 && (
+                          <div style={{ flex: 1, padding: "8px 12px", borderRadius: 8,
+                            background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                            <p style={{ fontSize: 10, color: "var(--muted)", marginBottom: 3 }}>⚠ MAYOR RIESGO (más correlacionados)</p>
+                            <p style={{ fontWeight: 800, fontSize: 13, color: "#ef4444" }}>
+                              {portfolioRisk.worstCombo.map(a => a.replace("USD","")).join(" + ")}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              } catch(e) { return null; }})()}
+
               {/* ── Curva de equity ── */}
               {realTrades.length >= 2 && (() => {
                 const equityCurve = realTrades.reduce((acc: number[], t) => {
@@ -5176,12 +6213,14 @@ Rationale from system: ${signal.rationale}`;
               <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>📐 Lógica de aprendizaje automático</p>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 12 }}>
                 {[
-                  { param: "Escala de riesgo", formula: `0.8 + WR×0.6 + exp×0.03`, range: "0.7 – 1.5", effect: "Con WR 60%: riskScale=1.16. Con WR 30%: riskScale=0.98." },
-                  { param: "Piso confianza",   formula: `52 + (0.5−WR)×16`,         range: "48 – 62",  effect: "Con WR 40%: floor=53.6. Con WR 60%: floor=50.4. Solo aplica con ≥10 trades." },
-                  { param: "TP Scalping",      formula: `1.2 + WR×0.4`,             range: "1.15 – 1.8", effect: "Con WR 55%: TP=1.42×ATR. Con WR 30%: TP=1.32×ATR." },
-                  { param: "TP Intradía",      formula: `3.0 + WR×1.5`,             range: "2.8 – 5.0", effect: "Con WR 55%: TP=3.83×ATR. Con WR 30%: TP=3.45×ATR." },
-                  { param: "Buffer trailing",  formula: `0.25 + WR×0.3`,            range: "0.2 – 0.6", effect: "Con WR 55%: buffer=0.42×ATR. Con WR 30%: buffer=0.34×ATR." },
-                  { param: "Hour Edge",        formula: "avg(PnL por hora del día)",  range: "libre",    effect: "Registra qué horas son rentables. No bloquea, solo informa." },
+                  { param: "Escala de riesgo (Kelly)", formula: `Half-Kelly: f* = (p×b−q)/b`, range: "0.7 – 1.5", effect: "Calibrado con WR y RR reales de los últimos 20 trades. Con 0 trades: 0.5×." },
+                  { param: "Piso confianza",   formula: `52 + (0.5−WR₂₀)×20 + RR_adj`, range: "46 – 60",  effect: "Rolling 20 trades. WR 60% → floor 46. WR 40% → floor 54. Groq Coach ajusta fino." },
+                  { param: "TP Scalping",      formula: `1.8 + RR_avg×0.3`,         range: "1.8 – 3.5", effect: "Basado en RR realizado de últimos 20 trades. Se amplía cuando el mercado entrega más." },
+                  { param: "TP Intradía",      formula: `3.5 + RR_avg×0.8`,         range: "3.5 – 8.0", effect: "Con RR promedio 2.0: TP=5.1×ATR. Expansión de volatilidad amplía targets." },
+                  { param: "Trailing (Chandelier)", formula: `peak − ATR × mult(progreso)`, range: "0.2 – 0.6", effect: "ATR dinámico: se ajusta cuando la posición progresa. >75% del TP → mult 0.6×." },
+                  { param: "Regime Filter",    formula: "ATR(14)/ATR(50)",           range: ">1.3 / <0.7", effect: "Expansión (>1.3): solo momentum. Rango (<0.7): mean reversion. Normal: ambas." },
+                  { param: "Multi-factor Vote", formula: "EMA + ROC + vol ATR + OBV", range: "0–4 votos", effect: "3/4 votos para abrir en tendencia. 2/4 en régimen desconocido. Evita señales falsas." },
+                  { param: "Groq Coach",       formula: "post-trade async calibration", range: "±1.5 floor", effect: "Analiza el trade cerrado y ajusta confidenceFloor/riskScale/TP automáticamente." },
                 ].map(({ param, formula, range, effect }) => (
                   <div key={param} style={{ background: "rgba(255,255,255,0.02)", borderRadius: 8, padding: "10px 12px", border: "1px solid rgba(255,255,255,0.06)" }}>
                     <div style={{ fontWeight: 700, color: "#a5b4fc", fontSize: 12, marginBottom: 4 }}>{param}</div>
