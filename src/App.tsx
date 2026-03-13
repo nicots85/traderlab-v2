@@ -5119,7 +5119,7 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
     const handler = (e: WheelEvent) => e.preventDefault();
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
-  }, []);──────────────────────────
+  }, []);
   const NAV = [
     { id: "trading" as AppTab, label: "Trading", icon: "📈" },
     { id: "historial" as AppTab, label: "Historial", icon: "📒" },
