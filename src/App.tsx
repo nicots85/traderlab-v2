@@ -1,3 +1,4 @@
+import QuantEngine from "./QuantEngine";
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -2886,56 +2887,74 @@ function calcScalpingRisk(
     votes: number; direction: "LONG" | "SHORT"; passed: boolean; detail: string
   } {
     const candles = candlesRef.current[asset] ?? [];
-    const series  = seriesRef.current[asset]  ?? [];
     const ind     = indicatorsMap[asset];
     const mtf     = getMtfScore(asset, mode);
 
-    if (candles.length < 21) return { votes: 0, direction: "LONG", passed: false, detail: "Sin datos" };
+    if (candles.length < 14) return { votes: 0, direction: "LONG", passed: false, detail: "Sin datos (<14 velas)" };
 
     const closes = candles.map(c => c.c);
     const vols   = candles.map(c => c.v);
-    const price  = closes[closes.length - 1];
+    const n      = closes.length;
+    const price  = closes[n - 1];
     const atr    = mtf.atr || price * 0.001;
 
-    // Factor 1: Precio (EMA crossover MTF)
-    const mtfSum    = mtf.htf + mtf.ltf + mtf.exec;
-    const f1_long   = mtfSum > 0.15;
-    const f1_short  = mtfSum < -0.15;
+    // ── F1: Dirección MTF (EMA crossover) — umbral reducido a 0.05 ────────────
+    // mtfSum puede ser pequeño pero consistente; 0.15 era demasiado estricto
+    const mtfSum   = mtf.htf + mtf.ltf + mtf.exec;
+    const f1_long  = mtfSum > 0.05;
+    const f1_short = mtfSum < -0.05;
 
-    // Factor 2: Volumen (OBV delta)
+    // ── F2: OBV delta — solo últimas 20 velas (más reactivo) ─────────────────
     let obv = 0;
-    for (let i = 1; i < candles.length; i++) {
-      obv += candles[i].c > candles[i-1].c ? candles[i].v : candles[i].c < candles[i-1].c ? -candles[i].v : 0;
+    const recent = Math.min(n, 20);
+    for (let i = n - recent + 1; i < n; i++) {
+      obv += candles[i].c > candles[i-1].c ? candles[i].v
+           : candles[i].c < candles[i-1].c ? -candles[i].v : 0;
     }
-    const obvMean   = vols.slice(-20).reduce((a,b) => a+b,0) / 20;
-    const f2_long   = obv > 0;
-    const f2_short  = obv < 0;
+    const f2_long  = obv > 0;
+    const f2_short = obv < 0;
 
-    // Factor 3: Volatilidad relativa (ATR ratio > 0.8 = mercado activo)
-    const atr20 = calcAtr(candles.slice(-34, -14), 14);
-    const f3_ok = atr20 > 0 ? (atr / atr20) > 0.75 : true;
+    // ── F3: Volatilidad relativa — robusto con datos escasos ─────────────────
+    // Si hay >= 30 velas: ATR ratio. Si no: spread de BB como proxy.
+    let f3_ok = true;
+    if (n >= 30) {
+      const atrNow  = calcAtr(candles.slice(-15), 14);
+      const atrPrev = calcAtr(candles.slice(-30, -15), 14);
+      f3_ok = atrPrev > 0 ? (atrNow / atrPrev) > 0.60 : true;  // umbral 0.60 (antes 0.75)
+    } else if (ind) {
+      // Proxy: BB width > 0.3% del precio = mercado con movimiento
+      const bbWidth = ind.bbUpper - ind.bbLower;
+      f3_ok = bbWidth > price * 0.003;
+    }
 
-    // Factor 4: ROC momentum puro (3, 8, 21 períodos)
-    const n = closes.length;
-    const roc3  = n > 3  ? (closes[n-1] - closes[n-4])  / closes[n-4]  : 0;
-    const roc8  = n > 8  ? (closes[n-1] - closes[n-9])  / closes[n-9]  : 0;
-    const roc21 = n > 21 ? (closes[n-1] - closes[n-22]) / closes[n-22] : 0;
-    const rocScore = Math.sign(roc3) + Math.sign(roc8) + Math.sign(roc21);
-    const f4_long  = rocScore >= 2;
+    // ── F4: ROC momentum — solo 2 períodos alineados (antes requería 3) ───────
+    const roc3  = n > 4  ? (closes[n-1] - closes[n-4])  / closes[n-4]  : 0;
+    const roc8  = n > 9  ? (closes[n-1] - closes[n-9])  / closes[n-9]  : 0;
+    const roc14 = n > 15 ? (closes[n-1] - closes[n-15]) / closes[n-15] : 0;
+    const rocScore = Math.sign(roc3) + Math.sign(roc8) + Math.sign(roc14);
+    const f4_long  = rocScore >= 2;   // 2/3 períodos alcistas (antes 2/3 con roc21)
     const f4_short = rocScore <= -2;
 
-    // RSI extremo como factor extra (bonus, no obligatorio)
-    const f5_long  = ind ? ind.rsi < 38 : false;
-    const f5_short = ind ? ind.rsi > 62 : false;
+    // ── F5: RSI / Stoch extremo — bonus 0.5 ──────────────────────────────────
+    const rsiLong  = ind ? ind.rsi < 42 : false;  // ampliado de 38 → 42
+    const rsiShort = ind ? ind.rsi > 58 : false;  // ampliado de 62 → 58
+    const stochLong  = ind ? ind.stochK < 35 : false;
+    const stochShort = ind ? ind.stochK > 65 : false;
+    const f5_long  = rsiLong  || stochLong;
+    const f5_short = rsiShort || stochShort;
 
-    const longVotes  = [f1_long, f2_long, f3_ok, f4_long].filter(Boolean).length + (f5_long ? 0.5 : 0);
+    const longVotes  = [f1_long,  f2_long,  f3_ok, f4_long ].filter(Boolean).length + (f5_long  ? 0.5 : 0);
     const shortVotes = [f1_short, f2_short, f3_ok, f4_short].filter(Boolean).length + (f5_short ? 0.5 : 0);
 
     const direction: "LONG" | "SHORT" = longVotes >= shortVotes ? "LONG" : "SHORT";
     const votes = direction === "LONG" ? longVotes : shortVotes;
-    const passed = votes >= 2.5 && f3_ok;  // mínimo 3 factores + volatilidad activa
 
-    const detail = `F1:EMA=${f1_long||f1_short?1:0} F2:OBV=${f2_long||f2_short?1:0} F3:Vol=${f3_ok?1:0} F4:ROC=${f4_long||f4_short?1:0} RSI±=${f5_long||f5_short?0.5:0} → ${votes.toFixed(1)}/4`;
+    // Umbral: 2/4 factores + F3 activo (antes 2.5 + f3)
+    // En trending fuerte (f1 + f4 alineados): solo necesita 1 confirmador más
+    const trendingStrong = (f1_long && f4_long) || (f1_short && f4_short);
+    const passed = f3_ok && (votes >= 2.0 || (trendingStrong && votes >= 1.5));
+
+    const detail = `F1:MTF=${f1_long||f1_short?1:0}(${mtfSum.toFixed(2)}) F2:OBV=${f2_long||f2_short?1:0} F3:Vol=${f3_ok?1:0} F4:ROC=${rocScore}→${f4_long||f4_short?1:0} F5:RSI/St=${f5_long||f5_short?0.5:0} → ${votes.toFixed(1)}/4 ${passed?"✅":"❌"}`;
     return { votes, direction, passed, detail };
   }
 
@@ -4132,10 +4151,11 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
        wyckoffMap[targetAsset]?.bias === "accumulation");
     const groqFloor  = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)
       ? (groqCalib.floorOverrides[targetAsset] ?? null) : null;
-    const baseFloor  = mode === "scalping" ? 42 : 46;
-    const rawFloor   = baseFloor + regime.confAdjust + (hasWyckoffBias ? -3 : 0)
+    // Floors más permisivos sin historial (calib nulo = 0 trades = no penalizar)
+    const baseFloor  = mode === "scalping" ? 40 : 44;
+    const rawFloor   = baseFloor + regime.confAdjust + (hasWyckoffBias ? -4 : 0)
                      + (calib?.floorAdj ?? 0) + prof.confAdjust;
-    const floor      = groqFloor ?? Math.max(38, Math.min(rawFloor, 68));
+    const floor      = groqFloor ?? Math.max(36, Math.min(rawFloor, 65));
 
     // ── NaN guard ─────────────────────────────────────────────────────────────
     if (isNaN(signal.confidence) || isNaN(rrActual)) {
@@ -4168,8 +4188,8 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
 
     // ── RR mínimo adaptativo por régimen ──────────────────────────────────────
     const minRR = mode === "scalping"
-      ? (regime.regime === "trending_up" || regime.regime === "trending_down" ? 1.2 : 1.4)
-      : (regime.strategy === "ranging" ? 1.1 : 1.2);
+      ? (regime.regime === "trending_up" || regime.regime === "trending_down" ? 1.0 : 1.2)
+      : (regime.strategy === "ranging" ? 1.0 : 1.1);
     if (rrActual < minRR) {
       if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — RR ${rrActual.toFixed(2)} < ${minRR} | ${regime.note}`, "warning");
       return;
@@ -6925,6 +6945,62 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
             </div>
           </div>
         )}
+
+        {/* ━━━━━━━━━ QUANT — Motor Black-Scholes × Wyckoff ━━━━━━━━━ */}
+        {appTab === "quant" && (
+          <ErrorBoundary key="quant-tab">
+            <QuantEngine
+              prices={prices}
+              candles={candles}
+              candles5m={candles5m}
+              candles15m={candles15m}
+              candles4h={candles4h}
+              candles1d={candles1d}
+              liveReady={liveReady}
+              mt5Enabled={mt5Enabled}
+              mt5Status={mt5Status}
+              mt5Url={mt5Url}
+              balance={balance}
+              equity={equity}
+              riskPct={riskPct}
+              assets={assets}
+              onOpenMT5={async (asset, dir, sl, tp, size) => {
+                if (!mt5Enabled || mt5Status !== "connected") return false;
+                try {
+                  const r = await fetch(`${mt5Url}/open`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      asset, direction: dir,
+                      sl, tp, size,
+                      mode: "quant_bs",
+                      magic: 20250001,
+                    }),
+                    signal: AbortSignal.timeout(8000),
+                  });
+                  const d = await r.json() as { ok: boolean; ticket?: number; error?: string };
+                  if (!d.ok) { pushToast(`⚠ MT5 no abrió ${asset}: ${d.error ?? ""}`, "error"); return false; }
+                  return true;
+                } catch (e) { pushToast(`⚠ MT5 timeout ${asset}`, "error"); return false; }
+              }}
+              onCloseMT5={async (asset, dir) => {
+                if (!mt5Enabled || mt5Status !== "connected") return true;  // cerrar local igual
+                try {
+                  const r = await fetch(`${mt5Url}/close`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ asset, direction: dir }),
+                    signal: AbortSignal.timeout(8000),
+                  });
+                  const d = await r.json() as { ok: boolean };
+                  return d.ok;
+                } catch { return false; }
+              }}
+              pushToast={pushToast}
+            />
+          </ErrorBoundary>
+        )}
+
       </main>
     </div>
   );
