@@ -5141,7 +5141,8 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
     return () => el.removeEventListener("wheel", handler);
   }, []);
   const NAV = [
-    { id: "trading" as AppTab, label: "Trading", icon: "📈" },
+    { id: "trading"  as AppTab, label: "Trading",  icon: "📈" },
+    { id: "quant"    as AppTab, label: "Quant BS",  icon: "📐" },
     { id: "historial" as AppTab, label: "Historial", icon: "📒" },
     { id: "aprendizaje" as AppTab, label: "Aprendizaje", icon: "🧠" },
     { id: "activos" as AppTab, label: "Activos IA", icon: "🌐" },
