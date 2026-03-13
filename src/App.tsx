@@ -3018,8 +3018,7 @@ function calcScalpingRisk(
                `WR=${c ? (c.wr*100).toFixed(1)+"%" : "N/A"} ` +
                `trades=${c?.n??0} RSI=${ind?.rsi?.toFixed(1)??"?"} ` +
                `ATRratio=${r?.atrRatio?.toFixed(2)??"?"} strategy=${r?.strategy??"?"}`;
-      }).join("
-");
+      }).join("\n");
 
       // ── Contexto de correlaciones para Groq ────────────────────────────────
       const corrCtx = Object.values(tradeCorrelations).slice(0, 6).map(c => {
@@ -3031,14 +3030,12 @@ function calcScalpingRisk(
                `divergen=${(c.diverge*100).toFixed(0)}% ` +
                `riskScore=${c.riskScore.toFixed(2)} ` +
                `nSimult=${c.avgSimultaneous}`;
-      }).join("
-") || "Sin historial de trades suficiente aún.";
+      }).join("\n") || "Sin historial de trades suficiente aún.";
 
       // ── Últimos 10 trades para contexto ──────────────────────────────────────
       const recentTrades = realTrades.slice(0, 10).map(t =>
         `${t.asset} ${t.direction} ${t.mode}: ${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(2)} | ${t.result}`
-      ).join("
-") || "Sin trades aún.";
+      ).join("\n") || "Sin trades aún.";
 
       // ── Portfolio risk actual ─────────────────────────────────────────────────
       const portRisk = portfolioRisk
