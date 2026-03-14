@@ -1355,30 +1355,53 @@ function WyckoffPanel({ wyckoff }: { wyckoff: WyckoffAnalysis }) {
 // ── OrderFlowPanel ────────────────────────────────────────────────────────────
 function OrderFlowPanel({ of: of_, price }: { of: OrderFlowScore; price: number }) {
   const ctrlColor = of_.control === "bulls" ? "#10b981" : of_.control === "bears" ? "#ef4444" : "#f59e0b";
-  const pct = (of_.controlScore + 100) / 2;
+  const pct       = (of_.controlScore + 100) / 2;
+  const cvdTrend  = of_.cvd?.trend ?? "neutral";
+  const cvdArrow  = cvdTrend === "bullish" ? "↑" : cvdTrend === "bearish" ? "↓" : "→";
+  const cvdColor  = cvdTrend === "bullish" ? "#10b981" : cvdTrend === "bearish" ? "#ef4444" : "var(--muted)";
+  const hasDiverg = of_.cvd?.divergence ?? false;
   return (
     <div style={{ marginBottom: 8 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-        <span style={{ fontSize: 11, color: "var(--muted)" }}>Order Flow</span>
-        <span style={{ fontSize: 12, fontWeight: 800, color: ctrlColor }}>
-          {of_.control === "bulls" ? "Toros" : of_.control === "bears" ? "Osos" : "Disputado"}
-          <span style={{ fontSize: 10, marginLeft: 5, opacity: 0.7 }}>{(of_.controlScore ?? 0).toFixed(0)}</span>
+      {/* Header control */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+        <span style={{ fontSize:11, color:"var(--muted)" }}>Order Flow</span>
+        <span style={{ fontSize:12, fontWeight:800, color:ctrlColor }}>
+          {of_.control === "bulls" ? "🐂 Toros" : of_.control === "bears" ? "🐻 Osos" : "⚖ Disputado"}
+          <span style={{ fontSize:10, marginLeft:4, opacity:0.7 }}>{(of_.controlScore??0).toFixed(0)}</span>
         </span>
       </div>
-      <div style={{ height: 6, borderRadius: 3, background: "rgba(255,255,255,0.08)", overflow: "hidden", marginBottom: 6 }}>
-        <div style={{ height: "100%", width: `${pct}%`, background: ctrlColor, borderRadius: 3 }} />
+
+      {/* Barra split visual */}
+      <div style={{ height:7, borderRadius:4, background:"rgba(255,255,255,0.06)", overflow:"hidden", marginBottom:6, position:"relative" }}>
+        <div style={{ position:"absolute", left:0, top:0, width:"50%", height:"100%", background:"rgba(239,68,68,0.12)" }} />
+        <div style={{ position:"absolute", right:0, top:0, width:"50%", height:"100%", background:"rgba(16,185,129,0.12)" }} />
+        <div style={{ height:"100%", width:`${pct}%`, background:ctrlColor, borderRadius:4, position:"relative", zIndex:1, transition:"width 0.5s ease" }} />
+        <div style={{ position:"absolute", left:"50%", top:0, width:1, height:"100%", background:"rgba(255,255,255,0.18)" }} />
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+
+      {/* 4 métricas */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:4 }}>
         {[
-          { label: "CVD", value: (of_.cvdScore ?? 0).toFixed(0) },
-          { label: "Footprint", value: (of_.footprintScore ?? 0).toFixed(0) },
-        ].map(({ label, value }) => (
-          <div key={label} style={{ textAlign: "center", background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "3px 0" }}>
-            <p style={{ fontSize: 9, color: "var(--muted)" }}>{label}</p>
-            <p style={{ fontSize: 11.5, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace" }}>{value}</p>
+          { label:"CVD", value:`${cvdArrow}${(of_.cvdScore??0).toFixed(0)}`, color:cvdColor },
+          { label:"Foot", value:(of_.footprintScore??0).toFixed(0), color:"var(--text)" },
+          { label:"Prof", value:(of_.profileScore??0).toFixed(0), color:"var(--text)" },
+          { label:"Abs",  value:(of_.absorptionScore??0).toFixed(0), color:"var(--text)" },
+        ].map(({ label, value, color }) => (
+          <div key={label} style={{ textAlign:"center", background:"rgba(255,255,255,0.03)", borderRadius:5, padding:"3px 2px" }}>
+            <p style={{ fontSize:8.5, color:"var(--muted)", marginBottom:1 }}>{label}</p>
+            <p style={{ fontSize:11, fontWeight:700, fontFamily:"'JetBrains Mono',monospace", color }}>{value}</p>
           </div>
         ))}
       </div>
+
+      {/* Divergencia */}
+      {hasDiverg && (
+        <div style={{ marginTop:5, padding:"3px 8px", borderRadius:5,
+          background:"rgba(245,158,11,0.1)", border:"1px solid rgba(245,158,11,0.22)",
+          fontSize:10, fontWeight:700, color:"#fbbf24" }}>
+          ⚠ Divergencia CVD — precio y volumen separados
+        </div>
+      )}
     </div>
   );
 }
@@ -1579,7 +1602,8 @@ export function App() {
   const [lastBacktest, setLastBacktest] = useState<BacktestReport | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [autoScan,    setAutoScan]    = useState(false);
-  const [lastGateLog, setLastGateLog] = useState<string>("");   // último motivo de skip
+  const [lastGateLog,  setLastGateLog]  = useState<string>("");   // último motivo de skip
+  const [qeGreeksMap,  setQeGreeksMap]  = useState<Record<string,{delta:number;ev:number;gammaExtreme:boolean;vegaCross:boolean}>>({});
   const [scanEverySec, setScanEverySec] = useState(20);
   // ── Circuit breaker ──────────────────────────────────────────────────────
   const [circuitOpen, setCircuitOpen] = useState(false);   // true = pausado por pérdida diaria
@@ -3533,7 +3557,9 @@ Ajustá los parámetros priorizando la descorrelación del portfolio.`;
     // Delta > 0.55 para LONG o < 0.45 para SHORT = momentum BS alineado
     // EV positivo = trade matemáticamente favorable bajo distribución log-normal
     // Este es el "supra-bot": los dos motores se votan entre sí
-    const bsGreeks = typeof greeksMap !== "undefined" ? (greeksMap as Record<string, {delta:number;ev:number;gammaExtreme:boolean;vegaCross:boolean}>)[currentAsset] : null;
+    // Usar griegas del Motor Quant BS si disponibles, sino las del v1
+    const bsGreeks = (qeGreeksMap?.[currentAsset] ?? 
+      (typeof greeksMap !== "undefined" ? (greeksMap as Record<string, {delta:number;ev:number;gammaExtreme:boolean;vegaCross:boolean}>)[currentAsset] : null));
     const bsConfirms = bsGreeks
       ? (finalDirection === "LONG"  ? bsGreeks.delta > 0.52 : bsGreeks.delta < 0.48)
       : false;
@@ -4369,8 +4395,9 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
         if (d.equity !== undefined) setMt5Equity(d.equity);
         void fetchMT5SymbolsDirect();
         await syncMT5State();
-        // Sync de datos inmediato con URL explícita — no esperar que useState se propague
         void syncRealData(currentUrl);
+        // Activar autoScan automáticamente al conectar el bridge
+        setAutoScan(true);
         pushToast(
           `✅ MT5 — Cta ${d.account} | $${d.balance?.toFixed(0)} | ${d.demo ? "DEMO ✓" : "⚠ REAL"} | ${d.broker ?? ""}`,
           "success"
@@ -5012,6 +5039,7 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
   }
 
   async function runAutoScan() {
+    console.log(`[AUTOSCAN] iniciando | assets=${assets.length} liveReady=${liveReady} mt5=${mt5Status}`);
     // Sincronizar datos frescos antes de escanear
     if (mt5Enabled && mt5Status === "connected") await syncRealData();
     const prof       = getSessionProfile();
@@ -5049,15 +5077,23 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
     const prevLen = openPositionsRef.current.length;
 
     // ── Scalping: todos ordenados por score ──────────────────────────────────
-    for (const { asset: a } of scored) {
+    const scalpLog: string[] = [];
+    for (const { asset: a, score: sc } of scored) {
+      if (!pricesRef.current[a]) { scalpLog.push(`${a}:nodata`); continue; }
       await createSignalAndExecute("scalping", a, false);
+      scalpLog.push(`${a}(${sc.toFixed(0)})`);
     }
+    console.log(`[AUTOSCAN] scalp [${prof.name}] → ${scalpLog.join(" | ")} | openPos=${openPositionsRef.current.length}`);
 
     // ── Intradía: solo en sesiones institucionales (no crypto-only) ─────────
     if (!prof.isCryptoOnly) {
-      for (const { asset: a } of scored) {
+      const intradLog: string[] = [];
+      for (const { asset: a, score: sc } of scored) {
+        if (!pricesRef.current[a]) { intradLog.push(`${a}:nodata`); continue; }
         await createSignalAndExecute("intradia", a, false);
+        intradLog.push(`${a}(${sc.toFixed(0)})`);
       }
+      console.log(`[AUTOSCAN] intradía → ${intradLog.join(" | ")}`);
     }
 
     // ── Pyramiding ───────────────────────────────────────────────────────────
@@ -5069,6 +5105,35 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
     const opened = openPositionsRef.current.length - prevLen;
     if (opened > 0) pushToast(`🤖 ${prof.emoji} ${prof.name}: ${opened} posición(es) abierta(s)`, "success");
   }
+
+  // ── WakeLock: evitar que la PC se suspenda mientras el bot está activo ───────
+  // Screen Wake Lock API — soportado en Chrome/Edge, ignorado en Firefox/Safari
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+
+  useEffect(() => {
+    if (!autoScan) {
+      // Liberar WakeLock cuando el bot está detenido
+      void wakeLockRef.current?.release().then(() => { wakeLockRef.current = null; });
+      return;
+    }
+    // Solicitar WakeLock cuando el bot está activo
+    const requestWakeLock = async () => {
+      try {
+        if ("wakeLock" in navigator) {
+          wakeLockRef.current = await (navigator as Navigator & {
+            wakeLock: { request: (type: string) => Promise<WakeLockSentinel> }
+          }).wakeLock.request("screen");
+          wakeLockRef.current.addEventListener("release", () => {
+            // Re-adquirir si fue liberado por el sistema (cambio de pestaña)
+            if (autoScan) void requestWakeLock();
+          });
+          console.log("[TraderLab] WakeLock activo — la PC no se suspenderá");
+        }
+      } catch { /* ignorar si no está soportado */ }
+    };
+    void requestWakeLock();
+    return () => { void wakeLockRef.current?.release(); };
+  }, [autoScan]);
 
   // Al arrancar: si mt5Enabled estaba guardado, reconectar automáticamente
   useEffect(() => {
@@ -5245,6 +5310,16 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
               🔴 CIRCUIT BREAKER — click para resetear
             </div>
           )}
+          {autoScan && (
+            <div style={{ padding: "3px 8px", borderRadius: 6,
+              background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.2)",
+              fontSize: 10, fontWeight: 700, color: "#10b981", display: "flex", alignItems: "center", gap: 4 }}
+              title="Bot activo — WakeLock activado si el navegador lo soporta">
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981",
+                animation: "pulse 1.5s infinite", display: "inline-block" }} />
+              BOT ON
+            </div>
+          )}
           <div style={{ fontSize: 10, color: liveReady ? "#10b981" : "#6b7280", display: "flex", alignItems: "center", gap: 4 }}>
             <span style={{ width: 5, height: 5, borderRadius: "50%", background: liveReady ? "#10b981" : "#6b7280", animation: liveReady ? "pulse 2s infinite" : "none", display: "inline-block" }} />
             {feedStatus}
@@ -5304,6 +5379,9 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
             { label: "Factor ganancia", value: (stats.profitFactor ?? 0).toFixed(2), color: stats.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
             { label: "Sharpe", value: (stats.sharpe ?? 0).toFixed(2), color: stats.sharpe >= 1 ? "#10b981" : "var(--text)" },
             { label: "Trades reales", value: realTrades.length, color: "var(--muted)" },
+            { label: "Activos broker",
+              value: availableSymbols.length > 0 ? `${availableSymbols.length}` : `${assets.length}`,
+              color: availableSymbols.length > 0 ? "#10b981" : "var(--muted)" },
             { label: mt5Enabled && mt5Margin !== null ? "Margen usado": "Margen usado",
               value: mt5Enabled && mt5Margin !== null ? `$${(mt5Margin ?? 0).toFixed(2)}` : money(openPositions.reduce((a,p)=>a+p.marginUsed,0)),
               color: "var(--muted)" },
@@ -5635,12 +5713,14 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
                 const hasWyk   = lastSignal.mode === "intradia" &&
                   (wyckoffMap[lastSignal.asset]?.bias === "distribution" ||
                    wyckoffMap[lastSignal.asset]?.bias === "accumulation");
+                // Floor y minRR sincronizados con createSignalAndExecute
+                const calib    = assetCalib[lastSignal.asset];
                 const floor    = lastSignal.mode === "scalping"
-                  ? Math.max(44, lrn.confidenceFloor - 4)
-                  : hasWyk ? Math.max(46, lrn.confidenceFloor - 4) : Math.max(50, lrn.confidenceFloor);
+                  ? Math.max(44, 48 + (calib?.floorAdj ?? 0))
+                  : Math.max(44, 50 + (calib?.floorAdj ?? 0));
                 const rr       = Math.abs(lastSignal.tp2 - lastSignal.entry) /
                                  Math.max(Math.abs(lastSignal.entry - lastSignal.stopLoss), 1e-9);
-                const minRR    = lastSignal.mode === "scalping" ? 1.5 : 1.3;
+                const minRR    = 1.0;   // igual que createSignalAndExecute
                 const confOk   = lastSignal.confidence >= floor;
                 const rrOk     = rr >= minRR;
                 const canTrade = confOk && rrOk;
@@ -7067,6 +7147,7 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
                 } catch { return false; }
               }}
               pushToast={pushToast}
+              onGreeksUpdate={setQeGreeksMap}
             />
           </ErrorBoundary>
         )}
