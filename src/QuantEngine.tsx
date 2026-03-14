@@ -1032,12 +1032,13 @@ Sé conciso y preciso.`;
               </span>
             </div>
           )}
-          {groqCalib && (
-            <span style={{ fontSize:10, padding:"3px 8px", borderRadius:6,
-              background:"rgba(99,102,241,0.1)", color:"#a5b4fc" }}>
-              🤖 {groqCalib.note?.slice(0,40) ?? "Groq calibrado"}
-            </span>
-          )}
+          <span style={{ fontSize:10, padding:"3px 8px", borderRadius:6,
+            background: groqCalib ? "rgba(99,102,241,0.1)" : "rgba(255,255,255,0.04)",
+            color: groqCalib ? "#a5b4fc" : "var(--muted)" }}>
+            {groqCalib
+              ? `🤖 ${groqCalib.note?.slice(0,40) ?? "IA calibrada"}`
+              : "🤖 Sin calibrar — presioná 'IA Ajustar pisos'"}
+          </span>
           <button onClick={()=>setAutoScan(p=>!p)}
             style={{ padding:"7px 12px", borderRadius:8, border:"none", cursor:"pointer",
               fontWeight:700, fontSize:11,
@@ -1052,12 +1053,15 @@ Sé conciso y preciso.`;
               opacity:scanning||!liveReady?0.5:1 }}>
             {scanning?"⟳ Escaneando...":"🔍 Escanear"}
           </button>
-          <button onClick={()=>void runGroqCalib()} disabled={!liveReady}
+          <button
+            onClick={()=>void runGroqCalib()}
+            disabled={!liveReady}
+            title="Envía el estado actual del motor (griegas, walk-forward, trades) a IA para ajustar floors y sizing automáticamente"
             style={{ padding:"7px 12px", borderRadius:8, border:"none", cursor:"pointer",
               fontWeight:700, fontSize:11,
               background:"rgba(99,102,241,0.12)", color:"#a5b4fc",
               opacity:!liveReady?0.5:1 }}>
-            🤖 Calibrar
+            🤖 IA Ajustar pisos
           </button>
         </div>
       </div>
