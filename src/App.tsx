@@ -4101,107 +4101,48 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
       if (!autoLabel) pushToast(`⚡ ${targetAsset} ${signal.direction}: correlado con posición abierta — skip`, "warning");
       return;
     }
-    // ── Guard sesión basado en perfil ────────────────────────────────────────
-    if (mode === "scalping" && !sessionOverride) {
-      const sessionProf = getSessionProfile();
-      const hour        = new Date().getUTCHours();
-      const isCryptoAsset = ["BTCUSD","ETHUSD"].includes(targetAsset);
-      const isMetalAsset  = ["XAUUSD","XAGUSD"].includes(targetAsset);
 
-      // Fuera de NY: solo crypto
-      if (sessionProf.isCryptoOnly && !isCryptoAsset) {
-        if (!autoLabel) pushToast(
-          `${sessionProf.emoji} ${sessionProf.name}: ${targetAsset} bloqueado (solo crypto fuera de NY)`,
-          "warning"
-        );
-        return;
-      }
-      // Hora muerta global crypto (02-07 UTC) — única excepción para crypto
-      if (isCryptoAsset && hour >= 2 && hour < 7) {
-        if (!autoLabel) pushToast(`⏸ ${targetAsset}: hora muerta 02-07 UTC`, "warning");
-        return;
-      }
-      // Metales fuera de horario institucional
-      if (isMetalAsset && !["NY","London"].includes(sessionProf.name)) {
-        if (!autoLabel) pushToast(
-          `⏸ ${targetAsset}: metales solo en NY/London (ahora ${sessionProf.name})`,
-          "warning"
-        );
-        return;
-      }
-    }
-    // ── Decisión primaria: motor cuantitativo multi-factor ─────────────────
-    const lrnSnap  = learningRef.current;
-    const prof     = getSessionProfile();
-    const regime   = regimeRef.current[targetAsset] ?? calcRegime(targetAsset);
+    // ── Decisión: confidence + RR — todo lo demás ya está integrado en confidence ──
     const calib    = assetCalib[targetAsset];
+    const prof     = getSessionProfile();
     const hasManualOverrides = !!(overrides?.tp || overrides?.sl);
     const rrActual = Math.abs(signal.tp2 - signal.entry) /
                      Math.max(Math.abs(signal.entry - signal.stopLoss), 1e-9);
 
-    // ── Multi-factor vote ─────────────────────────────────────────────────────
-    const mfv = multifactorVote(targetAsset, mode);
-
-    // ── Z-score normalización ─────────────────────────────────────────────────
-    const confNorm = normalizeConfidenceZScore(targetAsset, signal.confidence);
-
-    // ── Floor adaptativo: Groq > walk-forward > régimen > sesión > base ───────
-    const hasWyckoffBias = mode === "intradia" &&
-      (wyckoffMap[targetAsset]?.bias === "distribution" ||
-       wyckoffMap[targetAsset]?.bias === "accumulation");
-    const groqFloor  = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)
-      ? (groqCalib.floorOverrides[targetAsset] ?? null) : null;
-    // Floors más permisivos sin historial (calib nulo = 0 trades = no penalizar)
-    const baseFloor  = mode === "scalping" ? 40 : 44;
-    const rawFloor   = baseFloor + regime.confAdjust + (hasWyckoffBias ? -4 : 0)
-                     + (calib?.floorAdj ?? 0) + prof.confAdjust;
-    const floor      = groqFloor ?? Math.max(36, Math.min(rawFloor, 65));
-
-    // ── NaN guard ─────────────────────────────────────────────────────────────
+    // NaN guard
     if (isNaN(signal.confidence) || isNaN(rrActual)) {
       console.error(`[TraderLab] NaN — conf=${signal.confidence} RR=${rrActual} ${targetAsset}`);
-      pushToast(`⚠ ${targetAsset}: señal NaN — bridge ok?`, "error");
+      if (!autoLabel) pushToast(`⚠ ${targetAsset}: señal NaN — bridge ok?`, "error");
       return;
     }
 
-    // ── Regime strategy gate: rango intradía → solo mean-reversion ────────────
-    if (mode === "intradia" && regime.strategy === "ranging" && !hasManualOverrides) {
-      const rsiOK     = (signal.direction === "LONG" && (indicatorsMap[targetAsset]?.rsi ?? 50) < 38)
-                     || (signal.direction === "SHORT" && (indicatorsMap[targetAsset]?.rsi ?? 50) > 62);
-      if (!rsiOK && !hasWyckoffBias) {
-        if (!autoLabel) pushToast(`🔲 ${targetAsset}: rango — sin setup MR (RSI=${(indicatorsMap[targetAsset]?.rsi??50).toFixed(0)})`, "warning");
-        return;
-      }
-    }
+    // Confidence ya integra: MFV, régimen, Wyckoff, Order Flow, RSI, VWAP, reversal
+    // Floor: base 52 scalp / 54 intradía → ajuste walk-forward → ajuste Groq
+    const groqFloor = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)
+      ? (groqCalib.floorOverrides?.[targetAsset] ?? null) : null;
+    const baseFloor = mode === "scalping" ? 52 : 54;
+    const floor     = groqFloor ?? Math.max(48, baseFloor + (calib?.floorAdj ?? 0) + prof.confAdjust);
 
-    // ── Multi-factor gate ─────────────────────────────────────────────────────
-    if (!hasManualOverrides && !mfv.passed) {
-      if (!autoLabel) pushToast(`⏭ ${targetAsset}: ${mfv.votes.toFixed(1)}/4 factores | ${mfv.detail}`, "warning");
+    if (!hasManualOverrides && signal.confidence < floor) {
+      if (!autoLabel) pushToast(
+        `⏭ ${targetAsset} ${mode} conf=${signal.confidence.toFixed(0)} < piso=${floor.toFixed(0)} | ${signal.rationale.slice(0,60)}`,
+        "warning"
+      );
       return;
     }
 
-    // ── Confidence gate (z-score normalizado) ────────────────────────────────
-    if (!hasManualOverrides && confNorm < floor) {
-      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — conf ${confNorm.toFixed(0)}% < ${floor.toFixed(0)} | régimen:${regime.regime} | MFV:${mfv.votes.toFixed(1)}/4`, "warning");
-      return;
-    }
-
-    // ── RR mínimo adaptativo por régimen ──────────────────────────────────────
-    const minRR = mode === "scalping"
-      ? (regime.regime === "trending_up" || regime.regime === "trending_down" ? 1.0 : 1.2)
-      : (regime.strategy === "ranging" ? 1.0 : 1.1);
-    if (rrActual < minRR) {
-      if (!autoLabel) pushToast(`⏭ ${targetAsset} SKIP — RR ${rrActual.toFixed(2)} < ${minRR} | ${regime.note}`, "warning");
+    // RR mínimo: 1.0× (cualquier trade positivo es válido)
+    const minRR = 1.0;
+    if (!hasManualOverrides && rrActual < minRR) {
+      if (!autoLabel) pushToast(`⏭ ${targetAsset} RR=${rrActual.toFixed(2)} < 1.0 — SL muy ancho`, "warning");
       return;
     }
 
     // Log diagnóstico F12
     console.log(
-      `[SIGNAL] ${targetAsset} ${mode} | conf=${confNorm.toFixed(1)}%(piso=${floor})` +
-      ` | RR=${rrActual.toFixed(2)} | MFV=${mfv.votes.toFixed(1)}/4[${mfv.direction}]` +
-      ` | régimen=${regime.regime}(ATR×${regime.atrRatio.toFixed(2)})` +
-      ` | kelly=${calib?.kellyF?.toFixed(2)??"0.50"} WR=${calib?(calib.wr*100).toFixed(0)+"%" : "N/A"}` +
-      ` | groqFloor=${groqFloor ?? "local"} | ${signal.rationale?.slice(0,50)}`
+      `[SIGNAL] ✅ ${targetAsset} ${mode} | conf=${signal.confidence.toFixed(1)} (piso=${floor})` +
+      ` | RR=${rrActual.toFixed(2)} | kelly=${calib?.kellyF?.toFixed(2)??"0.50"}` +
+      ` | groqFloor=${groqFloor ?? "local"} | ${signal.rationale?.slice(0,60)}`
     );
 
     // ── Groq como enricher puro (no veta, no bloquea, solo enriquece) ─────────
