@@ -3528,7 +3528,24 @@ Ajustá los parámetros priorizando la descorrelación del portfolio.`;
     const reversalBoost = reversalData.score >= 7 ? 8
                         : reversalData.score >= 5 ? 4
                         : reversalData.score >= 3 ? 1 : 0;
-    const boostedConfidence = clamp(finalConfidence + reversalBoost, 40, 98);
+    // ── Coordinador v1×BS: si las griegas Black-Scholes confirman dirección ──────
+    // Delta > 0.55 para LONG o < 0.45 para SHORT = momentum BS alineado
+    // EV positivo = trade matemáticamente favorable bajo distribución log-normal
+    // Este es el "supra-bot": los dos motores se votan entre sí
+    const bsGreeks = typeof greeksMap !== "undefined" ? (greeksMap as Record<string, {delta:number;ev:number;gammaExtreme:boolean;vegaCross:boolean}>)[currentAsset] : null;
+    const bsConfirms = bsGreeks
+      ? (finalDirection === "LONG"  ? bsGreeks.delta > 0.52 : bsGreeks.delta < 0.48)
+      : false;
+    const bsEVpositive = bsGreeks ? bsGreeks.ev > 0 : false;
+    const bsGammaExt   = bsGreeks ? bsGreeks.gammaExtreme : false;
+    const bsVegaCross  = bsGreeks ? bsGreeks.vegaCross     : false;
+    const bsBoost = bsConfirms
+      ? (bsEVpositive ? 12 : 6)   // BS confirma + EV positivo → +12, solo dirección → +6
+      + (bsGammaExt  ? 4  : 0)   // Gamma extrema (punto inflexión) → +4
+      + (bsVegaCross ? 4  : 0)   // Vega cross (expansión inminente) → +4
+      : 0;
+
+    const boostedConfidence = clamp(finalConfidence + reversalBoost + bsBoost, 40, 98);
 
     return {
       asset: currentAsset, mode: currentMode, finalDirection, entry, stopLoss,
@@ -4120,8 +4137,10 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
     // Floor: base 52 scalp / 54 intradía → ajuste walk-forward → ajuste Groq
     const groqFloor = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)
       ? (groqCalib.floorOverrides?.[targetAsset] ?? null) : null;
-    const baseFloor = mode === "scalping" ? 52 : 54;
-    const floor     = groqFloor ?? Math.max(48, baseFloor + (calib?.floorAdj ?? 0) + prof.confAdjust);
+    // Floor permisivo — confidence base=54 debe poder pasar sin historial
+    // Groq puede subir o bajar ±5 pts según contexto macro
+    const baseFloor = mode === "scalping" ? 48 : 50;
+    const floor     = groqFloor ?? Math.max(44, baseFloor + (calib?.floorAdj ?? 0) + prof.confAdjust);
 
     if (!hasManualOverrides && signal.confidence < floor) {
       if (!autoLabel) pushToast(
@@ -4138,11 +4157,13 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
       return;
     }
 
-    // Log diagnóstico F12
+    // Log diagnóstico F12 — incluye desglose completo
     console.log(
-      `[SIGNAL] ✅ ${targetAsset} ${mode} | conf=${signal.confidence.toFixed(1)} (piso=${floor})` +
-      ` | RR=${rrActual.toFixed(2)} | kelly=${calib?.kellyF?.toFixed(2)??"0.50"}` +
-      ` | groqFloor=${groqFloor ?? "local"} | ${signal.rationale?.slice(0,60)}`
+      `[SIGNAL] ✅ ${targetAsset} ${mode}` +
+      ` | conf=${signal.confidence.toFixed(0)} piso=${floor}` +
+      ` | RR=${rrActual.toFixed(2)}` +
+      ` | BS: delta=${bsGreeks?.delta.toFixed(3)??"n/a"} EV=${bsGreeks?.ev.toFixed(4)??"n/a"} boost=+${bsBoost}` +
+      ` | ${signal.rationale?.slice(0,60)}`
     );
 
     // ── Groq como enricher puro (no veta, no bloquea, solo enriquece) ─────────
@@ -4179,7 +4200,8 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
       : signal.wyckoffSizeMult;                         // tendencia → usar mult Wyckoff directo
     // ── Kelly × Regime × Correlación × Groq sizing ──────────────────────────
     const kellyMult      = calcKellySize(targetAsset, rrActual);         // 0.1–1.0
-    const regimeSizeMult = regime.sizeAdjust;                             // 0.7–1.2
+    const regimeNow      = regimeRef.current[targetAsset] ?? { sizeAdjust: 1.0 };
+    const regimeSizeMult = regimeNow.sizeAdjust ?? 1.0;                  // 0.7–1.2
     const corrSizeMult   = getCorrSizeMultiplier(targetAsset, openPositionsRef.current);  // 0.4–1.0
     const groqSizeMult   = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)
       ? (groqCalib.sizeOverrides[targetAsset] ?? 1.0) : 1.0;
@@ -5097,17 +5119,36 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
       {/* Nav */}
       <nav style={{ position: "sticky", top: 0, zIndex: 100, background: "rgba(10,11,16,0.96)", backdropFilter: "blur(16px)", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", padding: "0 24px", height: 52, gap: 4 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginRight: 20 }}>
-          <span style={{ fontSize: 17 }}>⚡</span>
-          <span style={{ fontWeight: 800, fontSize: 14, letterSpacing: "-0.02em" }}>TraderLab</span>
-          <span style={{ fontSize: 11, color: "var(--muted)", background: "rgba(255,255,255,0.06)", padding: "2px 5px", borderRadius: 4, fontWeight: 600 }}>v5</span>
+          <span style={{ fontWeight: 900, fontSize: 14, letterSpacing: "-0.03em",
+            background: "linear-gradient(135deg,#818cf8,#c4b5fd)",
+            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>TraderLab</span>
+          <span style={{ fontSize: 10, color: "var(--muted)", background: "rgba(255,255,255,0.05)",
+            padding: "2px 6px", borderRadius: 4, fontWeight: 700, letterSpacing: "0.04em" }}>v8</span>
         </div>
         <div className="nav-tabs" style={{ flex: 1 }}>
           {NAV.map(t => (
-            <button key={t.id} onClick={() => setAppTab(t.id)}
-              className={`nav-tab${appTab === t.id ? " active" : ""}`}>
-              {t.icon} {t.label}
-              {t.id === "trading" && openPositions.length > 0 && <span style={{ background: "#10b981", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: "50%", width: 15, height: 15, display: "flex", alignItems: "center", justifyContent: "center" }}>{openPositions.length}</span>}
-            </button>
+            <React.Fragment key={t.id}>
+              {t.id === "quant" && (
+                <div style={{ width: 1, height: 20, background: "var(--border-md)",
+                  alignSelf: "center", margin: "0 4px", flexShrink: 0 }} />
+              )}
+              <button onClick={() => setAppTab(t.id)}
+                className={`nav-tab${appTab === t.id ? " active" : ""}${t.id === "quant" ? " quant-tab" : ""}`}
+                style={t.id === "quant" && appTab === t.id ? {
+                  background: "rgba(20,184,166,0.12)",
+                  color: "#5eead4",
+                  borderColor: "rgba(20,184,166,0.28)"
+                } : t.id === "quant" ? { color: "#5eead4" } : {}}>
+                {t.icon} {t.label}
+                {t.id === "trading" && openPositions.length > 0 && (
+                  <span style={{ background: "#10b981", color: "#fff", fontSize: 10,
+                    fontWeight: 800, borderRadius: "50%", width: 14, height: 14,
+                    display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {openPositions.length}
+                  </span>
+                )}
+              </button>
+            </React.Fragment>
           ))}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -5205,9 +5246,9 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
                 ? (mt5MarginLevel > 500 ? "#10b981" : mt5MarginLevel > 200 ? "#f59e0b" : "#ef4444")
                 : (openPositions.length > 0 || mt5Positions.length > 0 ? "#f59e0b" : "var(--muted)") },
           ].map(({ label, value, color }) => (
-            <div key={label} className="metric" style={{ flex: "0 0 auto", minWidth: 105 }}>
-              <span className="label" style={{ fontSize: 11.5, fontWeight: 600 }}>{label}</span>
-              <strong style={{ color, fontSize: 16 }}>{value}</strong>
+            <div key={label} className="hm-item">
+              <span className="hm-label">{label}</span>
+              <span className="hm-value" style={{ color }}>{value}</span>
             </div>
           ))}
           {/* Curva de equity — visible siempre en el header */}
@@ -5227,15 +5268,7 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
 
           {/* ── Banner bridge desconectado ── */}
           {!liveReady && (
-            <div style={{
-              marginBottom: 14, padding: "14px 20px",
-              borderRadius: 12,
-              background: mt5Enabled && mt5Status === "connected"
-                ? "rgba(245,158,11,0.08)"
-                : "rgba(239,68,68,0.08)",
-              border: `1px solid ${mt5Enabled && mt5Status === "connected" ? "rgba(245,158,11,0.3)" : "rgba(239,68,68,0.25)"}`,
-              display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
-            }}>
+            <div className={`bridge-banner ${mt5Enabled && mt5Status === "connected" ? "warn" : mt5Status === "testing" ? "connecting" : "error"}`}>
               <span style={{ fontSize: 22 }}>
                 {mt5Enabled && mt5Status === "testing" ? "⏳" : mt5Enabled ? "⚠️" : "🔌"}
               </span>
