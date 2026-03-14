@@ -1539,7 +1539,7 @@ export function App() {
   const [assetIntelligence, setAssetIntelligence] = useState<Record<string, AssetIntelligence>>({});
   const [correlationMatrix, setCorrelationMatrix] = useState<Record<string, Record<string, number>>>({});
   const [availableSymbols, setAvailableSymbols] = useState<Array<{name:string;brokerName?:string;category:AssetCategory;spread:number;contractSize:number;digits?:number;volumeMin?:number}>>([]);
-  const [assets, setAssets] = useState<Asset[]>(["BTCUSD","ETHUSD","XAGUSD","XAUUSD"]);
+  const [assets, setAssets] = useState<Asset[]>(Object.keys(ASSET_CATALOG) as Asset[]);
   const assetIntelRef  = useRef<Record<string, AssetIntelligence>>({});
   const correlationRef = useRef<Record<string, Record<string, number>>>({});
   const [appTab, setAppTab] = useState<AppTab>("trading");
@@ -1578,7 +1578,8 @@ export function App() {
   const [backtestSize, setBacktestSize] = useState(40);
   const [lastBacktest, setLastBacktest] = useState<BacktestReport | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [autoScan, setAutoScan] = useState(false);
+  const [autoScan,    setAutoScan]    = useState(false);
+  const [lastGateLog, setLastGateLog] = useState<string>("");   // último motivo de skip
   const [scanEverySec, setScanEverySec] = useState(20);
   // ── Circuit breaker ──────────────────────────────────────────────────────
   const [circuitOpen, setCircuitOpen] = useState(false);   // true = pausado por pérdida diaria
@@ -4043,24 +4044,27 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
   }
 
   async function createSignalAndExecute(mode: Mode, targetAsset: Asset, autoLabel = false, overrides?: { tp?: number; sl?: number }) {
-    if (!liveReady) {
-      if (!mt5Enabled) {
-        if (!autoLabel) pushToast("⚠ Activá el bridge MT5 en ⚙ Config antes de operar", "warning");
-        return;
-      }
-      // Intentar reconectar + sync automáticamente (race condition al arrancar)
-      if (!autoLabel) pushToast("⟳ Reconectando bridge y sincronizando...", "info");
+    // ── Modo: real (MT5) o simulado (sin bridge) ─────────────────────────────
+    // El bot SIEMPRE puede generar señales y operar en simulación
+    // Si MT5 está conectado, ejecuta órdenes reales en el broker
+    const isMT5Live = mt5Enabled && (mt5Status === "connected" || mt5StatusRef.current === "connected");
+
+    if (!liveReady && isMT5Live) {
+      // Bridge conectado pero datos no frescos — reconectar silenciosamente
       try {
-        const ok = await testMT5Bridge();
-        if (ok) await syncRealData(mt5Url);
+        await syncRealData(mt5Url);
       } catch { /* ignorar */ }
-      // Verificar liveReady después del intento
-      if (!liveReady && mt5StatusRef.current !== "connected") {
-        if (!autoLabel) pushToast("⚠ Bridge no responde — verificá que bridge.py esté corriendo", "warning");
-        return;
-      }
-      // Si el bridge conectó pero liveReady todavía false (setState async), continuar igual
-      // Los datos ya están en los refs
+    }
+
+    if (!liveReady && !isMT5Live) {
+      // Sin datos en absoluto — pedir al usuario que conecte
+      if (!autoLabel) pushToast(
+        "⚠ Sin datos de mercado — conectá el bridge MT5 en ⚙ Config, o activá el auto-scan para simular",
+        "warning"
+      );
+      // Permitir continuar en modo demo solo si hay al menos precios básicos
+      const hasPrices = Object.keys(pricesRef.current).length > 0;
+      if (!hasPrices) return;
     }
     if (circuitOpenRef.current) {
       if (!autoLabel) pushToast("🔴 Circuit breaker activo — límite de pérdida diaria alcanzado. Reactivá el autoScan manualmente cuando estés listo.", "error");
@@ -4068,7 +4072,11 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
     }
 
     // ── Log de diagnóstico del flujo ─────────────────────────────────────────
-    console.log(`[FLOW] asset=${targetAsset} mode=${mode} liveReady=${liveReady} mt5=${mt5Status} circuit=${circuitOpenRef.current}`);
+    console.log(
+      `[FLOW] ${targetAsset} ${mode}` +
+      ` | liveReady=${liveReady} mt5=${mt5Status} isMT5Live=${isMT5Live}` +
+      ` | circuit=${circuitOpenRef.current} openPos=${openPositionsRef.current.length}`
+    );
     // ── Verificar límites diarios antes de generar señal ─────────────────────
     if (mode === "scalping") {
       const risk = calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain);
@@ -4143,17 +4151,18 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
     const floor     = groqFloor ?? Math.max(44, baseFloor + (calib?.floorAdj ?? 0) + prof.confAdjust);
 
     if (!hasManualOverrides && signal.confidence < floor) {
-      if (!autoLabel) pushToast(
-        `⏭ ${targetAsset} ${mode} conf=${signal.confidence.toFixed(0)} < piso=${floor.toFixed(0)} | ${signal.rationale.slice(0,60)}`,
-        "warning"
-      );
+      const msg = `⏭ ${targetAsset} ${mode} conf=${signal.confidence.toFixed(0)} < piso=${floor.toFixed(0)}`;
+      setLastGateLog(`${msg} | ${signal.rationale.slice(0,50)}`);
+      if (!autoLabel) pushToast(`${msg} | ${signal.rationale.slice(0,50)}`, "warning");
       return;
     }
 
     // RR mínimo: 1.0× (cualquier trade positivo es válido)
     const minRR = 1.0;
     if (!hasManualOverrides && rrActual < minRR) {
-      if (!autoLabel) pushToast(`⏭ ${targetAsset} RR=${rrActual.toFixed(2)} < 1.0 — SL muy ancho`, "warning");
+      const msg = `⏭ ${targetAsset} RR=${rrActual.toFixed(2)} < 1.0`;
+      setLastGateLog(msg);
+      if (!autoLabel) pushToast(`${msg} — SL muy ancho`, "warning");
       return;
     }
 
@@ -4165,6 +4174,7 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
       ` | BS: delta=${bsGreeks?.delta.toFixed(3)??"n/a"} EV=${bsGreeks?.ev.toFixed(4)??"n/a"} boost=+${bsBoost}` +
       ` | ${signal.rationale?.slice(0,60)}`
     );
+    setLastGateLog(""); // señal aprobada — limpiar último gate
 
     // ── Groq como enricher puro (no veta, no bloquea, solo enriquece) ─────────
     // En scalping: NUNCA esperar respuesta — latencia > horizonte de señal
@@ -4251,20 +4261,31 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
       pushToast(`⚠️ Posición demasiado grande: $${marginUsed.toFixed(0)} vs equity $${realEquity.toFixed(0)}`, "warning");
       return;
     }
-    const multTag = wyckoffMult > 1 ? ` | Wyckoff ×${wyckoffMult.toFixed(2)}` : "";
-    if (mt5Enabled && mt5Status === "connected") {
-      // MT5 activo: primero ejecutar en el broker, solo agregar al panel si confirma
+    const multTag     = wyckoffMult > 1 ? ` | Wyckoff ×${wyckoffMult.toFixed(2)}` : "";
+    const bsTag       = bsBoost > 0 ? ` | BS+${bsBoost}` : "";
+    const modeIcon    = isMT5Live ? "🚀 MT5" : "🟡 SIM";
+
+    if (isMT5Live) {
+      // ── Ejecutar en broker real ─────────────────────────────────────────────
       await sendToMT5(signal, size, marginUsed, (ticket, execPrice) => {
         const entry = execPrice ?? signal.entry;
-        setOpenPositions(prev => [...prev, { id: ticket ?? Date.now(), signal: { ...signal, entry }, size, marginUsed, openedAt: new Date().toISOString(), peak: entry, trough: entry }]);
-        const reversalTag = signal.isReversalSetup ? ` | 🔄 GIRO score=${signal.reversalScore}` : "";
-        const wyckoffTag  = signal.wyckoffSizeMult !== 1.0 ? ` | Wyckoff×${(signal.wyckoffSizeMult ?? 0).toFixed(1)}` : "";
-        if (!autoLabel) pushToast(`🚀 MT5 #${ticket} ${signal.asset} ${signal.direction} @ ${entry.toFixed(2)} | conf ${(signal.confidence ?? 0).toFixed(0)}%${multTag}${reversalTag}${wyckoffTag}`, "success");
+        const pos = { id: ticket ?? Date.now(), signal: { ...signal, entry },
+          size, marginUsed, openedAt: new Date().toISOString(), peak: entry, trough: entry };
+        setOpenPositions(prev => [...prev, pos]);
+        if (!autoLabel) pushToast(
+          `${modeIcon} #${ticket} ${signal.asset} ${signal.direction} @ ${entry.toFixed(signal.entry > 1 ? 2 : 5)} | conf ${signal.confidence.toFixed(0)}${bsTag}`,
+          "success"
+        );
       });
     } else {
-      // Sin MT5: panel simulado
-      setOpenPositions(prev => [...prev, { id: Date.now(), signal, size, marginUsed, openedAt: new Date().toISOString(), peak: signal.entry, trough: signal.entry }]);
-      if (!autoLabel) pushToast(`🚀 ${signal.asset} ${signal.direction} @ ${(signal.entry ?? 0).toFixed(2)} | conf ${(signal.confidence ?? 0).toFixed(0)}%${multTag}${signal.aiRationale ? " | " + signal.aiRationale : ""}`, "success");
+      // ── Modo simulación — agregar al panel sin confirmación del broker ──────
+      const simPos = { id: Date.now(), signal, size, marginUsed,
+        openedAt: new Date().toISOString(), peak: signal.entry, trough: signal.entry };
+      setOpenPositions(prev => [...prev, simPos]);
+      if (!autoLabel) pushToast(
+        `${modeIcon} ${signal.asset} ${signal.direction} @ ${(signal.entry).toFixed(signal.entry > 1 ? 2 : 5)} | conf ${signal.confidence.toFixed(0)}${bsTag}${multTag}`,
+        "info"   // info (no success) para distinguir de orden real
+      );
     }
   }
 
@@ -4371,22 +4392,70 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
   }
 
   // fetchMT5SymbolsDirect — sin guard mt5Status (para llamar justo después de conectar)
+  // fetchMT5SymbolsDirect: alias para llamar fetchMT5Symbols
+  // sin esperar que mt5Status state se propague (usa el ref síncrono)
   async function fetchMT5SymbolsDirect() {
+    // mt5StatusRef ya está en "connected" — llamar fetchMT5Symbols directamente
+    // sobreescribiendo el guard de estado
     try {
       const r = await fetch(`${mt5Url}/symbols`, { signal: AbortSignal.timeout(8000) });
       if (!r.ok) return;
       const data = await r.json() as {
         symbols: Array<{
-          name: string; spread: number; bid: number; ask: number;
-          digits: number; contract_size: number;
+          name: string; description?: string;
+          spread: number; bid: number; ask: number;
+          trade_mode?: number; digits: number; contract_size: number;
           volume_min: number; volume_step: number;
-          trade_allowed: boolean;
+          currency_base?: string; currency_profit?: string;
+          trade_allowed: boolean; visible?: boolean;
         }>;
+        resolved_map?: Record<string,string>;
         total?: number;
       };
-      const syms = data.symbols ?? [];
-      pushToast(`📋 ${syms.length} símbolos cargados del broker`, "info");
-    } catch { /* ignorar */ }
+      if (!data.symbols?.length) return;
+
+      const brokerToTL: Record<string,string> = {};
+      if (data.resolved_map) {
+        Object.entries(data.resolved_map).forEach(([tl, broker]) => { brokerToTL[broker] = tl; });
+      }
+
+      const tradeable = data.symbols.filter(s => s.bid > 0 && s.trade_allowed !== false);
+      const mapped = tradeable.map(s => {
+        const tlName = brokerToTL[s.name] ?? s.name;
+        const known  = ASSET_CATALOG[tlName] ?? ASSET_CATALOG[s.name];
+        const cat    = known?.category ?? inferCategoryFromSymbol(
+          s.name, s.description ?? "", s.currency_base ?? "", s.currency_profit ?? ""
+        );
+        return { name: tlName, brokerName: s.name, category: cat,
+          spread: s.spread, contractSize: s.contract_size,
+          digits: s.digits, volumeMin: s.volume_min };
+      });
+
+      setAvailableSymbols(mapped);
+
+      const tlNames = mapped.map(m => m.name);
+      setAssets(() => {
+        const base         = ["BTCUSD","ETHUSD","XAUUSD","XAGUSD"];
+        const fromCatalog  = tlNames.filter(n => ASSET_CATALOG[n] && !base.includes(n));
+        const fromBroker   = tlNames.filter(n => !ASSET_CATALOG[n] && !base.includes(n));
+        const all = [...new Set([...base, ...fromCatalog, ...fromBroker])];
+        console.log(`[ASSETS] ${all.length} activos del broker:`, all.join(", "));
+        return all as Asset[];
+      });
+
+      // Enriquecer catálogo con parámetros reales del broker
+      mapped.forEach(m => {
+        if (!ASSET_CATALOG[m.name]) {
+          (ASSET_CATALOG as Record<string, typeof ASSET_CATALOG[string]>)[m.name] = {
+            category: m.category, digits: m.digits ?? 5,
+            contractSize: m.contractSize ?? 1, leverage: 50,
+            minAtr: 0.0001, spreadPct: 0.025,
+            sessions: ["NY","London","Asia","Post-NY"],
+          };
+        }
+      });
+      pushToast(`📡 ${mapped.length} activos del broker cargados`, "info");
+    } catch(e) { console.warn("[fetchMT5SymbolsDirect]", e); }
   }
 
   // ── MT5: enviar señal de apertura ─────────────────────────────────────────
@@ -5414,9 +5483,35 @@ Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
                   if (manualTp && Number(manualTp) > 0) ov.tp = Number(manualTp);
                   if (manualSl && Number(manualSl) > 0) ov.sl = Number(manualSl);
                   void createSignalAndExecute(tab, asset, false, Object.keys(ov).length ? ov : undefined);
-                }}>⚡ Generar + ejecutar señal</button>
-                <button className="btn-secondary" onClick={() => void syncRealData()} disabled={isSyncing}>{isSyncing ? "⟳ Sincronizando..." : "↻ Sync MT5 Bridge"}</button>
-                <button className="btn-secondary" onClick={() => void runAutoScan()}>🔍 Escanear todos</button>
+                }}>⚡ Señal</button>
+                <button className="btn-secondary" onClick={() => void runAutoScan()}>🔍 Escanear</button>
+                <button className="btn-secondary" onClick={() => void syncRealData()} disabled={isSyncing}>{isSyncing ? "⟳" : "↻"} Sync</button>
+
+                {/* ── Panel diagnóstico motor ── */}
+                <div style={{ marginTop:8, padding:"8px 10px", borderRadius:8,
+                  background: liveReady ? "rgba(16,185,129,0.05)" : "rgba(245,158,11,0.05)",
+                  border:`1px solid ${liveReady ? "rgba(16,185,129,0.18)" : "rgba(245,158,11,0.18)"}`,
+                  fontSize:11 }}>
+                  <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
+                    <span style={{ fontWeight:700 }}>{liveReady ? "🟢 Listo" : "🟡 Sin datos"}</span>
+                    <span style={{ padding:"1px 7px", borderRadius:99, fontSize:10, fontWeight:700,
+                      background: mt5Enabled && mt5Status === "connected" ? "rgba(239,68,68,0.15)" : "rgba(255,255,255,0.07)",
+                      color: mt5Enabled && mt5Status === "connected" ? "#fca5a5" : "var(--muted)" }}>
+                      {mt5Enabled && mt5Status === "connected" ? "● REAL" : "○ SIM"}
+                    </span>
+                    <span style={{ color:"var(--muted)" }}>piso: {tab === "scalping" ? 48 : 50} | activos: {assets.length}</span>
+                  </div>
+                  {lastGateLog && (
+                    <p style={{ color:"#fbbf24", fontSize:10, marginTop:4, lineHeight:1.4 }}>
+                      ⚡ {lastGateLog}
+                    </p>
+                  )}
+                  {lastSignal && (
+                    <p style={{ color:"var(--muted)", fontSize:10, marginTop:3 }}>
+                      Última: {lastSignal.asset} {lastSignal.direction} conf={lastSignal.confidence?.toFixed(0)}
+                    </p>
+                  )}
+                </div>
               </div>
               <div className="card">
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
