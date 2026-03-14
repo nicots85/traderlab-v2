@@ -1,598 +1,1484 @@
-// ═══════════════════════════════════════════════════════════════════════════════
-// QUANTENGINE v2 — Motor Black-Scholes × Wyckoff
-// Δ·Γ·Θ·V·ρ · ∫EV · Wyckoff MM · Kelly · Walk-Forward · Multi-TP · Groq Calib
-// ═══════════════════════════════════════════════════════════════════════════════
+import QuantEngine from "./QuantEngine";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 
-import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Categorías de activos ────────────────────────────────────────────────────
+type AssetCategory = "crypto" | "metals" | "forex_major" | "forex_minor" | "indices" | "energy" | "stocks" | "commodities" | "other";
 
-// ─── Tipos ────────────────────────────────────────────────────────────────────
-type QMode = "scalp" | "intradia" | "swing";
-type QDir  = "LONG" | "SHORT" | "NEUTRAL";
+// Asset es dinámico — string para soportar cualquier símbolo MT5
+type Asset = string;
+
+// Activos primarios con parámetros fine-tuned
+const PRIMARY_ASSETS = ["BTCUSD","ETHUSD","XAUUSD","XAGUSD"] as const;
+type PrimaryAsset = typeof PRIMARY_ASSETS[number];
+
+// Catálogo por categoría — activos conocidos con parámetros optimizados
+const ASSET_CATALOG: Record<string, { category: AssetCategory; digits: number; contractSize: number; leverage: number; minAtr: number; spreadPct: number; sessions: string[] }> = {
+  // ── Crypto ────────────────────────────────────────────────────────────────
+  BTCUSD:   { category:"crypto",      digits:2,  contractSize:1,     leverage:100, minAtr:50,    spreadPct:0.012, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  ETHUSD:   { category:"crypto",      digits:2,  contractSize:1,     leverage:100, minAtr:2,     spreadPct:0.015, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  BNBUSD:   { category:"crypto",      digits:2,  contractSize:1,     leverage:50,  minAtr:0.5,   spreadPct:0.020, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  SOLUSD:   { category:"crypto",      digits:3,  contractSize:1,     leverage:50,  minAtr:0.2,   spreadPct:0.020, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  XRPUSD:   { category:"crypto",      digits:5,  contractSize:1,     leverage:50,  minAtr:0.001, spreadPct:0.025, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  ADAUSD:   { category:"crypto",      digits:5,  contractSize:1,     leverage:50,  minAtr:0.001, spreadPct:0.025, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  DOGEUSD:  { category:"crypto",      digits:5,  contractSize:1,     leverage:20,  minAtr:0.0001,spreadPct:0.030, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  LTCUSD:   { category:"crypto",      digits:2,  contractSize:1,     leverage:50,  minAtr:0.1,   spreadPct:0.022, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  AVAXUSD:  { category:"crypto",      digits:3,  contractSize:1,     leverage:50,  minAtr:0.05,  spreadPct:0.025, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  LINKUSD:  { category:"crypto",      digits:4,  contractSize:1,     leverage:50,  minAtr:0.01,  spreadPct:0.025, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  DOTUSD:   { category:"crypto",      digits:4,  contractSize:1,     leverage:50,  minAtr:0.01,  spreadPct:0.025, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  MATICUSD: { category:"crypto",      digits:5,  contractSize:1,     leverage:20,  minAtr:0.001, spreadPct:0.030, sessions:["NY","London","Asia","Post-NY","Weekend"] },
+  // ── Metales ───────────────────────────────────────────────────────────────
+  XAUUSD:   { category:"metals",      digits:2,  contractSize:100,   leverage:100, minAtr:0.5,   spreadPct:0.018, sessions:["NY","London"] },
+  XAGUSD:   { category:"metals",      digits:3,  contractSize:5000,  leverage:100, minAtr:0.02,  spreadPct:0.025, sessions:["NY","London"] },
+  XPTUSD:   { category:"metals",      digits:2,  contractSize:100,   leverage:50,  minAtr:1.0,   spreadPct:0.030, sessions:["NY","London"] },
+  // ── Forex Majors ──────────────────────────────────────────────────────────
+  EURUSD:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0003,spreadPct:0.003, sessions:["NY","London"] },
+  GBPUSD:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0004,spreadPct:0.004, sessions:["NY","London"] },
+  USDJPY:   { category:"forex_major", digits:3,  contractSize:100000,leverage:500, minAtr:0.03,  spreadPct:0.003, sessions:["NY","London","Asia"] },
+  USDCHF:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0003,spreadPct:0.004, sessions:["NY","London"] },
+  AUDUSD:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0002,spreadPct:0.004, sessions:["NY","London","Asia"] },
+  USDCAD:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0003,spreadPct:0.004, sessions:["NY","London"] },
+  NZDUSD:   { category:"forex_major", digits:5,  contractSize:100000,leverage:500, minAtr:0.0002,spreadPct:0.005, sessions:["NY","London","Asia"] },
+  // ── Forex Minors ──────────────────────────────────────────────────────────
+  EURGBP:   { category:"forex_minor", digits:5,  contractSize:100000,leverage:200, minAtr:0.0002,spreadPct:0.006, sessions:["London"] },
+  EURJPY:   { category:"forex_minor", digits:3,  contractSize:100000,leverage:200, minAtr:0.03,  spreadPct:0.005, sessions:["NY","London","Asia"] },
+  GBPJPY:   { category:"forex_minor", digits:3,  contractSize:100000,leverage:200, minAtr:0.05,  spreadPct:0.007, sessions:["NY","London"] },
+  AUDJPY:   { category:"forex_minor", digits:3,  contractSize:100000,leverage:200, minAtr:0.03,  spreadPct:0.006, sessions:["Asia","London"] },
+  CADJPY:   { category:"forex_minor", digits:3,  contractSize:100000,leverage:200, minAtr:0.03,  spreadPct:0.007, sessions:["NY","Asia"] },
+  CHFJPY:   { category:"forex_minor", digits:3,  contractSize:100000,leverage:200, minAtr:0.03,  spreadPct:0.007, sessions:["Asia"] },
+  // ── Índices ───────────────────────────────────────────────────────────────
+  US30:     { category:"indices",     digits:2,  contractSize:1,     leverage:100, minAtr:20,    spreadPct:0.010, sessions:["NY"] },
+  US500:    { category:"indices",     digits:2,  contractSize:1,     leverage:100, minAtr:3,     spreadPct:0.008, sessions:["NY"] },
+  USTEC:    { category:"indices",     digits:2,  contractSize:1,     leverage:100, minAtr:15,    spreadPct:0.009, sessions:["NY"] },
+  GER40:    { category:"indices",     digits:2,  contractSize:1,     leverage:100, minAtr:20,    spreadPct:0.010, sessions:["London"] },
+  UK100:    { category:"indices",     digits:2,  contractSize:1,     leverage:100, minAtr:15,    spreadPct:0.010, sessions:["London"] },
+  // ── Energía ───────────────────────────────────────────────────────────────
+  USOIL:    { category:"energy",      digits:3,  contractSize:1000,  leverage:100, minAtr:0.2,   spreadPct:0.015, sessions:["NY","London"] },
+  UKOIL:    { category:"energy",      digits:3,  contractSize:1000,  leverage:100, minAtr:0.2,   spreadPct:0.015, sessions:["NY","London"] },
+  NATGAS:   { category:"energy",      digits:4,  contractSize:10000, leverage:100, minAtr:0.01,  spreadPct:0.020, sessions:["NY"] },
+};
+
+// Helpers para obtener parámetros — fallback genérico para activos desconocidos
+function getAssetCatalog(a: Asset) {
+  return ASSET_CATALOG[a] ?? {
+    category:"other" as AssetCategory, digits:5, contractSize:1, leverage:50,
+    minAtr:0.001, spreadPct:0.030, sessions:["NY","London"]
+  };
+}
+function getAssetCategory(a: Asset): AssetCategory { return getAssetCatalog(a).category; }
+function isCryptoAsset(a: Asset): boolean { return getAssetCategory(a) === "crypto"; }
+function isForexAsset(a: Asset): boolean { return getAssetCategory(a).startsWith("forex"); }
+function isMetalAsset(a: Asset): boolean { return getAssetCategory(a) === "metals"; }
+function isIndexAsset(a: Asset): boolean { return getAssetCategory(a) === "indices"; }
+function isEnergyAsset(a: Asset): boolean { return getAssetCategory(a) === "energy"; }
+
+// Label visual por activo
+function getAssetLabel(a: Asset): string {
+  const labels: Record<string, string> = {
+    BTCUSD:"Bitcoin (BTC)", ETHUSD:"Ethereum (ETH)", BNBUSD:"BNB", SOLUSD:"Solana (SOL)",
+    XRPUSD:"Ripple (XRP)", ADAUSD:"Cardano (ADA)", DOGEUSD:"Dogecoin", LTCUSD:"Litecoin (LTC)",
+    AVAXUSD:"Avalanche (AVAX)", LINKUSD:"Chainlink (LINK)", DOTUSD:"Polkadot (DOT)",
+    XAUUSD:"Oro (XAU)", XAGUSD:"Plata (XAG)", XPTUSD:"Platino (XPT)",
+    EURUSD:"EUR/USD", GBPUSD:"GBP/USD", USDJPY:"USD/JPY", USDCHF:"USD/CHF",
+    AUDUSD:"AUD/USD", USDCAD:"USD/CAD", NZDUSD:"NZD/USD",
+    EURGBP:"EUR/GBP", EURJPY:"EUR/JPY", GBPJPY:"GBP/JPY", AUDJPY:"AUD/JPY",
+    US30:"Dow Jones (US30)", US500:"S&P 500", USTEC:"NASDAQ 100",
+    GER40:"DAX 40", UK100:"FTSE 100",
+    USOIL:"WTI Crude Oil", UKOIL:"Brent Crude", NATGAS:"Natural Gas",
+  };
+  return labels[a] ?? a;
+}
+type Mode = "scalping" | "intradia";
+type Direction = "LONG" | "SHORT";
+type ExitReason = "TP" | "SL" | "TRAIL" | "REVERSAL";
 type Candle = { t: number; o: number; h: number; l: number; c: number; v: number };
 
-type BSGreeks = {
-  delta: number; gamma: number; theta: number; vega: number; rho: number;
-  d1: number;    d2: number;    sigma: number; T: number;
-  pTP: number;   pSL: number;   ev: number;
-  vegaCross: boolean; gammaExtreme: boolean;
+// ─── Tipos de Order Flow / Market Control ─────────────────────────────────
+type FootprintCandle = {
+  t: number; o: number; h: number; l: number; c: number; v: number;
+  buyVol: number;    // volumen estimado de agresores compradores
+  sellVol: number;   // volumen estimado de agresores vendedores
+  delta: number;     // buyVol - sellVol
+  deltaPct: number;  // delta / v * 100
+  absorption: "buy" | "sell" | "none"; // absorción detectada
+  initiative: "buy" | "sell" | "neutral"; // quién tomó iniciativa
 };
 
-type WyckoffCtx = {
-  phase:     "A"|"B"|"C"|"D"|"E"|"unknown";
-  bias:      "accumulation"|"distribution"|"neutral";
-  narrative:  string;
-  sigmaCtrl: "compressing"|"expanding"|"neutral";
-  mmAction:   string;
+type VolumeProfileFull = {
+  poc: number;       // Point of Control — precio con más volumen negociado
+  vah: number;       // Value Area High (70% del volumen)
+  val: number;       // Value Area Low
+  hvn: number[];     // High Volume Nodes — zonas de aceptación de precio
+  lvn: number[];     // Low Volume Nodes — zonas de rechazo (vacíos)
+  profile: Array<{ price: number; vol: number; buyVol: number; sellVol: number }>;
+  valueAreaPct: number; // qué % del rango es el Value Area
 };
 
-type QSignal = {
-  id:          number;
-  asset:       string;
-  mode:        QMode;
-  direction:   QDir;
-  entry:       number;
-  sl:          number;
-  tp:          number;   // TP1
-  tp2:         number;
-  tp3?:        number;
-  size:        number;
-  greeks:      BSGreeks;
-  wyckoff:     WyckoffCtx;
-  confidence:  number;
-  rationale:   string;
-  generatedAt: number;
-  rr:          number;
+type CVDAnalysis = {
+  cvd50: number;      // CVD últimas 50 velas (tendencia)
+  cvd20: number;      // CVD últimas 20 velas (estructura)
+  cvd10: number;      // CVD últimas 10 velas (momentum)
+  cvd5:  number;      // CVD últimas 5 velas (ejecución)
+  slope50: number;    // pendiente CVD50
+  slope10: number;    // pendiente CVD10
+  divergence: boolean; // precio sube pero CVD baja (o viceversa) → divergencia
+  trend: "bullish" | "bearish" | "neutral";
 };
 
-type QPosition = {
-  id:           number;
-  signal:       QSignal;
-  openedAt:     number;
-  peak:         number;
-  trough:       number;
-  tp1Hit:       boolean;
-  tp2Hit:       boolean;
-  breakevenSet: boolean;
-  currentGreeks?: BSGreeks;
-  partialClosed:  number;   // fracción ya cerrada (0–1)
+type OrderFlowScore = {
+  // Control de mercado: quién domina bid/ask
+  control: "bulls" | "bears" | "contested"; // control neto
+  controlScore: number;    // -100 (osos totales) a +100 (toros totales)
+  // Componentes individuales
+  cvdScore: number;        // contribución CVD
+  footprintScore: number;  // contribución footprint
+  profileScore: number;    // contribución volume profile
+  absorptionScore: number; // contribución absorción
+  // Detalles
+  cvd: CVDAnalysis;
+  profile: VolumeProfileFull;
+  footprint: FootprintCandle[];
+  // Señales de trading
+  longSetup: boolean;      // condiciones para LONG confirmadas
+  shortSetup: boolean;     // condiciones para SHORT confirmadas
+  setupStrength: number;   // 0-1, fuerza del setup
+  narrative: string;       // descripción en español
+};
+// ─── MarketControl (legacy, mantenido para compatibilidad con analyzeMarketControl) ───
+type MarketControl = {
+  score: number;         // -100 a +100
+  bias: "bull" | "bear" | "neutral";
+  cvd: number;
+  cvdSlope: number;
+  poc: number;
+  vah: number;
+  val: number;
+  vwapDev: number;
+  bidAskImbalance: number;
+  dominantSide: "buyers" | "sellers" | "balanced";
 };
 
-type QClosedTrade = {
-  id: number; asset: string; mode: QMode; direction: QDir;
-  entry: number; exit: number; pnl: number;
-  result: "TP1"|"TP2"|"TP3"|"SL"|"TRAIL"|"MANUAL"|"TP1_PARTIAL"|"TP2_PARTIAL";
-  openedAt: number; closedAt: number;
-  greeks: BSGreeks; rrRealized: number;
+// ─── ScalpingRisk (gestión de riesgo diario y ruina) ─────────────────────────
+type ScalpingRisk = {
+  dailyPnl: number;
+  dailyTrades: number;
+  ruinRisk: number;
+  ruinProb: number;
+  mathExpectancy: number;
+  kellyFraction: number;
+  kellyWR: number;
+  kellyRR: number;
+  blocked: boolean;
+  blockReason: string;
+  sizeMultiplier: number;
+  streak: number;
 };
 
-// Walk-forward por activo
-type QCalib = {
-  asset: string; n: number; wins: number; wr: number;
-  avgRR: number; kellyF: number; floorAdj: number;
-  sigmaHistory: number[];   // últimos 50 σ
-  evHistory:    number[];   // últimos 50 EV realizados
-  lastUpdated:  number;
+type AppTab = "trading" | "aprendizaje" | "activos" | "configuracion" | "historial";
+
+// ── Wyckoff ──
+type WyckoffPhase = "A" | "B" | "C" | "D" | "E" | "unknown";
+type WyckoffBias = "accumulation" | "distribution" | "neutral";
+type WyckoffEvent = {
+  label: string;          // SC, AR, ST, Spring, UTAD, SOS, SOW, LPS, LPSY
+  candleIndex: number;    // índice dentro del array visible
+  price: number;
+  color: string;
+};
+type WyckoffAnalysis = {
+  phase: WyckoffPhase;
+  bias: WyckoffBias;
+  events: WyckoffEvent[];
+  supportZone: [number, number] | null;   // [low, high]
+  resistanceZone: [number, number] | null;
+  volumeClimaxIdx: number[];
+  narrative: string;
 };
 
-type GroqQCalib = {
-  floors:     Record<string, number>;   // por asset+mode
-  sizes:      Record<string, number>;   // multiplicadores
-  macro:      string;
-  note:       string;
-  timestamp:  number;
+// ── Indicators ──
+type Indicators = {
+  rsi: number;
+  rsiDivergence: "bullish" | "bearish" | "none";
+  stochK: number; stochD: number;
+  ma5: number; ma10: number; ma20: number; ma50: number;
+  vwap: number;
+  vwapUpperBand1: number; vwapLowerBand1: number;
+  vwapUpperBand2: number; vwapLowerBand2: number;
+  bbUpper: number; bbMiddle: number; bbLower: number;
+  bbSqueeze: boolean;
+  volumeDelta: number;       // positivo = presión compradora
+  volumeDeltaPct: number;    // % respecto al volumen total
+  imbalances: Array<{ idx: number; type: "bullish" | "bearish"; price: number }>;
+  atr: number;
+  keltnerUpper: number; keltnerLower: number;
 };
 
-type QStats = {
-  totalTrades: number; winRate: number; totalPnl: number;
-  avgRR: number; sharpe: number; maxDD: number;
-  byMode: Record<QMode, { n: number; wr: number; pnl: number; avgRR: number }>;
+type Signal = {
+  asset: Asset; mode: Mode; direction: Direction;
+  entry: number; stopLoss: number;
+  takeProfit: number;   // TP1 (alias para compatibilidad)
+  tp1: number; tp2: number; tp3?: number; // TPs escalonados
+  confidence: number; spreadPct: number; spreadCostUsd: number; atr: number;
+  mtf: { htf: number; ltf: number; exec: number };
+  // ── Sistema de anticipación de giro ──────────────────────
+  reversalScore: number;       // 0-9: intensidad del agotamiento detectado
+  reversalDir: Direction;      // dirección del giro anticipado
+  isReversalSetup: boolean;    // true si score >= 5
+  wyckoffSizeMult: number;     // multiplicador de size por contexto Wyckoff
+  isPyramidAdd?: boolean;      // true si es un add sobre posición existente;
+  indicators: Indicators;
+  wyckoff: WyckoffAnalysis;
+  rationale: string;
+  aiRationale?: string;
+  aiRiskNotes?: string;
 };
 
-// ─── Props ────────────────────────────────────────────────────────────────────
-interface QuantEngineProps {
-  prices:     Record<string, number>;
-  candles:    Record<string, Candle[]>;
-  candles5m:  Record<string, Candle[]>;
-  candles15m: Record<string, Candle[]>;
-  candles4h:  Record<string, Candle[]>;
-  candles1d:  Record<string, Candle[]>;
-  liveReady:  boolean;
-  mt5Enabled: boolean;
-  mt5Status:  string;
-  mt5Url:     string;
-  balance:    number;
-  equity:     number;
-  riskPct:    number;
-  assets:     string[];
-  onOpenMT5:      (asset: string, dir: QDir, sl: number, tp: number, size: number) => Promise<boolean>;
-  onCloseMT5:     (asset: string, dir: QDir) => Promise<boolean>;
-  pushToast:      (msg: string, type: "success"|"error"|"warning"|"info") => void;
-  onGreeksUpdate?: (map: Record<string, BSGreeks>) => void;  // coordinador inverso QE→v1
+
+// Posición real de MT5 — viene del bridge /positions
+type MT5Position = {
+  ticket: number;
+  symbol: string;      // nombre en MT5 (ej: BTCUSD)
+  asset: Asset;        // nombre en TraderLab (ej: BTCUSD)
+  type: "LONG" | "SHORT";
+  volume: number;
+  open_price: number;
+  current: number;
+  sl: number;
+  tp: number;
+  profit: number;
+  time: string;        // ISO string
+};
+
+type Position = {
+  id: number; signal: Signal; size: number; marginUsed: number;
+  openedAt: string; peak: number; trough: number;
+  partialDone?: boolean;   // legacy — reemplazado por tpHit
+  tp1Hit?: boolean;        // scalp: TP1 tocado → SL a BE, esperar TP2
+  tp2Hit?: boolean;        // scalp: TP2 tocado → cierre
+  tp3Hit?: boolean;        // intradía: TP3 tocado → cierre final
+  pyramidCount?: number;   // cuántos adds ya se hicieron sobre esta posición
+  parentId?: number;       // si es un add, id de la posición original
+  isPyramidAdd?: boolean;  // true si es un add de pyramiding
+};
+
+type ClosedTrade = {
+  id: number; asset: Asset; mode: Mode; direction: Direction;
+  entry: number; exit: number; pnl: number; pnlPct: number;
+  result: ExitReason; openedAt: string; closedAt: string;
+  source: "real" | "backtest";
+};
+
+type AssetEdge = {
+  wins: number; total: number; pnl: number;
+  byHour: Record<number, number>;
+};
+
+// ─── AssetIntelligence: aprendizaje profundo por activo ────────────────────
+type SessionStat = { trades: number; wins: number; pnl: number; avgSpread: number };
+type ModeStat    = { trades: number; wins: number; pnl: number; avgRR: number };
+type HourlyStat  = { trades: number; wins: number; pnl: number };
+
+type AssetIntelligence = {
+  symbol:          string;
+  category:        AssetCategory;
+  totalTrades:     number;
+  winRate:         number;           // 0-1
+  avgRR:           number;
+  avgPnl:          number;
+  profitFactor:    number;
+  sessionStats:    Record<string, SessionStat>;
+  modeStats:       Record<string, ModeStat>;
+  hourlyStats:     Record<number, HourlyStat>;
+  // Parámetros aprendidos
+  optimalSLMult:   number;           // ATR mult que minimiza SL prematuros
+  optimalTPMult:   number;           // ATR mult que maximiza TP alcanzados
+  avgSpreadPct:    number;           // spread real observado
+  spreadByHour:    Record<number, number>;
+  avgVolatility:   number;           // ATR promedio
+  trendStrength:   number;           // 1=muy trendy, -1=muy mean-reverting
+  bestMode:        string;           // scalping | intradia
+  bestSession:     string;
+  bestHourUTC:     number;
+  // Correlaciones dinámicas (calculadas sobre últimas 200 velas 1m)
+  correlations:    Record<string, number>;   // -1 a +1
+  lastUpdated:     string;
+};
+
+// ─── Motor de correlación — Pearson sobre retornos 1m ─────────────────────
+function calcPearsonCorrelation(a: number[], b: number[]): number {
+  const n = Math.min(a.length, b.length, 200);
+  if (n < 20) return 0;
+  const xa = a.slice(-n); const xb = b.slice(-n);
+  // Retornos logarítmicos
+  const ra = xa.slice(1).map((v, i) => Math.log(v / Math.max(xa[i], 1e-9)));
+  const rb = xb.slice(1).map((v, i) => Math.log(v / Math.max(xb[i], 1e-9)));
+  const n2 = ra.length;
+  const ma = ra.reduce((s, v) => s + v, 0) / n2;
+  const mb = rb.reduce((s, v) => s + v, 0) / n2;
+  const num = ra.reduce((s, v, i) => s + (v - ma) * (rb[i] - mb), 0);
+  const da  = Math.sqrt(ra.reduce((s, v) => s + (v - ma) ** 2, 0));
+  const db  = Math.sqrt(rb.reduce((s, v) => s + (v - mb) ** 2, 0));
+  if (da * db < 1e-12) return 0;
+  return Math.max(-1, Math.min(1, num / (da * db)));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// MATEMÁTICA PURA — fuera del componente
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── opportunityScore: prioriza qué activos scanear en este momento ─────────
+function calcOpportunityScore(
+  symbol: Asset,
+  intel: AssetIntelligence | undefined,
+  currentSession: string,
+  currentHour: number,
+  openPositionSymbols: Asset[],
+  correlationMatrix: Record<string, Record<string, number>>
+): number {
+  let score = 50; // base
 
-// CDF normal — Abramowitz & Stegun, error < 7.5e-8
-function normCDF(x: number): number {
-  if (x >  8) return 1;
-  if (x < -8) return 0;
-  const a1=0.254829592, a2=-0.284496736, a3=1.421413741,
-        a4=-1.453152027, a5=1.061405429, p=0.3275911;
-  const sign = x < 0 ? -1 : 1;
-  const t = 1 / (1 + p * Math.abs(x));
-  const poly = ((((a5*t+a4)*t+a3)*t+a2)*t+a1)*t;
-  return 0.5 * (1 + sign * (1 - poly * Math.exp(-x*x/2)));
-}
-
-function normPDF(x: number): number {
-  return Math.exp(-0.5*x*x) / Math.sqrt(2*Math.PI);
-}
-
-// σ histórica realizada (log-retornos, anualizada)
-function calcHV(closes: number[], lookback = 20, annFactor = 252): number {
-  const n = Math.min(closes.length - 1, lookback);
-  if (n < 4) return 0.30;
-  const logR: number[] = [];
-  for (let i = closes.length - n; i < closes.length; i++) {
-    if (closes[i-1] > 0) logR.push(Math.log(closes[i] / closes[i-1]));
+  if (!intel || intel.totalTrades < 3) {
+    // Activo desconocido: score medio, preferir sesiones apropiadas
+    const cat = getAssetCatalog(symbol);
+    if (cat.sessions.includes(currentSession)) score += 10;
+    return score;
   }
-  const mean = logR.reduce((a,b)=>a+b,0) / logR.length;
-  const v = logR.reduce((s,v)=>s+(v-mean)**2,0) / Math.max(logR.length-1,1);
-  return Math.sqrt(v * annFactor);
-}
 
-// Horizonte T en años según modo y TF de velas disponible
-function modeToT(mode: QMode): number {
-  return mode === "scalp" ? 1/(252*24*4) : mode === "intradia" ? 1/(252*3) : 5/252;
-}
+  // ── 1. Performance histórica (30%) ──
+  const pfScore = Math.min(intel.profitFactor * 10, 20); // max 20pts
+  score += pfScore;
 
-// ATR de velas
-function calcAtrCandles(candles: Candle[], period = 14): number {
-  const c = candles.slice(-period-1);
-  if (c.length < 2) return 0;
-  const trs = c.slice(1).map((x,i) =>
-    Math.max(x.h-x.l, Math.abs(x.h-c[i].c), Math.abs(x.l-c[i].c)));
-  return trs.reduce((a,b)=>a+b,0) / trs.length;
-}
+  // ── 2. Sesión actual (20%) ──
+  const sessData = intel.sessionStats[currentSession];
+  if (sessData && sessData.trades >= 3) {
+    const sessWR = sessData.wins / sessData.trades;
+    score += (sessWR - 0.4) * 50; // +10 si WR=60%, -10 si WR=20%
+  }
 
-// EMA rápida
-function ema(arr: number[], period: number): number {
+  // ── 3. Hora actual (20%) ──
+  const hourData = intel.hourlyStats[currentHour];
+  if (hourData && hourData.trades >= 2) {
+    const hourWR = hourData.wins / hourData.trades;
+    score += (hourWR - 0.4) * 30;
+  }
+
+  // ── 4. Spread actual vs promedio aprendido (10%) ──
+  const cat = getAssetCatalog(symbol);
+  const spreadRatio = intel.avgSpreadPct > 0 ? cat.spreadPct / intel.avgSpreadPct : 1;
+  score += (1 - spreadRatio) * 10; // spread mejor que promedio = bonus
+
+  // ── 5. Descorrelación de cartera (20%) ──
+  // Bonus por activos que NO correlacionan con las posiciones abiertas
+  if (openPositionSymbols.length > 0) {
+    const corrWithOpen = openPositionSymbols.map(op => {
+      const c = correlationMatrix[symbol]?.[op] ?? 0;
+      return Math.abs(c);
+    });
+    const avgCorr = corrWithOpen.reduce((s, c) => s + c, 0) / corrWithOpen.length;
+    score += (1 - avgCorr) * 20; // descorrelacionado = +20pts
+  } else {
+    score += 10; // sin posiciones abiertas: bonus base
+  }
+
+  return Math.max(0, Math.min(100, score));
+}
+type LearningModel = {
+  riskScale: number; confidenceFloor: number;
+  scalpingTpAtr: number; intradayTpAtr: number;
+  atrTrailMult: number; hourEdge: Record<number, number>;
+  assetEdge: Partial<Record<string, AssetEdge>>;
+};
+
+type BacktestReport = {
+  total: number; winRate: number; expectancy: number;
+  profitFactor: number; sharpe: number; maxDrawdown: number;
+  grossProfit: number; grossLoss: number; avgWin: number; avgLoss: number;
+};
+
+type Toast = { id: number; msg: string; type: "success" | "warning" | "error" | "info" };
+type AiStatus = "idle" | "testing" | "ok" | "error" | "disabled";
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+// assets se gestiona como estado React (useState) dentro de App — ver abajo
+
+
+
+// ── Fuente de datos: exclusivamente MT5 Bridge (PrimeXBT) ───────────────────
+// Todos los datos (precios, velas 1m/5m/15m/4H/1D, spread) vienen del bridge.
+// No hay fallback a APIs externas — si el bridge no está activo, el feed queda offline.
+
+
+const initialPrices: Record<Asset, number> = {
+  BTCUSD: 71300, ETHUSD: 2080, XAGUSD: 81.8, XAUUSD: 5076,
+};
+
+const leverageByAsset: Record<Asset, number> = {
+  BTCUSD: 100, ETHUSD: 100, XAGUSD: 50, XAUUSD: 100,
+};
+// Tamaño mínimo de lote y contract size real del broker (PrimeXBT)
+// contractSize dinámico desde ASSET_CATALOG
+const contractSize: Record<string, number> = Object.fromEntries(
+  Object.entries(ASSET_CATALOG).map(([k, v]) => [k, v.contractSize])
+);
+const volMin: Record<string, number> = {
+  BTCUSD: 0.001, ETHUSD: 0.01, XAUUSD: 0.01, XAGUSD: 0.01,
+};
+const volStep: Record<string, number> = {
+  BTCUSD: 0.001, ETHUSD: 0.01, XAUUSD: 0.01, XAGUSD: 0.01,
+};
+// ATR mínimo por activo — evita sizing explosivo en mercados de bajo precio
+// XAGUSD ~32 usd: ATR 1m mínimo realista = 0.05 usd (0.15%)
+// XAUUSD ~3300 usd: ATR 1m mínimo = 1.5 usd
+// BTC ~95000 usd: ATR 1m mínimo = 50 usd
+
+
+// ─── Regime Filter ────────────────────────────────────────────────────────────
+type MarketRegime = "trending_up" | "trending_down" | "ranging" | "expanding" | "unknown";
+type RegimeAnalysis = {
+  regime:        MarketRegime;
+  atrRatio:      number;   // ATR_current / ATR_20period
+  adxProxy:      number;   // 0–1 proxy de tendencia
+  strategy:      "momentum" | "mean_reversion" | "both" | "none";
+  confAdjust:    number;   // ajuste al floor de confianza
+  sizeAdjust:    number;   // multiplicador de sizing 0.5–1.5
+  note:          string;
+};
+
+// ─── Walk-forward per-asset calibration ──────────────────────────────────────
+type AssetCalibration = {
+  symbol:         string;
+  n:              number;    // trades totales
+  wr:             number;    // win rate 0-1
+  avgRR:          number;    // RR promedio realizado
+  sharpe20:       number;    // Sharpe rolling 20 trades
+  floorAdj:       number;    // ajuste al floor: positivo = más estricto
+  kellyF:         number;    // Kelly fraccionario 0-1
+  lastUpdated:    number;    // timestamp
+};
+
+// ─── Z-score signal normalization ────────────────────────────────────────────
+type SignalHistory = {
+  asset: string;
+  scores: number[];          // últimos 100 confidence scores
+  mean:   number;
+  std:    number;
+};
+
+// ─── Correlación de trades (P&L, timing, régimen) ───────────────────────────
+type TradeCorrelation = {
+  pairKey:        string;          // "BTCUSD_ETHUSD"
+  pricePearson:   number;          // correlación de precio (series)
+  pnlPearson:     number;          // correlación de P&L entre trades simultáneos
+  avgSimultaneous: number;         // promedio de trades abiertos al mismo tiempo
+  bothWin:        number;          // % ambos ganan cuando simultáneos
+  bothLose:       number;          // % ambos pierden (riesgo sistémico)
+  diverge:        number;          // % uno gana otro pierde (descorrelación natural)
+  riskScore:      number;          // 0-1 riesgo de concentración
+  lastUpdated:    number;
+};
+
+type PortfolioRiskState = {
+  maxDrawdownSimul: number;        // max DD cuando múltiples posiciones abiertas
+  bestCombo:        string[];      // par de activos con mayor divergencia
+  worstCombo:       string[];      // par con mayor concentración de riesgo
+  currentRiskScore: number;        // 0-1 riesgo total del portfolio ahora
+  groqInsights:     string;        // último análisis de Groq sobre correlaciones
+  lastAnalysis:     number;        // timestamp último análisis
+};
+
+// ─── Groq Calibrator state (nuevo rol) ───────────────────────────────────────
+type GroqCalibration = {
+  timestamp:      number;
+  regime:         Record<string, string>;
+  floorOverrides: Record<string, number>;
+  sizeOverrides:  Record<string, number>;
+  corrBlacklist:  string[];        // pares bloqueados por alta correlación: ["BTCUSD_ETHUSD"]
+  corrSizeAdj:    Record<string, number>;  // asset → reducción de size por correlación
+  macroNote:      string;
+  corrNote:       string;          // análisis de correlación de Groq
+  nextRunAt:      number;
+};
+
+const initialLearning: LearningModel = {
+  riskScale: 1, confidenceFloor: 52,
+  scalpingTpAtr: 2.4,
+  intradayTpAtr: 5.0,
+  atrTrailMult: 0.35, hourEdge: {}, assetEdge: {},
+};
+
+const exitLabel: Record<ExitReason, string> = {
+  TP: "TP ✓", SL: "SL ✗", TRAIL: "Trail ⟳", REVERSAL: "Reversión ↩",
+};
+
+// ─── Math helpers ─────────────────────────────────────────────────────────────
+function clamp(v: number, lo: number, hi: number) { return Math.min(hi, Math.max(lo, v)); }
+function money(v: number) { return `$${v.toFixed(2)}`; }
+function avg(arr: number[]) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0; }
+function std(arr: number[]) {
+  if (arr.length < 2) return 0;
+  const m = avg(arr);
+  return Math.sqrt(avg(arr.map(v => (v - m) ** 2)));
+}
+function ema(arr: number[], period: number) {
   if (!arr.length) return 0;
-  const alpha = 2/(period+1);
-  return arr.reduce((acc,v) => alpha*v + (1-alpha)*acc, arr[0]);
+  const alpha = 2 / (period + 1);
+  return arr.reduce((acc, v) => alpha * v + (1 - alpha) * acc, arr[0]);
+}
+function emaFull(arr: number[], period: number): number[] {
+  if (!arr.length) return [];
+  const alpha = 2 / (period + 1);
+  const out: number[] = [arr[0]];
+  for (let i = 1; i < arr.length; i++) out.push(alpha * arr[i] + (1 - alpha) * out[i - 1]);
+  return out;
+}
+function calcAtr(candles: Candle[], lookback: number): number {
+  const data = candles.slice(-lookback);
+  if (data.length < 2) return 0;
+  const trs = data.slice(1).map((c, i) =>
+    Math.max(c.h - c.l, Math.abs(c.h - data[i].c), Math.abs(c.l - data[i].c))
+  );
+  return avg(trs);
+}
+function calcAtrFromSeries(arr: number[], lookback: number): number {
+  const data = arr.slice(-lookback);
+  if (data.length < 2) return 0;
+  return avg(data.slice(1).map((v, i) => Math.abs(v - data[i])));
 }
 
-// Black-Scholes completo
-function calcBS(
-  S: number, K: number, T: number, sigma: number, r = 0,
-  targetTP?: number, targetSL?: number
-): BSGreeks {
-  const sig   = Math.max(sigma, 0.005);
-  const sqrtT = Math.sqrt(Math.max(T, 1e-8));
-  const d1 = (Math.log(S / Math.max(K, 1e-9)) + (r + sig*sig/2)*T) / (sig*sqrtT);
-  const d2 = d1 - sig*sqrtT;
-
-  const delta = normCDF(d1);
-  const gamma = normPDF(d1) / (S * sig * sqrtT);
-  const theta = -(S * normPDF(d1) * sig) / (2*sqrtT) - r*Math.exp(-r*T)*K*normCDF(d2);
-  const vega  = S * sqrtT * normPDF(d1);
-  const rho   = K * T * Math.exp(-r*T) * normCDF(d2);
-
-  let pTP = 0.5, pSL = 0.5, ev = 0;
-  if (targetTP && targetSL && S > 0) {
-    const d_tp = (Math.log(targetTP/S) + (r+sig*sig/2)*T) / (sig*sqrtT);
-    const d_sl = (Math.log(targetSL/S) + (r+sig*sig/2)*T) / (sig*sqrtT);
-    pTP = normCDF(d_tp);
-    pSL = 1 - normCDF(d_sl);
-    ev  = pTP * Math.abs(targetTP-S) - pSL * Math.abs(S-targetSL);
-  }
-  return { delta, gamma, theta, vega, rho, d1, d2, sigma: sig, T,
-           pTP, pSL, ev, vegaCross: false, gammaExtreme: false };
-}
-
-// Kelly fraccionario BS
-// f* = (p*b - q) / b   donde p=pTP, q=pSL, b=RR
-// Fracción: 25% del Kelly completo (conservador)
-function calcKellyBS(pTP: number, rr: number): number {
-  const p = Math.max(0.01, Math.min(0.99, pTP));
-  const q = 1 - p;
-  const b = Math.max(0.5, rr);
-  const f = (p*b - q) / b;
-  return Math.max(0.05, Math.min(0.50, f * 0.25)); // 25% fraccionario, cap 50%
-}
-
-// Wyckoff × BS: detecta qué hace el MM con σ
-function interpretWyckoffBS(
-  candles4h: Candle[], candles1d: Candle[],
-  greeks: BSGreeks, vegaHistory: number[]
-): WyckoffCtx {
-  const c = candles4h.length >= 20 ? candles4h : candles1d;
-  if (c.length < 20) return {
-    phase: "unknown", bias: "neutral",
-    narrative: "Sin velas 4H/1D suficientes",
-    sigmaCtrl: "neutral", mmAction: "Sin datos"
-  };
-
-  const closes  = c.map(x => x.c);
-  const volumes = c.map(x => x.v);
-  const n = closes.length;
-  const price = closes[n-1];
-
-  const hi20  = Math.max(...closes.slice(-20));
-  const lo20  = Math.min(...closes.slice(-20));
-  const range = hi20 - lo20;
-  const pos   = range > 0 ? (price - lo20) / range : 0.5;
-
-  const avgVol20 = volumes.slice(-20).reduce((a,b)=>a+b,0)/20;
-  const avgVol5  = volumes.slice(-5).reduce((a,b)=>a+b,0)/5;
-  const volR     = avgVol5 / Math.max(avgVol20, 1);
-
-  const ema8  = ema(closes.slice(-8),  8);
-  const ema21 = ema(closes.slice(-21), 21);
-  const trend = ema8 > ema21 ? "up" : "down";
-
-  const hvRecent = calcHV(closes, 10);
-  const hvLong   = calcHV(closes, 20);
-  const sigmaCtrl: WyckoffCtx["sigmaCtrl"] =
-    hvRecent < hvLong * 0.75 ? "compressing" :
-    hvRecent > hvLong * 1.30 ? "expanding"   : "neutral";
-
-  let phase: WyckoffCtx["phase"] = "unknown";
-  let bias:  WyckoffCtx["bias"]  = "neutral";
-  let mmAction = "Sin sesgo claro";
-  let narrative = "";
-
-  // Clasificar fase
-  if      (sigmaCtrl==="compressing" && pos<0.35 && volR<0.8)
-    { phase="B"; bias="accumulation"; mmAction="MM absorbe oferta — σ comprimida en fondo"; narrative=`Fase B Acum: σ ↓${((1-hvRecent/hvLong)*100).toFixed(0)}%, precio en base, vol bajo.`; }
-  else if (sigmaCtrl==="compressing" && pos<0.25 && volR>1.2)
-    { phase="C"; bias="accumulation"; mmAction="⚡ SPRING — spike vol en mínimo = trampa bajista"; narrative=`Fase C Spring: vol +${((volR-1)*100).toFixed(0)}% en fondo. MM toca stops.`; }
-  else if (sigmaCtrl==="expanding"   && trend==="up"   && pos>0.45)
-    { phase="D"; bias="accumulation"; mmAction="SOS — σ liberada al alza"; narrative=`Fase D Mark-up: expansión σ +${((hvRecent/hvLong-1)*100).toFixed(0)}%.`; }
-  else if (pos>0.65 && trend==="up"  && volR>0.9)
-    { phase="E"; bias="accumulation"; mmAction="Mark-up establecido — momentum firme"; narrative=`Fase E: precio en zona alta, tendencia intacta.`; }
-  else if (sigmaCtrl==="compressing" && pos>0.65 && volR<0.8)
-    { phase="B"; bias="distribution"; mmAction="MM distribuye — σ comprimida en techo"; narrative=`Fase B Dist: σ ↓ en techo. MM vende silenciosamente.`; }
-  else if (sigmaCtrl==="compressing" && pos>0.75 && volR>1.2)
-    { phase="C"; bias="distribution"; mmAction="⚡ UTAD — spike vol en máximo = trampa alcista"; narrative=`Fase C UTAD: MM toca stops alcistas.`; }
-  else if (sigmaCtrl==="expanding"   && trend==="down" && pos<0.55)
-    { phase="D"; bias="distribution"; mmAction="SOW — σ liberada a la baja"; narrative=`Fase D Mark-down: expansión σ bajista.`; }
-  else
-    { phase="A"; bias="neutral"; mmAction="Transición — estructura no definida"; narrative=`Fase A/transición.`; }
-
-  // Vega cross desde historial
-  const vCross = vegaHistory.length >= 5 &&
-    greeks.vega > vegaHistory[vegaHistory.length-1] * 1.15 &&
-    vegaHistory.slice(-3).every(v => v < greeks.vega);
-  if (vCross) {
-    mmAction = "⚡ VEGA CROSS: MM libera σ → inicio de movimiento";
-    narrative += " | Vega cruzando al alza.";
-  }
-
-  return { phase, bias, narrative, sigmaCtrl, mmAction };
-}
-
-// ─── Generador de señal ───────────────────────────────────────────────────────
-function generateBSSignal(
-  asset: string, mode: QMode,
-  candles1m: Candle[], candles5m: Candle[], candles15m: Candle[],
-  candles4h: Candle[], candles1d: Candle[],
-  price: number,
-  vegaHist: number[], gammaHist: number[],
-  calib: QCalib | null,
-  groqFloor: number | null,
-): QSignal | null {
-  // Elegir TF según modo
-  const c = mode === "scalp"
-    ? (candles5m.length  >= 20 ? candles5m  : candles1m)
-    : mode === "intradia"
-    ? (candles15m.length >= 20 ? candles15m : candles1m)
-    : candles1m;
-
-  if (!c.length || c.length < 14 || price <= 0) return null;
-
-  const closes = c.map(x => x.c);
-  const n = closes.length;
-  const sigma = calcHV(closes, Math.min(mode === "swing" ? 60 : 20, n-1));
-  const T = modeToT(mode);
-  const atr = calcAtrCandles(c);
-
-  // VWAP (últimas 20 velas)
-  const rec = c.slice(-20);
-  const tvol = rec.reduce((s,x)=>s+x.v, 0);
-  const vwap = tvol > 0 ? rec.reduce((s,x)=>s+((x.h+x.l+x.c)/3)*x.v, 0)/tvol : price;
-
-  // ── Griegas ────────────────────────────────────────────────────────────────
-  const slMult = mode === "scalp" ? 0.8 : mode === "intradia" ? 1.2 : 2.0;
-  const tpMult = mode === "scalp" ? 1.5 : mode === "intradia" ? 2.5 : 4.0;
-  const slRef = price - atr*slMult;
-  const tpRef = price + atr*tpMult;
-
-  const g = calcBS(price, vwap, T, sigma, 0, tpRef, slRef);
-
-  // Percentiles Gamma y Vega
-  const gammaExtreme = gammaHist.length >= 10 &&
-    g.gamma > (gammaHist.slice(-10).sort((a,b)=>a-b)[7] ?? 0);
-  const vegaCross = vegaHist.length >= 5 &&
-    g.vega > vegaHist[vegaHist.length-1] * 1.10 &&
-    vegaHist.slice(-3).every(v => v <= g.vega);
-  g.gammaExtreme = gammaExtreme;
-  g.vegaCross    = vegaCross;
-
-  // Wyckoff
-  const wyckoff = interpretWyckoffBS(candles4h, candles1d, g, vegaHist);
-
-  // ── Dirección ─────────────────────────────────────────────────────────────
-  // Delta base + sesgos adicionales
-  const emaShort = ema(closes.slice(-8),  8);
-  const emaLong  = ema(closes.slice(-21), 21);
-  const emaTrend = emaShort > emaLong ? 1 : -1;
-  const roc5 = n > 5 ? (closes[n-1]-closes[n-6])/closes[n-6] : 0;
-
-  // Wyckoff sesgo direccional
-  const wyckBias = wyckoff.bias === "accumulation" ? 1 : wyckoff.bias === "distribution" ? -1 : 0;
-
-  // Voto combinado
-  const bullVotes = [g.delta > 0.52, emaTrend > 0, roc5 > 0, wyckBias > 0].filter(Boolean).length;
-  const bearVotes = [g.delta < 0.48, emaTrend < 0, roc5 < 0, wyckBias < 0].filter(Boolean).length;
-
-  let direction: QDir = "NEUTRAL";
-  if      (bullVotes >= 2 && bullVotes > bearVotes) direction = "LONG";
-  else if (bearVotes >= 2 && bearVotes > bullVotes) direction = "SHORT";
-  if (direction === "NEUTRAL") return null;
-
-  const isLong = direction === "LONG";
-
-  // SL/TP ajustados a dirección
-  const sl  = isLong ? price - atr*slMult        : price + atr*slMult;
-  const tp1 = isLong ? price + atr*tpMult        : price - atr*tpMult;
-  const tp2 = isLong ? price + atr*tpMult*1.8    : price - atr*tpMult*1.8;
-  const tp3 = isLong ? price + atr*tpMult*3.0    : price - atr*tpMult*3.0;
-  const rr  = Math.abs(tp1-price) / Math.max(Math.abs(price-sl), 1e-9);
-
-  // Recalcular EV con SL/TP reales
-  const gFinal = calcBS(price, vwap, T, sigma, 0, tp1, sl);
-  gFinal.gammaExtreme = gammaExtreme;
-  gFinal.vegaCross    = vegaCross;
-
-  // ── Filtros por modo ───────────────────────────────────────────────────────
-  const hasVol = (() => {
-    const vols = c.slice(-20).map(x=>x.v);
-    const avg = vols.reduce((a,b)=>a+b,0)/vols.length;
-    return c[c.length-1].v > avg * 0.9;
-  })();
-
-  let passes = false;
-  if (mode === "scalp") {
-    const deltaOk = Math.abs(g.delta - 0.5) > 0.06;
-    passes = deltaOk && (gammaExtreme || vegaCross) && hasVol;
-  } else if (mode === "intradia") {
-    const wyckActive = wyckoff.bias !== "neutral" && wyckoff.phase !== "unknown";
-    const evOk = gFinal.ev > 0;
-    passes = wyckActive && evOk && (vegaCross || wyckoff.sigmaCtrl === "expanding");
-  } else { // swing
-    const deltaExt = g.delta > 0.66 || g.delta < 0.34;
-    const phaseOk  = ["D","E"].includes(wyckoff.phase);
-    const thetaOk  = Math.abs(g.theta) / price < 0.003;
-    const evStr    = gFinal.ev > atr * 0.4;
-    passes = deltaExt && phaseOk && thetaOk && evStr;
-  }
-  if (!passes) return null;
-
-  // ── Confidence ────────────────────────────────────────────────────────────
-  let conf = 50;
-  conf += (Math.abs(g.delta - 0.5) - 0.05) * 40;
-  if (gammaExtreme) conf += 10;
-  if (vegaCross)    conf += 10;
-  if (gFinal.ev > 0) conf += 8;
-  if (gFinal.ev > atr*0.5) conf += 7;
-  if (wyckoff.bias !== "neutral") conf += 12;
-  if (wyckoff.phase === "C") conf += 10;
-  // Wyckoff vs dirección: si contradice, penalizar
-  const wyckBiasDir: QDir = wyckoff.bias === "accumulation" ? "LONG" : wyckoff.bias === "distribution" ? "SHORT" : direction;
-  if (wyckBiasDir !== direction && wyckoff.bias !== "neutral") conf -= 18;
-  // Walk-forward ajuste
-  if (calib) {
-    conf += calib.floorAdj;
-    if (calib.wr > 0.55) conf += 5;
-    if (calib.wr < 0.40) conf -= 8;
-  }
-  conf = Math.max(0, Math.min(100, conf));
-
-  // ── Floor mínimo ──────────────────────────────────────────────────────────
-  const baseFloor = mode === "scalp" ? 52 : mode === "intradia" ? 55 : 58;
-  const floor = groqFloor ?? (baseFloor + (calib?.floorAdj ?? 0));
-  if (conf < floor) return null;
-
-  // ── Kelly size ────────────────────────────────────────────────────────────
-  // Sobrescrito en el componente con equity real
-  const kellyF = calcKellyBS(gFinal.pTP, rr);
-  const stopDist = Math.abs(price - sl);
-  const size = kellyF; // placeholder — el componente multiplica por equity/riskPct
-
-  const filterNote = mode === "scalp"
-    ? `Δ=${g.delta.toFixed(3)} Γ-ext:${gammaExtreme?1:0} VegaX:${vegaCross?1:0}`
-    : mode === "intradia"
-    ? `W:${wyckoff.phase}/${wyckoff.bias} EV=${gFinal.ev.toFixed(4)} VegaX:${vegaCross?1:0}`
-    : `Δ=${g.delta.toFixed(3)} Phase:${wyckoff.phase} Θ%=${(Math.abs(g.theta)/price*100).toFixed(3)}`;
-
+// ── Regime Filter: detecta si el mercado está en tendencia, rango o expansión ──
+function detectRegime(series: number[]): { regime: "trend"|"range"|"expansion"|"unknown"; atrRatio: number } {
+  if (series.length < 55) return { regime: "unknown", atrRatio: 1 };
+  const atrCurrent    = calcAtrFromSeries(series.slice(-14), 14);
+  const atrHistorical = calcAtrFromSeries(series.slice(-50), 50);
+  if (atrHistorical < 1e-10) return { regime: "unknown", atrRatio: 1 };
+  const atrRatio = atrCurrent / atrHistorical;
   return {
-    id: Date.now() + Math.random(), asset, mode, direction,
-    entry: price, sl, tp: tp1, tp2, tp3,
-    size, greeks: gFinal, wyckoff, confidence: conf,
-    rationale: `BS${mode.toUpperCase()} Δ=${g.delta.toFixed(3)} Γ=${g.gamma.toFixed(6)} V=${g.vega.toFixed(2)} σ=${(sigma*100).toFixed(1)}% | EV=${gFinal.ev.toFixed(4)} P(TP)=${(gFinal.pTP*100).toFixed(0)}% P(SL)=${(gFinal.pSL*100).toFixed(0)}% | ${filterNote} | ${wyckoff.mmAction.slice(0,60)}`,
-    generatedAt: Date.now(), rr,
+    atrRatio,
+    regime: atrRatio > 1.30 ? "expansion" : atrRatio < 0.70 ? "range" : "trend",
   };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// UI COMPONENTS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── Z-Score de la señal contra historial ─────────────────────────────────────
+function calcSignalZScore(score: number, history: number[]): number {
+  if (history.length < 8) return 0;
+  const mu  = history.reduce((a, b) => a + b, 0) / history.length;
+  const sig = Math.sqrt(history.reduce((a, b) => a + (b - mu) ** 2, 0) / history.length);
+  return sig < 1e-6 ? 0 : (score - mu) / sig;
+}
 
-function GreeksCard({ g, mode }: { g: BSGreeks; mode: QMode }) {
-  const dC = g.delta > 0.60 ? "#10b981" : g.delta < 0.40 ? "#ef4444" : "#f59e0b";
-  const gC = g.gammaExtreme ? "#a78bfa" : "var(--text-2)";
-  const vC = g.vegaCross    ? "#f59e0b" : "var(--text-2)";
-  const items = [
-    { lbl:"Δ Delta",  val:g.delta.toFixed(3),   sub: g.delta>0.6?"alcista":g.delta<0.4?"bajista":"neutral",   col:dC, note:"1° orden: dirección" },
-    { lbl:"Γ Gamma",  val:g.gamma.toFixed(6),   sub: g.gammaExtreme?"⚡ EXTREMO":"normal",  col:gC, note:"2° orden: inflexión" },
-    { lbl:"Θ Theta",  val:(g.theta*365/100).toFixed(4), sub:"por día %",  col:"#6b7280", note:"Costo temporal" },
-    { lbl:"V Vega",   val:g.vega.toFixed(3),    sub: g.vegaCross?"⚡ CROSS":"σ estable", col:vC, note:"Sens. volatilidad" },
-    { lbl:"ρ Rho",    val:g.rho.toFixed(4),     sub: g.rho>0?"tasa↑":"tasa↓",  col:"var(--text-2)", note:"Sesgo macro" },
+// ── Multi-factor vote: 4 factores ortogonales ─────────────────────────────────
+function calcMultiFactorVote(
+  series: number[],
+  candles: { o:number; h:number; l:number; c:number; v?:number }[],
+  direction: "LONG"|"SHORT",
+  atr: number,
+): { votes: number; factors: Record<string,boolean>; score: number } {
+  const n  = series.length;
+  const cn = candles.length;
+  const factors: Record<string,boolean> = { ema: false, momentum: false, volatility: false, volume: false };
+  if (n >= 21) {
+    const e8  = ema(series.slice(-21), 8);
+    const e21 = ema(series.slice(-21), 21);
+    factors.ema = direction === "LONG" ? e8 > e21 : e8 < e21;
+  }
+  if (n >= 9) {
+    const roc3 = (series[n-1] - series[n-4]) / Math.max(series[n-4], 1e-9);
+    const roc8 = (series[n-1] - series[n-9]) / Math.max(series[n-9], 1e-9);
+    factors.momentum = direction === "LONG" ? (roc3 > 0 && roc8 > 0) : (roc3 < 0 && roc8 < 0);
+  }
+  if (n >= 50) {
+    const atrNow  = calcAtrFromSeries(series.slice(-14), 14);
+    const atrHist = calcAtrFromSeries(series.slice(-50), 50);
+    factors.volatility = atrNow > atrHist * 0.8;
+  } else { factors.volatility = atr > 0; }
+  if (cn >= 10) {
+    const slice = candles.slice(-10);
+    let obv = 0;
+    slice.forEach((c, i) => {
+      if (i === 0) return;
+      const vol = c.v ?? 1;
+      obv += c.c > slice[i-1].c ? vol : c.c < slice[i-1].c ? -vol : 0;
+    });
+    factors.volume = direction === "LONG" ? obv > 0 : obv < 0;
+  } else { factors.volume = true; }
+  const votes = Object.values(factors).filter(Boolean).length;
+  return { votes, factors, score: votes / 4 };
+}
+
+// ── Kelly fraccionario (Half-Kelly para producción) ───────────────────────────
+function calcKellyFraction(trades: { pnl: number; rr?: number }[]): number {
+  if (trades.length < 10) return 0.5;
+  const wins   = trades.filter(t => t.pnl > 0);
+  const losses = trades.filter(t => t.pnl <= 0);
+  if (!wins.length || !losses.length) return 0.5;
+  const p   = wins.length / trades.length;
+  const q   = 1 - p;
+  const b   = wins.reduce((a, t) => a + (t.rr ?? 1.5), 0) / wins.length;
+  const f   = (p * b - q) / Math.max(b, 0.1);
+  return Math.max(0.1, Math.min(0.25, f));
+}
+
+// ─── Modelo de spread CFD realista ───────────────────────────────────────────
+type SpreadSnapshot = {
+  spread: number; spreadPct: number; bid: number; ask: number;
+  component: { base: number; volume: number; session: number };
+  sessionLabel: string; isHighVolume: boolean;
+};
+const assetLabel: Record<Asset, string> = {
+  BTCUSD: "BTC/USD", ETHUSD: "ETH/USD",
+  XAGUSD: "Plata XAG", XAUUSD: "Oro XAU",
+};
+const minAtrByAsset: Record<Asset, number> = {
+  BTCUSD: 100, ETHUSD: 8, XAGUSD: 0.15, XAUUSD: 5.0,
+};
+const CFD_BASE_SPREAD_PCT: Record<Asset, number> = {
+  BTCUSD: 0.00069, ETHUSD: 0.0012, XAUUSD: 0.00006, XAGUSD: 0.00067,
+};
+
+
+// ─── AiChatPanel — panel de chat con la IA ────────────────────────────────────
+function AiChatPanel({
+  apiKey, usingGroq, groqModel, onGroqCall, canGroqCall,
+  openPositions, realTrades, lastSignal, prices, stats,
+  correlationMatrix, assetIntelligence,
+}: {
+  apiKey: string; usingGroq: boolean; groqModel: string;
+  onGroqCall: () => void; canGroqCall: () => boolean;
+  openPositions: Position[]; realTrades: ClosedTrade[];
+  lastSignal: Signal | null; prices: Record<string, number>;
+  stats: { winRate: number; pnl: number; profitFactor: number; sharpe: number; total: number; expectancy: number; maxDrawdown: number };
+  correlationMatrix: Record<string, Record<string, number>>;
+  assetIntelligence: Record<string, AssetIntelligence>;
+}) {
+  const [messages, setMessages] = React.useState<{role:"user"|"ai"; text:string; ts:string}[]>([]);
+  const [input,    setInput]    = React.useState("");
+  const [loading,  setLoading]  = React.useState(false);
+  const [aiStatus, setAiStatus] = React.useState<string>("idle");
+    const endRef = React.useRef<HTMLDivElement>(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    React.useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  function chatStatsByAsset(trades: ClosedTrade[]): string {
+    return ["BTCUSD","ETHUSD","XAUUSD","XAGUSD"].map(a => {
+      const at = trades.filter(t => t.asset === a);
+      if (!at.length) return "  " + a + ": sin trades";
+      const wr   = (at.filter(t => t.pnl > 0).length / at.length * 100).toFixed(0);
+      const pnl  = at.reduce((s, t) => s + t.pnl, 0).toFixed(3);
+      const avgR = (at.reduce((s, t) => s + t.pnl, 0) / at.length).toFixed(3);
+      return "  " + a + ": " + at.length + " trades | WR " + wr + "% | PnL $" + pnl + " | avg $" + avgR + "/trade";
+    }).join("\n");
+  }
+  function chatStatsBySession(trades: ClosedTrade[]): string {
+    return ["NY","London","Asia","Post-NY","Weekend"].map(sess => {
+      const st = trades.filter(t => (t as ClosedTrade & {session?:string}).session === sess);
+      if (!st.length) return "  " + sess + ": sin trades";
+      const wr  = (st.filter(t => t.pnl > 0).length / st.length * 100).toFixed(0);
+      const pnl = st.reduce((s, t) => s + t.pnl, 0).toFixed(3);
+      return "  " + sess + ": " + st.length + " trades | WR " + wr + "% | PnL $" + pnl;
+    }).join("\n");
+  }
+  function chatStatsByMode(trades: ClosedTrade[]): string {
+    return ["scalping","intradia"].map(m => {
+      const mt = trades.filter(t => t.mode === m);
+      if (!mt.length) return "  " + m + ": sin trades";
+      const wr  = (mt.filter(t => t.pnl > 0).length / mt.length * 100).toFixed(0);
+      const pnl = mt.reduce((s, t) => s + t.pnl, 0).toFixed(3);
+      return "  " + m + ": " + mt.length + " trades | WR " + wr + "% | PnL $" + pnl;
+    }).join("\n");
+  }
+  function chatBestWorst(trades: ClosedTrade[]): string {
+    if (!trades.length) return "  No trades yet";
+    const sorted = [...trades].sort((a, b) => b.pnl - a.pnl);
+    const best  = sorted[0];
+    const worst = sorted[sorted.length - 1];
+    return "  Best:  " + best.asset  + " " + best.direction  + " " + best.mode  + " | +$" + (best.pnl ?? 0).toFixed(3)  + "\n"
+         + "  Worst: " + worst.asset + " " + worst.direction + " " + worst.mode + " | $"  + (worst.pnl ?? 0).toFixed(3);
+  }
+  function chatReversalStats(trades: ClosedTrade[]): string {
+    const rev = trades.slice(0,10).filter(t => (t as ClosedTrade & {isReversalSetup?:boolean}).isReversalSetup);
+    if (!rev.length) return "  Ninguno en últimos 10 trades";
+    return rev.map(t => "  " + t.asset + " " + t.direction + " | " + t.result + " | $" + (t.pnl ?? 0).toFixed(3)).join("\n");
+  }
+
+  async function sendMessage() {
+    const q = input.trim();
+    if (!q || loading) return;
+    const ts = new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });
+    setMessages(prev => [...prev, { role: "user", text: q, ts }]);
+    setInput("");
+    setLoading(true);
+
+    // Contexto del sistema para el chat
+    // Calcular métricas de riesgo para el chat
+    const chatWins   = realTrades.filter(t=>t.pnl>0);
+    const chatLosses = realTrades.filter(t=>t.pnl<=0);
+    const chatWR     = stats.total > 0 ? chatWins.length / stats.total : 0;
+    const chatAvgW   = chatWins.length   ? chatWins.reduce((s,t)=>s+t.pnl,0)/chatWins.length   : 0;
+    const chatAvgL   = chatLosses.length ? Math.abs(chatLosses.reduce((s,t)=>s+t.pnl,0)/chatLosses.length) : 0;
+    const chatEV     = (chatWR * chatAvgW - (1-chatWR) * chatAvgL).toFixed(3);
+    const chatKelly  = chatAvgL > 0 ? clamp(chatWR - (1-chatWR)/(chatAvgW/chatAvgL), 0, 0.25) : 0;
+    const chatStreak = realTrades.slice(0,10).reduce((s,t)=>t.pnl<=0 ? s+1 : 0, 0);
+
+    const systemCtx = `You are an algorithmic trading system managing a REAL funded account of $100 USDT.
+You speak to your operator in Spanish. Be direct, quantitative, and honest — neither alarmist nor dismissive.
+
+ACCOUNT STATE:
+- Equity: $${stats.total > 0 ? (100 + stats.pnl).toFixed(2) : "100.00"} USDT (initial: $100)
+- P&L total: $${(stats.pnl ?? 0).toFixed(2)} | Trades: ${stats.total} | Win rate: ${(stats.winRate ?? 0).toFixed(1)}%
+- Profit factor: ${(stats.profitFactor ?? 0).toFixed(2)} | Sharpe: ${(stats.sharpe ?? 0).toFixed(2)} | Max DD: ${stats.maxDrawdown?.toFixed(1) ?? "N/A"}%
+- Avg win: $${chatAvgW.toFixed(3)} | Avg loss: $${chatAvgL.toFixed(3)}
+- Expected value/trade: $${chatEV}
+- Kelly fraction: ${(chatKelly*100).toFixed(1)}% of capital
+- Consecutive losses now: ${chatStreak}
+- Open positions: ${openPositions.length}/3
+- Current prices: BTC $${prices.BTCUSD?.toFixed(2)} | ETH $${prices.ETHUSD?.toFixed(2)} | XAU $${prices.XAUUSD?.toFixed(2)} | XAG $${prices.XAGUSD?.toFixed(3)}
+
+OPEN POSITIONS:
+${openPositions.length === 0 ? "None" : openPositions.map(p => {
+  const pnlEst = (p.signal.direction === "LONG"
+    ? prices[p.signal.asset] - p.signal.entry
+    : p.signal.entry - prices[p.signal.asset]) * p.size;
+  return `  ${p.signal.asset} ${p.signal.direction} ${p.signal.mode.toUpperCase()} | Entry ${(p.signal.entry ?? 0).toFixed(3)} → now ${prices[p.signal.asset]?.toFixed(3)} | PnL est: $${pnlEst.toFixed(3)} | SL: ${(p.signal.stopLoss ?? 0).toFixed(3)} | TP: ${(p.signal.takeProfit ?? 0).toFixed(3)} | Margin: $${(p.marginUsed ?? 0).toFixed(3)}`;
+}).join("\n")}
+
+LAST 5 TRADES:
+${realTrades.slice(0,5).map(t =>
+  `  ${t.asset} ${t.direction} ${t.mode.toUpperCase()} | ${t.result} | PnL: $${(t.pnl ?? 0).toFixed(3)}`
+).join("\n") || "None yet"}
+
+LAST SIGNAL: ${lastSignal ? `${lastSignal.asset} ${lastSignal.direction} ${lastSignal.mode} conf:${(lastSignal.confidence ?? 0).toFixed(0)}% | ${lastSignal.rationale}` : "None"}
+
+BEHAVIOR RULES FOR CHAT:
+- When asked about risk, always cite actual numbers (EV, Kelly, ruina, DD)
+- When asked why a trade opened/closed, reference the actual signal data
+- When asked if should open/close, apply the decision framework: EV positive + RR ≥ 1.5 + DD < 5% = lean OPEN
+- Never say "it's just paper trading" — treat everything as real capital
+- Max 220 words per response. Be precise and actionable.
+
+PERFORMANCE BY ASSET:
+${chatStatsByAsset(realTrades)}
+
+PERFORMANCE BY SESSION:
+${chatStatsBySession(realTrades)}
+
+PERFORMANCE BY MODE:
+${chatStatsByMode(realTrades)}
+
+BEST/WORST TRADES:
+${chatBestWorst(realTrades)}
+
+REVERSAL SETUPS DETECTED (last 10 trades):
+${chatReversalStats(realTrades)}
+
+ASSET CORRELATIONS (dynamic, last 200 candles 1m):
+${chatCorrelationContext(correlationMatrix)}
+
+ASSET INTELLIGENCE (learned per asset):
+${chatAssetIntelContext(assetIntelligence)}`;
+
+    if (!usingGroq || !apiKey.trim()) {
+      setMessages(prev => [...prev, {
+        role: "ai",
+        text: "Necesitás activar Groq y configurar una API key en Configuración para usar el chat con IA.",
+        ts: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })
+      }]);
+      setLoading(false);
+      return;
+    }
+
+    try {
+      if (!canGroqCall()) {
+        setMessages(prev => [...prev, { role: "ai", text: "⏸ Groq pausado por rate limit — esperá unos segundos.", ts: "" }]);
+        setLoading(false); return;
+      }
+      onGroqCall();
+      const r = await fetch("/api/groq", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
+        body: JSON.stringify({
+          model: groqModel,
+          temperature: 0.4, max_tokens: 350,
+          messages: [
+            { role: "system", content: systemCtx },
+            ...messages.filter(m => m.role !== "ai" || messages.indexOf(m) > 0).slice(-6).map(m => ({
+              role: m.role === "user" ? "user" : "assistant", content: m.text
+            })),
+            { role: "user", content: q }
+          ],
+        }),
+      });
+      if (!r.ok) {
+        let detail = "";
+        try { const e = await r.json(); detail = e?.error?.message ?? `HTTP ${r.status}`; } catch { detail = `HTTP ${r.status}`; }
+        throw new Error(detail);
+      }
+      const data = await r.json() as { choices: Array<{ message: { content: string } }> };
+      const reply = data?.choices?.[0]?.message?.content?.trim() ?? "Sin respuesta.";
+      setMessages(prev => [...prev, { role: "ai", text: reply, ts: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }) }]);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const friendly = msg.includes("Failed to fetch") || msg.includes("NetworkError")
+        ? "Sin conexión al proxy /api/groq. Verificá el deploy en Vercel."
+        : msg.includes("401") ? "API key inválida — regenerala en console.groq.com"
+        : msg.includes("404") ? `Modelo no encontrado: ${groqModel}. Reconectá Groq en Configuración.`
+        : msg.includes("429") ? "Rate limit de Groq — esperá unos segundos."
+        : `Error: ${msg}`;
+      setMessages(prev => [...prev, { role: "ai", text: friendly, ts: "" }]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const suggestions = [
+    "¿Por qué abriste el último trade?",
+    "¿Qué opinas del rendimiento actual?",
+    "¿Cuál es el mayor riesgo ahora?",
+    "¿Deberías cerrar alguna posición?",
   ];
+
   return (
-    <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:6 }}>
-      {items.map(it => (
-        <div key={it.lbl} style={{ background:"rgba(255,255,255,0.03)", borderRadius:8,
-          padding:"8px 6px", textAlign:"center", border:"1px solid rgba(255,255,255,0.06)" }}>
-          <p style={{ fontSize:9, color:"var(--muted)", marginBottom:2, textTransform:"uppercase",
-            letterSpacing:"0.05em" }}>{it.lbl}</p>
-          <p style={{ fontSize:14, fontWeight:800, color:it.col,
-            fontFamily:"'JetBrains Mono',monospace" }}>{it.val}</p>
-          <p style={{ fontSize:9, color:it.col, marginTop:1, fontWeight:700 }}>{it.sub}</p>
-          <p style={{ fontSize:8, color:"var(--muted)", marginTop:2 }}>{it.note}</p>
+    <div className="card" style={{ display: "flex", flexDirection: "column", height: 420, padding: 0, overflow: "hidden" }}>
+      {/* Header */}
+      <div style={{ padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 16 }}>🤖</span>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>Chat con la IA</div>
+          <div style={{ fontSize: 10, color: "var(--muted)" }}>
+            {usingGroq && apiKey ? "Llama 4 Scout · contexto en vivo" : "Configurá Groq para activar"}
+          </div>
+        </div>
+      </div>
+
+      {/* Messages */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+        {messages.map((m, i) => (
+          <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: m.role === "user" ? "flex-end" : "flex-start" }}>
+            <div style={{
+              maxWidth: "88%", padding: "8px 11px", borderRadius: m.role === "user" ? "12px 12px 4px 12px" : "12px 12px 12px 4px",
+              background: m.role === "user" ? "rgba(99,102,241,0.25)" : "rgba(255,255,255,0.05)",
+              border: `1px solid ${m.role === "user" ? "rgba(99,102,241,0.4)" : "rgba(255,255,255,0.08)"}`,
+              fontSize: 12.5, lineHeight: 1.5, color: "var(--text)",
+            }}>
+              {m.text}
+            </div>
+            {m.ts && <span style={{ fontSize: 9.5, color: "var(--muted)", marginTop: 2, paddingInline: 4 }}>{m.ts}</span>}
+          </div>
+        ))}
+        {loading && (
+          <div style={{ display: "flex", alignItems: "flex-start" }}>
+            <div style={{ padding: "8px 12px", borderRadius: "12px 12px 12px 4px", background: "rgba(255,255,255,0.05)", fontSize: 12 }}>
+              <span style={{ opacity: 0.6 }}>Analizando</span>
+              <span style={{ animation: "pulse 1s infinite" }}> ···</span>
+            </div>
+          </div>
+        )}
+        <div ref={endRef} />
+      </div>
+
+      {/* Suggestions */}
+      {messages.length <= 2 && (
+        <div style={{ padding: "4px 10px", display: "flex", flexWrap: "wrap", gap: 4 }}>
+          {suggestions.map(s => (
+            <button key={s} onClick={() => setInput(s)}
+              style={{ fontSize: 10.5, padding: "3px 8px", borderRadius: 12, cursor: "pointer",
+                border: "1px solid rgba(99,102,241,0.3)", background: "rgba(99,102,241,0.08)",
+                color: "#a5b4fc" }}>
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Input */}
+      <div style={{ padding: "8px 10px", borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", gap: 6 }}>
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), void sendMessage())}
+          placeholder="Preguntá sobre los trades..."
+          style={{ flex: 1, padding: "7px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)",
+            background: "rgba(255,255,255,0.05)", color: "var(--text)", fontSize: 12.5, outline: "none" }}
+        />
+        <button onClick={() => void sendMessage()} disabled={loading || !input.trim()}
+          style={{ padding: "7px 12px", borderRadius: 8, border: "none", cursor: loading ? "wait" : "pointer",
+            background: loading || !input.trim() ? "rgba(99,102,241,0.2)" : "rgba(99,102,241,0.7)",
+            color: "#fff", fontSize: 13, fontWeight: 700 }}>
+          ↑
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// useLocalStorage reemplazado por useState in-memory (localStorage no disponible en este entorno)
+function chatCorrelationContext(corrMatrix: Record<string, Record<string, number>>): string {
+  const pairs = Object.entries(corrMatrix).flatMap(([a, row]) =>
+    Object.entries(row)
+      .filter(([b, c]) => a < b && Math.abs(c) >= 0.6)
+      .map(([b, c]) => ({ a, b, c }))
+  ).sort((x, y) => Math.abs(y.c) - Math.abs(x.c)).slice(0, 10);
+  if (!pairs.length) return "  Sin correlaciones calculadas aún";
+  return pairs.map(({a, b, c}) =>
+    `  ${a}↔${b}: ${c >= 0 ? "+" : ""}${c.toFixed(2)} (${Math.abs(c) >= 0.75 ? "ALTA — bloqueado abrir mismo lado" : Math.abs(c) >= 0.5 ? "moderada" : "leve"})`
+  ).join("\n");
+}
+
+function chatAssetIntelContext(intel: Record<string, AssetIntelligence>): string {
+  const top = Object.values(intel).filter(i => i.totalTrades >= 3)
+    .sort((a,b) => b.profitFactor - a.profitFactor).slice(0, 8);
+  if (!top.length) return "  Sin inteligencia aprendida aún";
+  return top.map(i =>
+    `  ${i.symbol} [${i.category}]: WR=${((i.winRate)*100).toFixed(0)}% PF=${(i.profitFactor ?? 0).toFixed(2)} mejor=${i.bestSession}/${i.bestMode}/${i.bestHourUTC}h`
+  ).join("\n");
+}
+
+function useLocalStorage<T>(key: string, initial: T): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const [val, setVal] = useState<T>(() => {
+    try {
+      const stored = localStorage.getItem(key);
+      if (stored !== null) return JSON.parse(stored) as T;
+    } catch { /* ignore */ }
+    return initial;
+  });
+  const setAndStore: React.Dispatch<React.SetStateAction<T>> = (action) => {
+    setVal(prev => {
+      const next = typeof action === "function"
+        ? (action as (p: T) => T)(prev)
+        : action;
+      try { localStorage.setItem(key, JSON.stringify(next)); } catch { /* storage full */ }
+      return next;
+    });
+  };
+  return [val, setAndStore];
+}
+
+
+// ── Error Boundary — muestra el error en pantalla en vez de negro ─────────────
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode; onReset?: () => void },
+  { error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{
+          background: "#0f172a", color: "#f87171", padding: 32,
+          fontFamily: "monospace", fontSize: 14, minHeight: "100vh",
+          whiteSpace: "pre-wrap", wordBreak: "break-all"
+        }}>
+          <h2 style={{ color: "#ef4444", marginBottom: 16 }}>
+            💥 TraderLab — Error de render
+          </h2>
+          <p style={{ color: "#fca5a5", marginBottom: 8 }}><strong>{this.state.error.message}</strong></p>
+          <pre style={{ fontSize: 11, opacity: 0.7, marginBottom: 16 }}>{this.state.error.stack}</pre>
+          <button onClick={() => { this.setState({ error: null }); this.props.onReset?.(); }}
+            style={{ padding: "8px 20px", background: "#6366f1", color: "#fff", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: 700 }}>
+            🔄 Reintentar
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+  componentDidCatch(e: Error) { console.error("[TraderLab]", e.message, e.stack); }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ─── COMPONENTES UI ──────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── ErrorBoundary ─────────────────────────────────────────────────────────────
+
+// ── ToastList ─────────────────────────────────────────────────────────────────
+function ToastList({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: number) => void }) {
+  return (
+    <div style={{ position: "fixed", top: 16, right: 16, zIndex: 9999, display: "flex", flexDirection: "column", gap: 8, pointerEvents: "none" }}>
+      {toasts.map(t => (
+        <div key={t.id} onClick={() => onRemove(t.id)}
+          style={{
+            pointerEvents: "all", cursor: "pointer", minWidth: 260, maxWidth: 380,
+            padding: "10px 14px", borderRadius: 10, fontSize: 13, fontWeight: 600,
+            background: t.type === "success" ? "rgba(16,185,129,0.92)" : t.type === "error" ? "rgba(239,68,68,0.92)" : t.type === "warning" ? "rgba(245,158,11,0.92)" : "rgba(99,102,241,0.92)",
+            color: "#fff", boxShadow: "0 4px 20px rgba(0,0,0,0.4)",
+          }}>
+          {t.msg}
         </div>
       ))}
     </div>
   );
 }
 
-function EVBar({ pTP, pSL, ev }: { pTP:number; pSL:number; ev:number }) {
-  const col = ev > 0 ? "#10b981" : "#ef4444";
+// ── TechTip ───────────────────────────────────────────────────────────────────
+const TECH_TIPS: Record<string, string> = {
+  Wyckoff: "Metodología de análisis de fases del mercado: Acumulación (A-B-C), Distribución y tendencia (D-E).",
+  RSI: "Relative Strength Index — oscilador 0-100. >70 sobrecomprado, <30 sobrevendido.",
+  VWAP: "Volume Weighted Average Price — precio promedio ponderado por volumen. Referencia institucional.",
+  ATR: "Average True Range — medida de volatilidad. El SL se calcula como múltiplo del ATR.",
+  CVD: "Cumulative Volume Delta — diferencia acumulada entre volumen compra/venta.",
+};
+function TechTip({ term, children }: { term: string; children: React.ReactNode }) {
+  const tip = TECH_TIPS[term];
+  if (!tip) return <>{children}</>;
   return (
-    <div style={{ background:"rgba(255,255,255,0.03)", borderRadius:8, padding:"10px 12px" }}>
-      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
-        <span style={{ fontSize:11, fontWeight:700 }}>
-          Expected Value{" "}
-          <span style={{ color:col, fontFamily:"'JetBrains Mono',monospace" }}>
-            {ev>0?"+":""}{ev.toFixed(5)}
-          </span>
-        </span>
-        <span style={{ fontSize:10, color:"var(--muted)" }}>
-          ∫N(d₁) = {(pTP*100).toFixed(1)}% · ∫N(d₂) = {(pSL*100).toFixed(1)}%
-        </span>
-      </div>
-      <div style={{ position:"relative", height:8, borderRadius:4,
-        overflow:"hidden", background:"rgba(255,255,255,0.06)" }}>
-        <div style={{ position:"absolute", left:0, top:0, height:"100%",
-          width:`${pTP*100}%`,
-          background:"linear-gradient(90deg,#059669,#10b981)", borderRadius:"4px 0 0 4px" }} />
-        <div style={{ position:"absolute", right:0, top:0, height:"100%",
-          width:`${pSL*100}%`,
-          background:"linear-gradient(90deg,#ef4444,#fca5a5)", borderRadius:"0 4px 4px 0" }} />
-      </div>
-      <div style={{ display:"flex", justifyContent:"space-between", marginTop:4 }}>
-        <span style={{ fontSize:9, color:"#10b981" }}>P(TP) ↑</span>
-        <span style={{ fontSize:9, color:"#ef4444" }}>P(SL) ↓</span>
-      </div>
-    </div>
+    <span className="tip">
+      {children}
+      <i className="tip-icon">?</i>
+      <span className="tip-box">{tip}</span>
+    </span>
   );
 }
 
-function WyckoffBadge({ ctx }: { ctx:WyckoffCtx }) {
-  const phC: Record<string,string> = {
-    A:"#6b7280",B:"#6366f1",C:"#f59e0b",D:"#10b981",E:"#3b82f6",unknown:"#374151"
+// ── AiBadge ───────────────────────────────────────────────────────────────────
+function AiBadge({ status, onTest, latency }: { status: string; onTest: () => void; latency: number | null }) {
+  const cfg: Record<string, { bg: string; color: string; label: string }> = {
+    idle:     { bg: "rgba(16,185,129,0.15)",  color: "#10b981", label: "IA lista" },
+    loading:  { bg: "rgba(245,158,11,0.15)",  color: "#f59e0b", label: "IA procesando" },
+    error:    { bg: "rgba(239,68,68,0.15)",   color: "#ef4444", label: "IA error" },
+    disabled: { bg: "rgba(255,255,255,0.06)", color: "var(--muted)", label: "IA inactiva" },
   };
-  const biC: Record<string,string> = {
-    accumulation:"#10b981",distribution:"#ef4444",neutral:"#6b7280"
-  };
-  const scC: Record<string,string> = {
-    compressing:"#a5b4fc",expanding:"#fbbf24",neutral:"var(--muted)"
-  };
+  const c = cfg[status] ?? cfg.disabled;
   return (
-    <div style={{ background:"rgba(255,255,255,0.02)", borderRadius:8, padding:"10px 12px",
-      borderLeft:`3px solid ${biC[ctx.bias]}` }}>
-      <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:6, flexWrap:"wrap" }}>
-        <span style={{ fontSize:11, fontWeight:800, padding:"2px 8px", borderRadius:6,
-          background:phC[ctx.phase]+"20", color:phC[ctx.phase] }}>
-          Fase {ctx.phase}
-        </span>
-        <span style={{ fontSize:11, fontWeight:700, color:biC[ctx.bias] }}>
-          {ctx.bias==="accumulation"?"🐂 Acumulación":ctx.bias==="distribution"?"🐻 Distribución":"⚖ Neutro"}
-        </span>
-        <span style={{ fontSize:10, padding:"2px 7px", borderRadius:5,
-          background:scC[ctx.sigmaCtrl]+"18", color:scC[ctx.sigmaCtrl] }}>
-          σ {ctx.sigmaCtrl}
-        </span>
-      </div>
-      <p style={{ fontSize:11, color:"var(--text)", marginBottom:3, fontWeight:600 }}>{ctx.mmAction}</p>
-      <p style={{ fontSize:10, color:"var(--muted)", fontStyle:"italic" }}>{ctx.narrative}</p>
-    </div>
+    <button onClick={onTest} title="Testear conexion IA"
+      style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 10px", borderRadius: 20,
+        background: c.bg, color: c.color, border: `1px solid ${c.color}40`,
+        fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: c.color, flexShrink: 0 }} />
+      {c.label}
+      {latency !== null && <span style={{ opacity: 0.7 }}> {latency}ms</span>}
+    </button>
   );
 }
 
-// Mini sparkline de σ histórico
-function SigmaSparkline({ data }: { data: number[] }) {
-  if (data.length < 2) return null;
-  const w = 120, h = 30;
-  const mn = Math.min(...data), mx = Math.max(...data);
-  const range = Math.max(mx - mn, 0.001);
-  const pts = data.slice(-20).map((v,i,arr) =>
-    `${(i/(arr.length-1))*w},${h - ((v-mn)/range)*h}`
-  ).join(" ");
-  const last = data[data.length-1];
-  const prev = data[data.length-2];
-  const col  = last > prev ? "#f59e0b" : "#6b7280";
-  return (
-    <div style={{ display:"inline-flex", alignItems:"center", gap:6 }}>
-      <svg width={w} height={h} style={{ overflow:"visible" }}>
-        <polyline points={pts} fill="none" stroke={col} strokeWidth={1.5}
-          strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-      <span style={{ fontSize:11, fontFamily:"monospace", color:col, fontWeight:700 }}>
-        {(last*100).toFixed(1)}%/a
-      </span>
-    </div>
-  );
-}
-
-// Heatmap Δ × todos los activos
-function DeltaHeatmap({ greeksMap, assets, activeAsset, onSelect }:{
-  greeksMap: Record<string,BSGreeks>; assets:string[];
-  activeAsset:string; onSelect:(a:string)=>void;
+// ── CandlestickChart ──────────────────────────────────────────────────────────
+function CandlestickChart({
+  candles, indicators, wyckoff, showIndicators, lastSignal,
+}: {
+  candles: Candle[];
+  indicators: Indicators | null;
+  wyckoff: WyckoffAnalysis | null;
+  showIndicators: boolean;
+  lastSignal?: Signal | null;
 }) {
+  // Layout: area de precio (80%) + barras de volumen (20%)
+  const W = 680, H_TOTAL = 280, H_VOL = 44, PL = 56, PR = 10, PT = 12, PB_PRICE = 4;
+  const H_PRICE = H_TOTAL - H_VOL - 8;
+  const data = candles.slice(-80);
+  if (!data.length) {
+    return (
+      <div style={{ width:"100%", height:H_TOTAL, display:"flex", alignItems:"center",
+        justifyContent:"center", color:"var(--muted)", fontSize:12, gap:8 }}>
+        <span style={{ fontSize:20 }}>📡</span>
+        Sin datos de velas — conectá el bridge MT5
+      </div>
+    );
+  }
+  const hi    = Math.max(...data.map(c => c.h));
+  const lo    = Math.min(...data.map(c => c.l));
+  const range = hi - lo || 1;
+  const cW    = (W - PL - PR) / data.length;
+  const bW    = Math.max(1.5, cW * 0.65);
+  // Funciones de proyección para área precio
+  const py = (p: number) => PT + ((hi - p) / range) * (H_PRICE - PT - PB_PRICE);
+  const px = (i: number) => PL + i * cW + cW / 2;
+  // Volumen
+  const maxVol  = Math.max(...data.map(c => c.v ?? 0), 1);
+  const vyTop   = H_PRICE + 8;
+  const vyH     = H_VOL - 4;
+  const volBarH = (v: number) => (v / maxVol) * vyH;
+  // EMA rápida y lenta para el gráfico
+  const closes  = data.map(c => c.c);
+  const ema8arr  = closes.map((_, i) => {
+    if (i < 7) return null;
+    const k = 2 / (8 + 1);
+    let e = closes[i - 7];
+    for (let j = i - 6; j <= i; j++) e = closes[j] * k + e * (1 - k);
+    return e;
+  });
+  const ema21arr = closes.map((_, i) => {
+    if (i < 20) return null;
+    const k = 2 / (21 + 1);
+    let e = closes[i - 20];
+    for (let j = i - 19; j <= i; j++) e = closes[j] * k + e * (1 - k);
+    return e;
+  });
+  const ticks   = Array.from({ length: 6 }, (_, i) => lo + (range / 5) * (5 - i));
+  // Precio actual (última vela)
+  const lastPrice = data[data.length - 1]?.c ?? 0;
+  const lastBull  = data[data.length - 1]?.c >= data[data.length - 1]?.o;
+  const digits    = lastPrice >= 100 ? 2 : lastPrice >= 1 ? 4 : 5;
+
+  // Wyckoff event labels mejorados con emojis
+  const wyckoffEmoji: Record<string, string> = {
+    "SC": "🔥 SC", "AR": "↗ AR", "ST": "⚠ ST", "SOS": "🚀 SOS", "SOW": "💀 SOW",
+    "LPS": "✅ LPS", "LPSY": "❌ LPSY", "BC": "🔔 BC", "UT": "⬆ UT", "UTAD": "🔥 UTAD",
+    "ICE": "🧊 ICE", "PSY": "📌 PSY", "PSA": "📌 PSA",
+  };
+
   return (
-    <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:4 }}>
-      {assets.slice(0,16).map(a => {
-        const g = greeksMap[a];
-        if (!g) return (
-          <div key={a} style={{ padding:"5px 6px", borderRadius:7,
-            background:"rgba(255,255,255,0.02)", cursor:"pointer" }}
-            onClick={()=>onSelect(a)}>
-            <div style={{ fontSize:9, color:"var(--muted)" }}>
-              {a.replace("USDT","").replace("USD","")}
-            </div>
-            <div style={{ fontSize:9, color:"var(--muted)" }}>—</div>
-          </div>
-        );
-        const d = g.delta;
-        // Color: rojo intenso < 0.35, verde intenso > 0.65, amarillo en 0.5
-        const heat = d > 0.65 ? `rgba(16,185,129,${(d-0.5)*1.5})`
-                   : d < 0.35 ? `rgba(239,68,68,${(0.5-d)*1.5})`
-                   : `rgba(245,158,11,${0.08})`;
-        const arrow = d > 0.58 ? "↑" : d < 0.42 ? "↓" : "→";
-        const col   = d > 0.58 ? "#10b981" : d < 0.42 ? "#ef4444" : "#f59e0b";
+    <svg viewBox={`0 0 ${W} ${H_TOTAL}`} style={{ width:"100%", height:H_TOTAL, display:"block" }}>
+      {/* Fondo */}
+      <rect width={W} height={H_TOTAL} fill="transparent" />
+
+      {/* Grid horizontal */}
+      {ticks.map((t, i) => (
+        <g key={i}>
+          <line x1={PL} x2={W - PR} y1={py(t)} y2={py(t)}
+            stroke="rgba(255,255,255,0.05)" strokeWidth={1} />
+          <text x={PL - 5} y={py(t) + 3.5} textAnchor="end" fontSize={9.5}
+            fill="rgba(148,163,184,0.6)" fontFamily="'JetBrains Mono',monospace">
+            {t >= 1000 ? t.toFixed(0) : t >= 1 ? t.toFixed(digits-1) : t.toFixed(digits)}
+          </text>
+        </g>
+      ))}
+
+      {/* Zona soporte Wyckoff */}
+      {wyckoff?.supportZone && (
+        <rect x={PL} width={W - PL - PR}
+          y={py(wyckoff.supportZone[1])}
+          height={Math.max(2, py(wyckoff.supportZone[0]) - py(wyckoff.supportZone[1]))}
+          fill="rgba(16,185,129,0.10)" stroke="rgba(16,185,129,0.3)" strokeWidth={0.5} strokeDasharray="3,2" />
+      )}
+      {wyckoff?.resistanceZone && (
+        <rect x={PL} width={W - PL - PR}
+          y={py(wyckoff.resistanceZone[1])}
+          height={Math.max(2, py(wyckoff.resistanceZone[0]) - py(wyckoff.resistanceZone[1]))}
+          fill="rgba(239,68,68,0.10)" stroke="rgba(239,68,68,0.3)" strokeWidth={0.5} strokeDasharray="3,2" />
+      )}
+
+      {/* SL / TP de la última señal activa */}
+      {lastSignal && lastSignal.stopLoss > 0 && (() => {
+        const slY  = py(lastSignal.stopLoss);
+        const tp1Y = lastSignal.tp1 ? py(lastSignal.tp1) : null;
+        const tp2Y = py(lastSignal.tp2 ?? lastSignal.takeProfit);
+        const isLong = lastSignal.direction === "LONG";
         return (
-          <div key={a} onClick={()=>onSelect(a)}
-            style={{ padding:"6px 7px", borderRadius:7, cursor:"pointer",
-              background: heat,
-              border: activeAsset===a ? "1px solid #6366f1" : "1px solid transparent",
-              transition:"all 0.2s" }}>
-            <div style={{ fontSize:9, color:"var(--muted)", marginBottom:1 }}>
-              {a.replace("USDT","").replace("USD","")}
-            </div>
-            <div style={{ display:"flex", alignItems:"center", gap:2 }}>
-              <span style={{ color:col, fontWeight:800, fontSize:12 }}>{arrow}</span>
-              <span style={{ fontSize:11, fontFamily:"monospace", color:col, fontWeight:700 }}>
-                {d.toFixed(3)}
-              </span>
-            </div>
-            <div style={{ display:"flex", gap:3, marginTop:1 }}>
-              {g.gammaExtreme && <span style={{ fontSize:7, color:"#a78bfa" }}>Γ⚡</span>}
-              {g.vegaCross    && <span style={{ fontSize:7, color:"#f59e0b" }}>V↑</span>}
-            </div>
+          <g>
+            {/* SL — línea roja */}
+            <line x1={PL} x2={W-PR} y1={slY} y2={slY} stroke="#ef4444" strokeWidth={1.5} strokeDasharray="5,3" opacity={0.8} />
+            <rect x={W-PR-36} y={slY-9} width={36} height={13} fill="#ef4444" fillOpacity={0.85} rx={3} />
+            <text x={W-PR-18} y={slY+1} textAnchor="middle" fontSize={8.5} fill="white" fontWeight={800}>SL</text>
+            {/* TP2 — línea verde */}
+            <line x1={PL} x2={W-PR} y1={tp2Y} y2={tp2Y} stroke="#10b981" strokeWidth={1.5} strokeDasharray="5,3" opacity={0.8} />
+            <rect x={W-PR-36} y={tp2Y-9} width={36} height={13} fill="#10b981" fillOpacity={0.85} rx={3} />
+            <text x={W-PR-18} y={tp2Y+1} textAnchor="middle" fontSize={8.5} fill="white" fontWeight={800}>TP</text>
+            {/* TP1 */}
+            {tp1Y && (
+              <>
+                <line x1={PL} x2={W-PR} y1={tp1Y} y2={tp1Y} stroke="#34d399" strokeWidth={1} strokeDasharray="3,4" opacity={0.6} />
+                <rect x={W-PR-36} y={tp1Y-9} width={36} height={13} fill="#34d399" fillOpacity={0.7} rx={3} />
+                <text x={W-PR-18} y={tp1Y+1} textAnchor="middle" fontSize={8.5} fill="white" fontWeight={700}>TP1</text>
+              </>
+            )}
+            {/* Zona TP-entry sombreada */}
+            <rect x={PL} width={W-PL-PR-38}
+              y={isLong ? tp2Y : py(lastSignal.entry)}
+              height={Math.abs(tp2Y - py(lastSignal.entry))}
+              fill="rgba(16,185,129,0.06)" />
+            {/* Zona entry-SL sombreada */}
+            <rect x={PL} width={W-PL-PR-38}
+              y={isLong ? py(lastSignal.entry) : slY}
+              height={Math.abs(py(lastSignal.entry) - slY)}
+              fill="rgba(239,68,68,0.06)" />
+            {/* Marcador de entry */}
+            <line x1={PL} x2={W-PR-38} y1={py(lastSignal.entry)} y2={py(lastSignal.entry)}
+              stroke="#f59e0b" strokeWidth={1} strokeDasharray="2,4" opacity={0.7} />
+            <text x={PL+4} y={py(lastSignal.entry)-3} fontSize={8.5} fill="#f59e0b" fontWeight={700}>
+              ENTRY {isLong ? "▲" : "▼"}
+            </text>
+          </g>
+        );
+      })()}
+
+      {/* Indicadores técnicos */}
+      {showIndicators && indicators && (
+        <>
+          {/* BB superior e inferior */}
+          <path d={data.map((_,i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.bbUpper)}`).join(" ")}
+            fill="none" stroke="rgba(99,102,241,0.4)" strokeWidth={1} strokeDasharray="3,3" />
+          <path d={data.map((_,i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.bbLower)}`).join(" ")}
+            fill="none" stroke="rgba(99,102,241,0.4)" strokeWidth={1} strokeDasharray="3,3" />
+          {/* VWAP */}
+          <path d={data.map((_,i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwap)}`).join(" ")}
+            fill="none" stroke="rgba(245,158,11,0.85)" strokeWidth={2} />
+          {/* VWAP bands */}
+          <path d={data.map((_,i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwapUpperBand1)}`).join(" ")}
+            fill="none" stroke="rgba(245,158,11,0.35)" strokeWidth={1} strokeDasharray="2,3" />
+          <path d={data.map((_,i) => `${i===0?"M":"L"} ${px(i)} ${py(indicators.vwapLowerBand1)}`).join(" ")}
+            fill="none" stroke="rgba(245,158,11,0.35)" strokeWidth={1} strokeDasharray="2,3" />
+        </>
+      )}
+
+      {/* EMA 8 y EMA 21 — siempre visibles */}
+      <path d={ema8arr.map((v,i) => v !== null ? `${i===0||ema8arr[i-1]===null?"M":"L"} ${px(i)} ${py(v)}` : "").filter(Boolean).join(" ")}
+        fill="none" stroke="rgba(99,102,241,0.9)" strokeWidth={1.5} />
+      <path d={ema21arr.map((v,i) => v !== null ? `${i===0||ema21arr[i-1]===null?"M":"L"} ${px(i)} ${py(v)}` : "").filter(Boolean).join(" ")}
+        fill="none" stroke="rgba(251,191,36,0.7)" strokeWidth={1.5} />
+
+      {/* Velas */}
+      {data.map((c, i) => {
+        const bull = c.c >= c.o;
+        const col  = bull ? "#10b981" : "#ef4444";
+        const bTop = py(Math.max(c.o, c.c));
+        const bBot = py(Math.min(c.o, c.c));
+        const bodyH = Math.max(1.5, bBot - bTop);
+        return (
+          <g key={i}>
+            <line x1={px(i)} x2={px(i)} y1={py(c.h)} y2={py(c.l)} stroke={col} strokeWidth={1} opacity={0.8} />
+            <rect x={px(i) - bW/2} y={bTop} width={bW} height={bodyH}
+              fill={bull ? "rgba(16,185,129,0.9)" : "rgba(239,68,68,0.9)"}
+              stroke={col} strokeWidth={0.5} rx={0.5} />
+          </g>
+        );
+      })}
+
+      {/* Línea de precio actual */}
+      <line x1={PL} x2={W-PR} y1={py(lastPrice)} y2={py(lastPrice)}
+        stroke={lastBull ? "#10b981" : "#ef4444"} strokeWidth={1} strokeDasharray="2,3" opacity={0.6} />
+      <rect x={W-PR-52} y={py(lastPrice)-9} width={52} height={14} rx={3}
+        fill={lastBull ? "#10b981" : "#ef4444"} fillOpacity={0.9} />
+      <text x={W-PR-26} y={py(lastPrice)+1.5} textAnchor="middle" fontSize={8.5}
+        fill="white" fontWeight={800} fontFamily="'JetBrains Mono',monospace">
+        {lastPrice.toFixed(digits)}
+      </text>
+
+      {/* Eventos Wyckoff con emojis */}
+      {wyckoff?.events.map((ev, i) => {
+        const idx = Math.min(ev.candleIndex, data.length - 1);
+        const label = wyckoffEmoji[ev.label] ?? ev.label;
+        const isLast = ev.candleIndex >= data.length - 20;
+        return (
+          <g key={i}>
+            <line x1={px(idx)} x2={px(idx)} y1={PT} y2={H_PRICE - PB_PRICE}
+              stroke={ev.color} strokeWidth={1.5} strokeDasharray="3,3" opacity={0.6} />
+            <rect x={px(idx) - 2} y={PT - 2} width={4} height={4} fill={ev.color} opacity={0.8} />
+            {isLast && (
+              <text x={px(idx)} y={py(ev.price) - 6} textAnchor="middle" fontSize={9}
+                fill={ev.color} fontWeight={800}>{label}</text>
+            )}
+          </g>
+        );
+      })}
+
+      {/* Eje X — timestamps */}
+      {data.map((c, i) => {
+        const step = data.length > 60 ? 20 : data.length > 30 ? 10 : 5;
+        if (i % step !== 0) return null;
+        const d = new Date(c.t * 1000);
+        return (
+          <text key={i} x={px(i)} y={H_PRICE + 5} textAnchor="middle" fontSize={8.5}
+            fill="rgba(148,163,184,0.45)">
+            {`${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}`}
+          </text>
+        );
+      })}
+
+      {/* Barras de volumen */}
+      {data.map((c, i) => {
+        const bull = c.c >= c.o;
+        const bh   = volBarH(c.v ?? 0);
+        return (
+          <rect key={i}
+            x={px(i) - bW/2} y={vyTop + vyH - bh} width={bW} height={Math.max(1, bh)}
+            fill={bull ? "rgba(16,185,129,0.45)" : "rgba(239,68,68,0.45)"} rx={0.5} />
+        );
+      })}
+
+      {/* Separador precio / volumen */}
+      <line x1={PL} x2={W-PR} y1={H_PRICE+2} y2={H_PRICE+2}
+        stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
+
+      {/* Etiqueta EMA en el gráfico */}
+      <rect x={PL+2} y={PT} width={70} height={14} fill="rgba(0,0,0,0.4)" rx={3} />
+      <text x={PL+6} y={PT+10} fontSize={8.5} fill="rgba(99,102,241,0.9)" fontWeight={700}>EMA8</text>
+      <text x={PL+30} y={PT+10} fontSize={8.5} fill="rgba(148,163,184,0.5)"> · </text>
+      <text x={PL+36} y={PT+10} fontSize={8.5} fill="rgba(251,191,36,0.8)" fontWeight={700}>EMA21</text>
+    </svg>
+  );
+}
+
+// ── IndicatorPanel ────────────────────────────────────────────────────────────
+function IndicatorPanel({ ind, mode }: { ind: Indicators | null; mode: string }) {
+  if (!ind) return null;
+  const rsiColor = ind.rsi > 70 ? "#ef4444" : ind.rsi < 30 ? "#10b981" : "var(--text)";
+  const items = [
+    { label: "RSI(14)", value: (ind.rsi ?? 0).toFixed(1), color: rsiColor },
+    { label: "Stoch K/D", value: `${(ind.stochK ?? 0).toFixed(1)}/${(ind.stochD ?? 0).toFixed(1)}`, color: ind.stochK > 80 ? "#ef4444" : ind.stochK < 20 ? "#10b981" : "var(--text)" },
+    { label: "MA5/20", value: `${(ind.ma5 ?? 0).toFixed(2)}/${(ind.ma20 ?? 0).toFixed(2)}`, color: ind.ma5 > ind.ma20 ? "#10b981" : "#ef4444" },
+    { label: "VWAP", value: (ind.vwap ?? 0).toFixed(2), color: "var(--text)" },
+    { label: "BB Squeeze", value: ind.bbSqueeze ? "SQ" : "No", color: ind.bbSqueeze ? "#f59e0b" : "var(--muted)" },
+    { label: "Vol Delta", value: `${ind.volumeDeltaPct >= 0 ? "+" : ""}${(ind.volumeDeltaPct ?? 0).toFixed(1)}%`, color: ind.volumeDeltaPct > 10 ? "#10b981" : ind.volumeDeltaPct < -10 ? "#ef4444" : "var(--muted)" },
+    { label: "ATR", value: (ind.atr ?? 0).toFixed(4), color: "var(--text)" },
+    { label: "RSI Div", value: ind.rsiDivergence === "none" ? "-" : ind.rsiDivergence === "bullish" ? "Bull" : "Bear", color: ind.rsiDivergence === "bullish" ? "#10b981" : ind.rsiDivergence === "bearish" ? "#ef4444" : "var(--muted)" },
+  ];
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(130px,1fr))", gap: 6 }}>
+      {items.map(({ label, value, color }) => (
+        <div key={label} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 6, padding: "5px 9px" }}>
+          <p style={{ fontSize: 10, color: "var(--muted)", marginBottom: 1 }}>{label}</p>
+          <p style={{ fontSize: 12.5, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color }}>{value}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── WyckoffPanel ──────────────────────────────────────────────────────────────
+function WyckoffPanel({ wyckoff }: { wyckoff: WyckoffAnalysis }) {
+  const phaseColor: Record<string, string> = { A:"#f59e0b",B:"#f59e0b",C:"#ef4444",D:"#10b981",E:"#10b981",unknown:"var(--muted)" };
+  const biasColor = wyckoff.bias === "accumulation" ? "#10b981" : wyckoff.bias === "distribution" ? "#ef4444" : "var(--muted)";
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 10, background: `${phaseColor[wyckoff.phase]}22`, color: phaseColor[wyckoff.phase], fontWeight: 700 }}>
+          Fase {wyckoff.phase}
+        </span>
+        <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 10, background: `${biasColor}22`, color: biasColor, fontWeight: 700 }}>
+          {wyckoff.bias === "accumulation" ? "Acumulacion" : wyckoff.bias === "distribution" ? "Distribucion" : "Neutral"}
+        </span>
+        {wyckoff.supportZone && <span style={{ fontSize: 10, color:"var(--muted)" }}>S: {wyckoff.supportZone[0].toFixed(2)}-{wyckoff.supportZone[1].toFixed(2)}</span>}
+        {wyckoff.resistanceZone && <span style={{ fontSize: 10, color:"var(--muted)" }}>R: {wyckoff.resistanceZone[0].toFixed(2)}-{wyckoff.resistanceZone[1].toFixed(2)}</span>}
+      </div>
+      {wyckoff.events.length > 0 && (
+        <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+          {wyckoff.events.slice(-5).map((ev, i) => (
+            <span key={i} style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: `${ev.color}22`, color: ev.color, fontWeight: 700 }}>{ev.label}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── OrderFlowPanel ────────────────────────────────────────────────────────────
+function OrderFlowPanel({ of: of_, price }: { of: OrderFlowScore; price: number }) {
+  const ctrlColor = of_.control === "bulls" ? "#10b981" : of_.control === "bears" ? "#ef4444" : "#f59e0b";
+  const pct       = (of_.controlScore + 100) / 2;
+  const cvdTrend  = of_.cvd?.trend ?? "neutral";
+  const cvdArrow  = cvdTrend === "bullish" ? "↑" : cvdTrend === "bearish" ? "↓" : "→";
+  const cvdColor  = cvdTrend === "bullish" ? "#10b981" : cvdTrend === "bearish" ? "#ef4444" : "var(--muted)";
+  const hasDiverg = of_.cvd?.divergence ?? false;
+  return (
+    <div style={{ marginBottom: 8 }}>
+      {/* Header control */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+        <span style={{ fontSize:11, color:"var(--muted)" }}>Order Flow</span>
+        <span style={{ fontSize:12, fontWeight:800, color:ctrlColor }}>
+          {of_.control === "bulls" ? "🐂 Toros" : of_.control === "bears" ? "🐻 Osos" : "⚖ Disputado"}
+          <span style={{ fontSize:10, marginLeft:4, opacity:0.7 }}>{(of_.controlScore??0).toFixed(0)}</span>
+        </span>
+      </div>
+
+      {/* Barra split visual */}
+      <div style={{ height:7, borderRadius:4, background:"rgba(255,255,255,0.06)", overflow:"hidden", marginBottom:6, position:"relative" }}>
+        <div style={{ position:"absolute", left:0, top:0, width:"50%", height:"100%", background:"rgba(239,68,68,0.12)" }} />
+        <div style={{ position:"absolute", right:0, top:0, width:"50%", height:"100%", background:"rgba(16,185,129,0.12)" }} />
+        <div style={{ height:"100%", width:`${pct}%`, background:ctrlColor, borderRadius:4, position:"relative", zIndex:1, transition:"width 0.5s ease" }} />
+        <div style={{ position:"absolute", left:"50%", top:0, width:1, height:"100%", background:"rgba(255,255,255,0.18)" }} />
+      </div>
+
+      {/* 4 métricas */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:4 }}>
+        {[
+          { label:"CVD", value:`${cvdArrow}${(of_.cvdScore??0).toFixed(0)}`, color:cvdColor },
+          { label:"Foot", value:(of_.footprintScore??0).toFixed(0), color:"var(--text)" },
+          { label:"Prof", value:(of_.profileScore??0).toFixed(0), color:"var(--text)" },
+          { label:"Abs",  value:(of_.absorptionScore??0).toFixed(0), color:"var(--text)" },
+        ].map(({ label, value, color }) => (
+          <div key={label} style={{ textAlign:"center", background:"rgba(255,255,255,0.03)", borderRadius:5, padding:"3px 2px" }}>
+            <p style={{ fontSize:8.5, color:"var(--muted)", marginBottom:1 }}>{label}</p>
+            <p style={{ fontSize:11, fontWeight:700, fontFamily:"'JetBrains Mono',monospace", color }}>{value}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Divergencia */}
+      {hasDiverg && (
+        <div style={{ marginTop:5, padding:"3px 8px", borderRadius:5,
+          background:"rgba(245,158,11,0.1)", border:"1px solid rgba(245,158,11,0.22)",
+          fontSize:10, fontWeight:700, color:"#fbbf24" }}>
+          ⚠ Divergencia CVD — precio y volumen separados
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── LivePositionCard ──────────────────────────────────────────────────────────
+function LivePositionCard({
+  position, prices, now, onClose,
+}: {
+  position: Position; prices: Record<string, number>;
+  spreadByAsset?: Record<string, number>; now: number;
+  onClose: (p: Position) => void;
+}) {
+  const sig    = position.signal;
+  const dir    = sig.direction;
+  const price  = prices[sig.asset] ?? sig.entry;
+  const cs     = getAssetCatalog(sig.asset).contractSize ?? 1;
+  const pnl    = dir === "LONG"
+    ? (price - sig.entry) * position.size * cs
+    : (sig.entry - price) * position.size * cs;
+  const openTs = typeof (position as Position & {openTime?:number}).openTime === "number"
+    ? (position as Position & {openTime:number}).openTime
+    : new Date(position.openedAt).getTime();
+  const dur    = Math.floor((now - openTs) / 60000);
+  const pnlCol = pnl >= 0 ? "#10b981" : "#ef4444";
+  return (
+    <div className="live-card" style={{ borderLeft: `3px solid ${dir === "LONG" ? "#10b981" : "#ef4444"}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontWeight: 800, fontSize: 13 }}>{sig.asset}</span>
+          <span style={{ fontSize: 11, padding: "1px 6px", borderRadius: 4, fontWeight: 700,
+            background: dir === "LONG" ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
+            color: dir === "LONG" ? "#10b981" : "#ef4444" }}>{dir}</span>
+          <span style={{ fontSize: 10, color: "var(--muted)" }}>{sig.mode} · {dur}m</span>
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 800, fontSize: 14, color: pnlCol }}>
+            {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}$
+          </span>
+          <button onClick={() => onClose(position)}
+            style={{ fontSize: 11, padding: "2px 8px", borderRadius: 5, border: "1px solid rgba(239,68,68,0.3)",
+              background: "rgba(239,68,68,0.08)", color: "#ef4444", cursor: "pointer", fontWeight: 700 }}>
+            X Cerrar
+          </button>
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 4, fontSize: 11 }}>
+        {[["Entrada", (sig.entry ?? 0).toFixed(2)], ["Precio", price.toFixed(2)],
+          ["SL", (sig.stopLoss ?? 0).toFixed(2)], ["TP1", (sig.tp1 ?? 0).toFixed(2)]].map(([k, v]) => (
+          <div key={k} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "3px 6px" }}>
+            <p style={{ fontSize: 9, color: "var(--muted)" }}>{k}</p>
+            <p style={{ fontSize: 11, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace" }}>{v}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── TradeHistory ──────────────────────────────────────────────────────────────
+function TradeHistory({ trades }: { trades: ClosedTrade[] }) {
+  if (!trades.length) return (
+    <p style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: 16 }}>Sin trades cerrados aun</p>
+  );
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 320, overflowY: "auto" }}>
+      {[...trades].reverse().slice(0, 40).map((t, i) => {
+        const pnlColor = t.pnl >= 0 ? "#10b981" : "#ef4444";
+        return (
+          <div key={i} style={{ display: "grid", gridTemplateColumns: "65px 50px 55px 1fr 65px 60px", gap: 4,
+            padding: "5px 8px", borderRadius: 6, background: "rgba(255,255,255,0.025)",
+            fontSize: 11, alignItems: "center", fontFamily: "'JetBrains Mono',monospace" }}>
+            <span style={{ fontWeight: 700 }}>{t.asset}</span>
+            <span style={{ color: t.direction === "LONG" ? "#10b981" : "#ef4444", fontWeight: 700 }}>{t.direction}</span>
+            <span style={{ color: "var(--muted)" }}>{t.mode}</span>
+            <span style={{ color: "var(--muted)", fontSize: 10, fontFamily: "sans-serif", overflow: "hidden", whiteSpace: "nowrap" }}>{t.result}</span>
+            <span style={{ color: pnlColor, fontWeight: 800, textAlign: "right" }}>{t.pnl >= 0 ? "+" : ""}{(t.pnl ?? 0).toFixed(2)}$</span>
+            <span style={{ color: "var(--muted)", fontSize: 10 }}>{new Date(t.closedAt ?? Date.now()).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })}</span>
           </div>
         );
       })}
@@ -600,947 +1486,5685 @@ function DeltaHeatmap({ greeksMap, assets, activeAsset, onSelect }:{
   );
 }
 
-// ─── useLocalStorage ──────────────────────────────────────────────────────────
-function useQStorage<T>(key: string, init: T): [T, React.Dispatch<React.SetStateAction<T>>] {
-  const [val, setVal] = useState<T>(() => {
-    try {
-      const s = localStorage.getItem(key);
-      return s ? (JSON.parse(s) as T) : init;
-    } catch { return init; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem(key, JSON.stringify(val)); }
-    catch { /* ignorar quota */ }
-  }, [key, val]);
-  return [val, setVal];
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMPONENTE PRINCIPAL
-// ═══════════════════════════════════════════════════════════════════════════════
-export default function QuantEngine({
-  prices, candles, candles5m, candles15m, candles4h, candles1d,
-  liveReady, mt5Enabled, mt5Status, mt5Url,
-  balance, equity, riskPct, assets,
-  onOpenMT5, onCloseMT5, pushToast, onGreeksUpdate
-}: QuantEngineProps) {
-
-  const [activeMode,    setActiveMode]  = useState<QMode>("intradia");
-  const [activeAsset,   setActiveAsset] = useState<string>(assets[0] ?? "BTCUSD");
-  const [activeView,    setActiveView]  = useState<"signals"|"greeks"|"history">("signals");
-  const [scanning,      setScanning]    = useState(false);
-  const [autoScan,      setAutoScan]    = useState(false);
-
-  // Persistencia
-  const [openPositions, setOpenPositions] = useQStorage<QPosition[]>("tl_q_open", []);
-  const [closedTrades,  setClosedTrades]  = useQStorage<QClosedTrade[]>("tl_q_closed", []);
-  const [calibMap,      setCalibMap]      = useQStorage<Record<string,QCalib>>("tl_q_calib", {});
-  const [groqCalib,     setGroqCalib]     = useQStorage<GroqQCalib|null>("tl_q_groq", null);
-  const [lastSignals,   setLastSignals]   = useState<Record<string,QSignal>>({});
-  const [greeksMap,     setGreeksMap]     = useState<Record<string,BSGreeks>>({});
-  const [wyckoffMap,    setWyckoffMap]    = useState<Record<string,WyckoffCtx>>({});
-  const [sigmaHistMap,  setSigmaHistMap]  = useState<Record<string,number[]>>({});
-
-  const vegaHistRef  = useRef<Record<string,number[]>>({});
-  const gammaHistRef = useRef<Record<string,number[]>>({});
-  const openRef = useRef(openPositions);
-  openRef.current = openPositions;
-  const groqTimerRef = useRef<number>(0);
-
-  // ─── Walk-forward: actualiza calib tras cada cierre ──────────────────────
-  const updateCalib = useCallback((t: QClosedTrade) => {
-    setCalibMap(prev => {
-      const key = `${t.asset}_${t.mode}`;
-      const old = prev[key] ?? { asset: t.asset, n:0, wins:0, wr:0.5, avgRR:1.5,
-        kellyF:0.25, floorAdj:0, sigmaHistory:[], evHistory:[], lastUpdated:0 };
-      const wins = old.wins + (t.pnl > 0 ? 1 : 0);
-      const n    = old.n + 1;
-      const wr   = wins / n;
-      const avgRR = (old.avgRR * old.n + t.rrRealized) / n;
-      // Kelly adaptativo
-      const kellyF = Math.max(0.05, Math.min(0.50, (wr * avgRR - (1-wr)) / avgRR * 0.25));
-      // Floor: si WR < 40% elevar piso, si > 55% bajarlo
-      let floorAdj = old.floorAdj;
-      if (n >= 5) {
-        if (wr < 0.40) floorAdj = Math.min(old.floorAdj + 2, 12);
-        if (wr > 0.55) floorAdj = Math.max(old.floorAdj - 1, -8);
-      }
-      const sigH = [...(old.sigmaHistory ?? []), t.greeks.sigma].slice(-50);
-      const evH  = [...(old.evHistory  ?? []), t.pnl].slice(-50);
-      return { ...prev, [key]: { asset:t.asset, n, wins, wr, avgRR, kellyF, floorAdj,
-        sigmaHistory:sigH, evHistory:evH, lastUpdated:Date.now() } };
-    });
-  }, [setCalibMap]);
-
-  // ─── Groq calibrador — cada 20 min ───────────────────────────────────────
-  const runGroqCalib = useCallback(async () => {
-    if (!liveReady) return;
-    try {
-      // Resumen compacto del estado para el prompt
-      const calibSummary = Object.entries(calibMap).slice(0, 8).map(([k,c]) =>
-        `${k}: n=${c.n} wr=${(c.wr*100).toFixed(0)}% rr=${c.avgRR.toFixed(1)} kelly=${(c.kellyF*100).toFixed(0)}%`
-      ).join("; ");
-
-      const topGreeks = Object.entries(greeksMap).slice(0,5).map(([a,g]) =>
-        `${a.replace("USDT","").replace("USD","")}: Δ=${g.delta.toFixed(2)} Γ=${g.gamma.toFixed(5)} V=${g.vega.toFixed(2)} σ=${(g.sigma*100).toFixed(1)}%`
-      ).join("; ");
-
-      const recentPnl = closedTrades.slice(0,5).map(t=>
-        `${t.asset} ${t.mode} ${t.direction}: $${t.pnl.toFixed(2)} (${t.result})`
-      ).join("; ");
-
-      const prompt = `Eres un calibrador cuantitativo de un motor Black-Scholes × Wyckoff.
-Griegas actuales: ${topGreeks || "sin datos"}
-Walk-forward por activo/modo: ${calibSummary || "sin historial"}
-Últimos trades: ${recentPnl || "sin trades"}
-Modo activo: ${activeMode}
-
-Responde SOLO con JSON sin markdown:
-{"floors":{"BTC_scalp":52,"ETH_intradia":55},"sizes":{"BTC":1.0,"ETH":0.9},"macro":"nota breve","note":"insight clave sobre griegas o Wyckoff","bump_assets":["BTCUSD"]}
-
-"floors" = ajuste al confidence floor por activo+modo (valores entre 48-70).
-"sizes" = multiplicador de sizing (0.5-1.5).
-"bump_assets" = activos que merecen re-scan urgente.
-Sé conciso y preciso.`;
-
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 300,
-          messages: [{ role: "user", content: prompt }]
-        })
-      });
-      const data = await resp.json() as { content: Array<{type:string; text:string}> };
-      const raw = data.content?.find(b => b.type === "text")?.text ?? "";
-      const clean = raw.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(clean) as GroqQCalib;
-      setGroqCalib({ ...parsed, timestamp: Date.now() });
-      if (parsed.note) pushToast(`📐 Groq Quant: ${parsed.note}`, "info");
-    } catch { /* ignorar — no bloquear */ }
-  }, [liveReady, calibMap, greeksMap, closedTrades, activeMode, pushToast, setGroqCalib]);
-
-  useEffect(() => {
-    if (!autoScan) return;
-    groqTimerRef.current = window.setInterval(() => void runGroqCalib(), 20*60*1000);
-    return () => clearInterval(groqTimerRef.current);
-  }, [autoScan, runGroqCalib]);
-
-  // ─── Scan principal ───────────────────────────────────────────────────────
-  const runScan = useCallback(async () => {
-    if (!liveReady || scanning) return;
-    setScanning(true);
-
-    const newG:  Record<string,BSGreeks>   = {};
-    const newW:  Record<string,WyckoffCtx> = {};
-    const newS:  Record<string,QSignal>    = {};
-    const newSH: Record<string,number[]>   = { ...sigmaHistMap };
-
-    for (const asset of assets) {
-      try {
-        const c1  = candles[asset]   ?? [];
-        const c5  = candles5m[asset]  ?? [];
-        const c15 = candles15m[asset] ?? [];
-        const c4h = candles4h[asset]  ?? [];
-        const c1d = candles1d[asset]  ?? [];
-        const px  = prices[asset] ?? 0;
-        if (!c1.length || !px) continue;
-
-        const closes = c1.map(x => x.c);
-        const sigma  = calcHV(closes, Math.min(20, closes.length-1));
-        const T      = modeToT(activeMode);
-        const rec    = c1.slice(-20);
-        const tvol   = rec.reduce((s,x)=>s+x.v,0);
-        const vwap   = tvol>0 ? rec.reduce((s,x)=>s+((x.h+x.l+x.c)/3)*x.v,0)/tvol : px;
-        const g      = calcBS(px, vwap, T, sigma);
-
-        // Actualizar historiales
-        if (!vegaHistRef.current[asset])  vegaHistRef.current[asset]  = [];
-        if (!gammaHistRef.current[asset]) gammaHistRef.current[asset] = [];
-        vegaHistRef.current[asset]  = [...vegaHistRef.current[asset],  g.vega ].slice(-50);
-        gammaHistRef.current[asset] = [...gammaHistRef.current[asset], g.gamma].slice(-50);
-        newSH[asset] = [...(newSH[asset] ?? []), sigma].slice(-50);
-
-        const wyckoff = interpretWyckoffBS(c4h, c1d, g, vegaHistRef.current[asset]);
-        newG[asset] = { ...g,
-          gammaExtreme: g.gamma > (gammaHistRef.current[asset].slice(-10).sort((a,b)=>a-b)[7] ?? 0),
-          vegaCross: vegaHistRef.current[asset].length >= 5 &&
-            g.vega > vegaHistRef.current[asset][vegaHistRef.current[asset].length-2] * 1.10
-        };
-        newW[asset] = wyckoff;
-
-        // Intentar señal
-        const calibKey = `${asset}_${activeMode}`;
-        const calib = calibMap[calibKey] ?? null;
-        const groqFloor = groqCalib?.floors?.[`${asset.replace("USDT","").replace("USD","")}_${activeMode}`] ?? null;
-        const groqSizeMult = groqCalib?.sizes?.[asset.replace("USDT","").replace("USD","")] ?? 1.0;
-
-        const sig = generateBSSignal(asset, activeMode, c1, c5, c15, c4h, c1d, px,
-          vegaHistRef.current[asset], gammaHistRef.current[asset], calib, groqFloor);
-
-        if (sig) {
-          // Sizing con Kelly + equity + riskPct + Groq mult
-          const atr = calcAtrCandles(c1);
-          const stopDist = Math.abs(sig.entry - sig.sl);
-          const kellyF = calib ? calib.kellyF : calcKellyBS(sig.greeks.pTP, sig.rr);
-          const riskUsd = equity * (riskPct / 100) * kellyF * groqSizeMult;
-          sig.size = Math.max(0.01, Math.round(riskUsd / Math.max(stopDist, sig.entry*0.001) * 100) / 100);
-          newS[asset] = sig;
-        }
-      } catch (e) { console.warn(`[QE] ${asset}:`, e); }
-    }
-
-    setGreeksMap(newG);
-    onGreeksUpdate?.(newG);   // notificar al motor v1 para BSBoost
-    setWyckoffMap(newW);
-    setSigmaHistMap(newSH);
-
-    if (Object.keys(newS).length > 0) {
-      setLastSignals(prev => ({ ...prev, ...newS }));
-      const top = Object.values(newS).sort((a,b) => b.confidence - a.confidence)[0];
-      pushToast(`📐 ${top.asset} ${top.direction} conf=${top.confidence.toFixed(0)} Δ=${top.greeks.delta.toFixed(2)} EV=${top.greeks.ev.toFixed(4)}`, "info");
-    } else {
-      // Limpiar señales antiguas del modo actual
-      setLastSignals(prev => {
-        const next = { ...prev };
-        assets.forEach(a => { if (next[a]?.mode === activeMode) delete next[a]; });
-        return next;
-      });
-    }
-    setScanning(false);
-  }, [liveReady, scanning, assets, candles, candles5m, candles15m, candles4h,
-      candles1d, prices, activeMode, calibMap, groqCalib, equity, riskPct,
-      pushToast, sigmaHistMap]);
-
-  useEffect(() => {
-    if (!autoScan) return;
-    const id = window.setInterval(() => void runScan(), 60_000);
-    return () => clearInterval(id);
-  }, [autoScan, runScan]);
-
-  // ─── Cerrar posición ─────────────────────────────────────────────────────
-  const closePosition = useCallback(async (
-    pos: QPosition, result: QClosedTrade["result"], exitPx?: number
-  ) => {
-    const px = exitPx ?? prices[pos.signal.asset] ?? pos.signal.entry;
-    if (mt5Enabled && mt5Status === "connected") {
-      await onCloseMT5(pos.signal.asset, pos.signal.direction);
-    }
-    const isLong = pos.signal.direction === "LONG";
-    const pnl = (isLong ? px - pos.signal.entry : pos.signal.entry - px)
-      * pos.signal.size * (1 - pos.partialClosed);
-    const rrR = Math.abs(px - pos.signal.entry) /
-      Math.max(Math.abs(pos.signal.entry - pos.signal.sl), 1e-9);
-    const closed: QClosedTrade = {
-      id: pos.id, asset: pos.signal.asset, mode: pos.signal.mode,
-      direction: pos.signal.direction, entry: pos.signal.entry, exit: px,
-      pnl, result, openedAt: pos.openedAt, closedAt: Date.now(),
-      greeks: pos.signal.greeks, rrRealized: rrR,
-    };
-    setOpenPositions(prev => prev.filter(p => p.id !== pos.id));
-    setClosedTrades(prev => [closed, ...prev].slice(0, 300));
-    updateCalib(closed);
-    const icon = pnl >= 0 ? "✅" : "❌";
-    pushToast(`${icon} BS ${pos.signal.asset} ${result} | ${pnl>=0?"+":""}$${pnl.toFixed(2)} RR=${rrR.toFixed(2)}`,
-      pnl >= 0 ? "success" : "error");
-  }, [prices, mt5Enabled, mt5Status, onCloseMT5, updateCalib,
-      setOpenPositions, setClosedTrades, pushToast]);
-
-  // ─── Abrir posición ───────────────────────────────────────────────────────
-  const openPosition = useCallback(async (sig: QSignal) => {
-    if (openRef.current.some(p => p.signal.asset === sig.asset)) {
-      pushToast(`⚠ Ya hay posición BS en ${sig.asset}`, "warning"); return;
-    }
-    if (mt5Enabled && mt5Status === "connected") {
-      const ok = await onOpenMT5(sig.asset, sig.direction, sig.sl, sig.tp, sig.size);
-      if (!ok) return;
-    }
-    const pos: QPosition = {
-      id: Date.now(), signal: sig, openedAt: Date.now(),
-      peak: sig.entry, trough: sig.entry,
-      tp1Hit: false, tp2Hit: false, breakevenSet: false, partialClosed: 0
-    };
-    setOpenPositions(prev => [...prev, pos]);
-    pushToast(`✅ BS ${sig.mode.toUpperCase()} ${sig.asset} ${sig.direction} | Δ=${sig.greeks.delta.toFixed(2)} conf=${sig.confidence.toFixed(0)}%`, "success");
-  }, [mt5Enabled, mt5Status, onOpenMT5, pushToast, setOpenPositions]);
-
-  // ─── Evaluación de posiciones: Multi-TP + Trailing ───────────────────────
-  useEffect(() => {
-    if (!openPositions.length) return;
-    const id = window.setInterval(() => {
-      setOpenPositions(prev => {
-        const next: QPosition[] = [];
-        for (const pos of prev) {
-          const px = prices[pos.signal.asset];
-          if (!px) { next.push(pos); continue; }
-          const isLong = pos.signal.direction === "LONG";
-          let updated = { ...pos };
-          updated.peak   = isLong ? Math.max(pos.peak,   px) : pos.peak;
-          updated.trough = isLong ? pos.trough : Math.min(pos.trough, px);
-
-          // Actualizar griegas en vivo
-          const c = candles[pos.signal.asset] ?? [];
-          if (c.length >= 5) {
-            const cl = c.map(x=>x.c);
-            const sigma = calcHV(cl, Math.min(20,cl.length-1));
-            const T = modeToT(pos.signal.mode);
-            updated.currentGreeks = calcBS(px, pos.signal.entry, T, sigma, 0,
-              pos.signal.tp, pos.signal.sl);
-          }
-
-          // SL
-          const hitSL = isLong ? px <= updated.signal.sl : px >= updated.signal.sl;
-          if (hitSL) { void closePosition(updated, "SL"); continue; }
-
-          // TP1 → cerrar 40% + mover SL a breakeven
-          if (!pos.tp1Hit) {
-            const hitTP1 = isLong ? px >= pos.signal.tp : px <= pos.signal.tp;
-            if (hitTP1) {
-              // Registrar cierre parcial (40%)
-              const px1 = pos.signal.tp;
-              const pnlParcial = (isLong ? px1-pos.signal.entry : pos.signal.entry-px1) * pos.signal.size * 0.40;
-              const partial: QClosedTrade = {
-                id: pos.id*10+1, asset: pos.signal.asset, mode: pos.signal.mode,
-                direction: pos.signal.direction, entry: pos.signal.entry, exit: px1,
-                pnl: pnlParcial, result: "TP1_PARTIAL",
-                openedAt: pos.openedAt, closedAt: Date.now(),
-                greeks: pos.signal.greeks, rrRealized: 1.0
-              };
-              setClosedTrades(ct => [partial, ...ct].slice(0,300));
-              pushToast(`📐 TP1 ${pos.signal.asset} +$${pnlParcial.toFixed(2)} (40% cerrado) → SL a breakeven`, "success");
-              updated = { ...updated,
-                tp1Hit: true, partialClosed: 0.40, breakevenSet: true,
-                signal: { ...updated.signal, sl: pos.signal.entry } // SL a entry
-              };
-            }
-          }
-
-          // TP2 → cerrar otro 40%
-          if (pos.tp1Hit && !pos.tp2Hit) {
-            const hitTP2 = isLong ? px >= pos.signal.tp2 : px <= pos.signal.tp2;
-            if (hitTP2) {
-              const px2 = pos.signal.tp2;
-              const pnlParcial2 = (isLong ? px2-pos.signal.entry : pos.signal.entry-px2) * pos.signal.size * 0.40;
-              const partial2: QClosedTrade = {
-                id: pos.id*10+2, asset: pos.signal.asset, mode: pos.signal.mode,
-                direction: pos.signal.direction, entry: pos.signal.entry, exit: px2,
-                pnl: pnlParcial2, result: "TP2_PARTIAL",
-                openedAt: pos.openedAt, closedAt: Date.now(),
-                greeks: pos.signal.greeks, rrRealized: 2.0
-              };
-              setClosedTrades(ct => [partial2, ...ct].slice(0,300));
-              pushToast(`📐 TP2 ${pos.signal.asset} +$${pnlParcial2.toFixed(2)} (40% cerrado)`, "success");
-              updated = { ...updated, tp2Hit: true, partialClosed: 0.80 };
-              // Si no hay TP3, cerrar el 20% restante aquí
-              if (!pos.signal.tp3) {
-                void closePosition(updated, "TP2"); continue;
-              }
-            }
-          }
-
-          // TP3 → cerrar el 20% restante (solo swing)
-          if (pos.tp1Hit && pos.tp2Hit && pos.signal.tp3) {
-            const hitTP3 = isLong ? px >= pos.signal.tp3 : px <= pos.signal.tp3;
-            if (hitTP3) { void closePosition(updated, "TP3"); continue; }
-          }
-
-          // Trailing ATR adaptativo según modo
-          const atrMult = pos.signal.mode === "swing" ? 2.0 : pos.signal.mode === "intradia" ? 1.4 : 1.0;
-          const c2 = candles[pos.signal.asset] ?? [];
-          const atr = c2.length > 14 ? calcAtrCandles(c2) : Math.abs(pos.signal.entry - pos.signal.sl);
-          const trailLevel = isLong ? updated.peak - atr*atrMult : updated.trough + atr*atrMult;
-          const newSL = isLong
-            ? Math.max(updated.signal.sl, trailLevel)
-            : Math.min(updated.signal.sl, trailLevel);
-          updated = { ...updated, signal: { ...updated.signal, sl: newSL } };
-          next.push(updated);
-        }
-        return next;
-      });
-    }, 2000);
-    return () => clearInterval(id);
-  }, [openPositions.length, prices, candles, closePosition, pushToast, setClosedTrades]);
-
-  // ─── Stats ────────────────────────────────────────────────────────────────
-  const stats = useMemo<QStats>(() => {
-    const t = closedTrades;
-    if (!t.length) return {
-      totalTrades:0, winRate:0, totalPnl:0, avgRR:0, sharpe:0, maxDD:0,
-      byMode: { scalp:{n:0,wr:0,pnl:0,avgRR:0}, intradia:{n:0,wr:0,pnl:0,avgRR:0}, swing:{n:0,wr:0,pnl:0,avgRR:0} }
-    };
-    const wins   = t.filter(x=>x.pnl>0).length;
-    const pnls   = t.map(x=>x.pnl);
-    const mean   = pnls.reduce((a,b)=>a+b,0)/pnls.length;
-    const std    = Math.sqrt(pnls.reduce((s,v)=>s+(v-mean)**2,0)/Math.max(pnls.length-1,1));
-    // MaxDD
-    let peak2 = 0, dd = 0, maxDD = 0;
-    pnls.reduce((cum,p) => {
-      const c = cum+p; peak2 = Math.max(peak2,c);
-      dd = peak2 - c; maxDD = Math.max(maxDD,dd); return c;
-    }, 0);
-    const byMode = (["scalp","intradia","swing"] as QMode[]).reduce((acc,m) => {
-      const mt = t.filter(x=>x.mode===m);
-      acc[m] = { n:mt.length, wr:mt.length?mt.filter(x=>x.pnl>0).length/mt.length:0,
-        pnl:mt.reduce((s,x)=>s+x.pnl,0), avgRR:mt.length?mt.reduce((s,x)=>s+x.rrRealized,0)/mt.length:0 };
-      return acc;
-    }, {} as QStats["byMode"]);
-    return { totalTrades:t.length, winRate:wins/t.length,
-      totalPnl:pnls.reduce((a,b)=>a+b,0), avgRR:t.reduce((s,x)=>s+x.rrRealized,0)/t.length,
-      sharpe: std>0 ? mean/std*Math.sqrt(252) : 0, maxDD, byMode };
-  }, [closedTrades]);
-
-  const activeSignal = lastSignals[activeAsset];
-  const activeGreeks = greeksMap[activeAsset];
-  const activeWyck   = wyckoffMap[activeAsset];
-  const activeSigmaH = sigmaHistMap[activeAsset] ?? [];
-  const activeCalib  = calibMap[`${activeAsset}_${activeMode}`];
-
-  // ─── RENDER ───────────────────────────────────────────────────────────────
+// ── BacktestTab ───────────────────────────────────────────────────────────────
+function BacktestTab({
+  liveReady, backtestSize, setBacktestSize, riskPct, setRiskPct,
+  runBacktest, lastBacktest, backtestTrades,
+}: {
+  liveReady: boolean; backtestSize: number; setBacktestSize: (n: number) => void;
+  riskPct: number; setRiskPct: (n: number) => void;
+  runBacktest: () => void; lastBacktest: BacktestReport | null; backtestTrades: ClosedTrade[];
+}) {
   return (
-    <div style={{ maxWidth:1400, margin:"0 auto", padding:"0 16px 40px" }}>
-
-      {/* Header */}
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
-        padding:"16px 0 12px", borderBottom:"1px solid var(--border)", marginBottom:16 }}>
-        <div>
-          <h1 style={{ fontSize:20, fontWeight:900, margin:0 }}>
-            📐 Motor Quant{"  "}
-            <span style={{ fontSize:13, color:"#a5b4fc", fontWeight:600 }}>
-              Black-Scholes × Wyckoff v2
-            </span>
-          </h1>
-          <p style={{ fontSize:11, color:"var(--muted)", margin:"3px 0 0" }}>
-            Δ·Γ·Θ·V·ρ · ∫EV · MM Analysis · Kelly Walk-Forward · Multi-TP
-          </p>
-        </div>
-        <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
-          {stats.totalTrades > 0 && (
-            <div style={{ display:"flex", gap:10, fontSize:11 }}>
-              <span style={{ color:"var(--muted)" }}>
-                T:<strong style={{ color:"var(--text)" }}> {stats.totalTrades}</strong>
-              </span>
-              <span>
-                WR:<strong style={{ color:stats.winRate>0.5?"#10b981":"#ef4444" }}>
-                  {" "}{(stats.winRate*100).toFixed(0)}%</strong>
-              </span>
-              <span>
-                P&L:<strong style={{ color:stats.totalPnl>=0?"#10b981":"#ef4444" }}>
-                  {" "}{stats.totalPnl>=0?"+":""}${stats.totalPnl.toFixed(2)}</strong>
-              </span>
-              <span>
-                Sharpe:<strong style={{ color:stats.sharpe>1?"#10b981":stats.sharpe>0?"#f59e0b":"#ef4444" }}>
-                  {" "}{stats.sharpe.toFixed(2)}</strong>
-              </span>
-            </div>
-          )}
-          <span style={{ fontSize:10, padding:"3px 8px", borderRadius:6,
-            background: groqCalib ? "rgba(99,102,241,0.1)" : "rgba(255,255,255,0.04)",
-            color: groqCalib ? "#a5b4fc" : "var(--muted)" }}>
-            {groqCalib
-              ? `🤖 ${groqCalib.note?.slice(0,40) ?? "IA calibrada"}`
-              : "🤖 Sin calibrar — presioná 'IA Ajustar pisos'"}
-          </span>
-          <button onClick={()=>setAutoScan(p=>!p)}
-            style={{ padding:"7px 12px", borderRadius:8, border:"none", cursor:"pointer",
-              fontWeight:700, fontSize:11,
-              background:autoScan?"linear-gradient(135deg,#6366f1,#8b5cf6)":"rgba(255,255,255,0.06)",
-              color:autoScan?"#fff":"var(--text-2)" }}>
-            {autoScan ? "⏹ Auto ON" : "▶ Auto"}
-          </button>
-          <button onClick={()=>void runScan()} disabled={scanning||!liveReady}
-            style={{ padding:"7px 14px", borderRadius:8, border:"none", cursor:"pointer",
-              fontWeight:700, fontSize:12,
-              background:"linear-gradient(135deg,#3b82f6,#6366f1)", color:"#fff",
-              opacity:scanning||!liveReady?0.5:1 }}>
-            {scanning?"⟳ Escaneando...":"🔍 Escanear"}
-          </button>
-          <button
-            onClick={()=>void runGroqCalib()}
-            disabled={!liveReady}
-            title="Envía el estado actual del motor (griegas, walk-forward, trades) a IA para ajustar floors y sizing automáticamente"
-            style={{ padding:"7px 12px", borderRadius:8, border:"none", cursor:"pointer",
-              fontWeight:700, fontSize:11,
-              background:"rgba(99,102,241,0.12)", color:"#a5b4fc",
-              opacity:!liveReady?0.5:1 }}>
-            🤖 IA Ajustar pisos
+    <div style={{ maxWidth: 860, display: "flex", flexDirection: "column", gap: 14 }}>
+      <div className="card">
+        <h3 style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>Backtest</h3>
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div>
+            <p className="label" style={{ marginBottom: 4 }}>Velas a simular</p>
+            <select className="sel" value={backtestSize} onChange={e => setBacktestSize(Number(e.target.value))} style={{ width: 130 }}>
+              {[50, 100, 200, 500].map(n => <option key={n} value={n}>{n} velas</option>)}
+            </select>
+          </div>
+          <div>
+            <p className="label" style={{ marginBottom: 4 }}>Riesgo / trade</p>
+            <select className="sel" value={riskPct} onChange={e => setRiskPct(Number(e.target.value))} style={{ width: 110 }}>
+              {[0.5, 1, 1.5, 2, 3].map(n => <option key={n} value={n}>{n}%</option>)}
+            </select>
+          </div>
+          <button onClick={runBacktest} disabled={!liveReady}
+            style={{ padding: "8px 18px", borderRadius: 8, border: "none", cursor: liveReady ? "pointer" : "not-allowed",
+              background: liveReady ? "rgba(99,102,241,0.7)" : "rgba(99,102,241,0.2)",
+              color: "#fff", fontSize: 13, fontWeight: 700 }}>
+            Ejecutar
           </button>
         </div>
       </div>
-
-      {/* Selectores modo + vista */}
-      <div style={{ display:"flex", gap:8, marginBottom:14, flexWrap:"wrap" }}>
-        {(["scalp","intradia","swing"] as QMode[]).map(m => {
-          const icons = { scalp:"⚡", intradia:"📊", swing:"🌊" };
-          const desc  = { scalp:"Γ extrema · Δ flip · 5m",
-                          intradia:"Vega cross · Wyckoff · 15m", swing:"EV fuerte · Δ ext · 1d" };
-          const bm    = stats.byMode[m];
-          return (
-            <button key={m} onClick={()=>setActiveMode(m)}
-              style={{ flex:1, minWidth:140, padding:"10px 12px", borderRadius:10, border:"none",
-                cursor:"pointer", textAlign:"left",
-                background:activeMode===m
-                  ? "linear-gradient(135deg,rgba(99,102,241,0.25),rgba(139,92,246,0.15))"
-                  : "rgba(255,255,255,0.03)",
-                borderTop:activeMode===m?"2px solid #6366f1":"2px solid transparent" }}>
-              <div style={{ fontSize:13, fontWeight:800 }}>
-                {icons[m]} {m.charAt(0).toUpperCase()+m.slice(1)}
+      {lastBacktest && (
+        <div className="card">
+          <h4 style={{ fontWeight: 700, marginBottom: 10 }}>{lastBacktest.total} trades simulados</h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(130px,1fr))", gap: 8 }}>
+            {[
+              { label: "Win Rate",     value: `${(lastBacktest.winRate ?? 0).toFixed(1)}%`,      color: lastBacktest.winRate >= 50 ? "#10b981" : "#ef4444" },
+              { label: "P&L",          value: `$${(lastBacktest.grossProfit - lastBacktest.grossLoss).toFixed(2)}`,           color: lastBacktest.grossProfit >= lastBacktest.grossLoss ? "#10b981" : "#ef4444" },
+              { label: "Profit Factor",value: (lastBacktest.profitFactor ?? 0).toFixed(2),        color: lastBacktest.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
+              { label: "Max DD",       value: `$${(lastBacktest.maxDrawdown ?? 0).toFixed(2)}`,   color: "#ef4444" },
+              { label: "Sharpe",       value: (lastBacktest.sharpe ?? 0).toFixed(2),              color: lastBacktest.sharpe >= 1 ? "#10b981" : "var(--text)" },
+              { label: "Expectancy",   value: `$${(lastBacktest.expectancy ?? 0).toFixed(2)}`,    color: lastBacktest.expectancy >= 0 ? "#10b981" : "#ef4444" },
+            ].map(({ label, value, color }) => (
+              <div key={label} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "8px 10px" }}>
+                <p style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2 }}>{label}</p>
+                <p style={{ fontSize: 14, fontWeight: 800, color }}>{value}</p>
               </div>
-              <div style={{ fontSize:10, color:"var(--muted)", marginTop:2 }}>{desc[m]}</div>
-              {bm.n>0 && (
-                <div style={{ fontSize:10, marginTop:3,
-                  color:bm.wr>0.5?"#10b981":"#ef4444" }}>
-                  {bm.n} trades · WR {(bm.wr*100).toFixed(0)}% · RR {bm.avgRR.toFixed(1)}
-                </div>
-              )}
-            </button>
-          );
-        })}
-        {/* Sub-vista */}
-        <div style={{ display:"flex", gap:4, alignItems:"center" }}>
-          {(["signals","greeks","history"] as const).map(v => (
-            <button key={v} onClick={()=>setActiveView(v)}
-              style={{ padding:"6px 12px", borderRadius:8, border:"none", cursor:"pointer",
-                fontSize:11, fontWeight:700,
-                background:activeView===v?"rgba(99,102,241,0.2)":"rgba(255,255,255,0.04)",
-                color:activeView===v?"#a5b4fc":"var(--text-2)" }}>
-              {v==="signals"?"📡":v==="greeks"?"📊":"📒"} {v}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Vista: SIGNALS ── */}
-      {activeView === "signals" && (
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
-
-          {/* Izq: activo + griegas + Wyckoff */}
-          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-
-            {/* Selector de activo */}
-            <div className="card" style={{ padding:"12px 14px" }}>
-              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8 }}>
-                <p style={{ fontWeight:800, fontSize:12 }}>Activo activo</p>
-                {activeSigmaH.length > 2 && <SigmaSparkline data={activeSigmaH} />}
-              </div>
-              <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:12 }}>
-                {assets.slice(0,16).map(a => {
-                  const sig = lastSignals[a];
-                  const hasSig = sig?.mode === activeMode;
-                  return (
-                    <button key={a} onClick={()=>setActiveAsset(a)}
-                      style={{ padding:"4px 9px", borderRadius:7, border:"none",
-                        cursor:"pointer", fontSize:11, fontWeight:700,
-                        background:activeAsset===a
-                          ? "linear-gradient(135deg,#6366f1,#8b5cf6)"
-                          : hasSig ? "rgba(16,185,129,0.12)" : "rgba(255,255,255,0.05)",
-                        color:activeAsset===a?"#fff":hasSig?"#10b981":"var(--text-2)" }}>
-                      {a.replace("USDT","").replace("USD","")}
-                      {greeksMap[a] && (
-                        <span style={{ marginLeft:3, fontSize:9, opacity:0.8 }}>
-                          Δ{greeksMap[a].delta.toFixed(2)}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {activeGreeks ? (
-                <>
-                  <GreeksCard g={activeGreeks} mode={activeMode} />
-                  <div style={{ marginTop:8 }}>
-                    <EVBar pTP={activeGreeks.pTP} pSL={activeGreeks.pSL} ev={activeGreeks.ev} />
-                  </div>
-                  <div style={{ marginTop:6, display:"flex", gap:10, fontSize:10, color:"var(--muted)", flexWrap:"wrap" }}>
-                    <span>σ=<strong style={{ color:"var(--text)", fontFamily:"monospace" }}>
-                      {(activeGreeks.sigma*100).toFixed(1)}%/a</strong></span>
-                    <span>d₁=<strong style={{ color:"var(--text)", fontFamily:"monospace" }}>
-                      {activeGreeks.d1.toFixed(3)}</strong></span>
-                    <span>d₂=<strong style={{ color:"var(--text)", fontFamily:"monospace" }}>
-                      {activeGreeks.d2.toFixed(3)}</strong></span>
-                    {activeCalib && (
-                      <>
-                        <span>Kelly=<strong style={{ color:"#10b981", fontFamily:"monospace" }}>
-                          {(activeCalib.kellyF*100).toFixed(0)}%</strong></span>
-                        <span>WF-Adj=<strong style={{ color:activeCalib.floorAdj>0?"#ef4444":"#10b981",
-                          fontFamily:"monospace" }}>
-                          {activeCalib.floorAdj>0?"+":""}{activeCalib.floorAdj}</strong></span>
-                      </>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <p style={{ fontSize:12, color:"var(--muted)", textAlign:"center", padding:"18px 0" }}>
-                  Presioná Escanear para calcular griegas BS
-                </p>
-              )}
-            </div>
-
-            {/* Wyckoff */}
-            {activeWyck && (
-              <div className="card" style={{ padding:"12px 14px" }}>
-                <p style={{ fontWeight:800, fontSize:12, marginBottom:8 }}>
-                  Wyckoff × σ — Acción del Market Maker
-                </p>
-                <WyckoffBadge ctx={activeWyck} />
-              </div>
-            )}
-
-            {/* Groq macro note */}
-            {groqCalib?.macro && (
-              <div style={{ padding:"10px 14px", borderRadius:10,
-                background:"rgba(99,102,241,0.06)", border:"1px solid rgba(99,102,241,0.2)" }}>
-                <p style={{ fontSize:10, color:"#a5b4fc", fontWeight:700, marginBottom:3 }}>
-                  🤖 Groq Macro
-                </p>
-                <p style={{ fontSize:11, color:"var(--text-2)" }}>{groqCalib.macro}</p>
-              </div>
-            )}
-          </div>
-
-          {/* Der: señal + posiciones */}
-          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-
-            {activeSignal && activeSignal.mode === activeMode ? (
-              <div className="card" style={{ padding:"14px 16px",
-                border:`1px solid ${activeSignal.direction==="LONG"?"rgba(16,185,129,0.3)":"rgba(239,68,68,0.3)"}` }}>
-                {/* Header señal */}
-                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:12 }}>
-                  <div>
-                    <span style={{ fontSize:18, fontWeight:900,
-                      color:activeSignal.direction==="LONG"?"#10b981":"#ef4444" }}>
-                      {activeSignal.direction==="LONG"?"🐂 LONG":"🐻 SHORT"}
-                    </span>
-                    <span style={{ fontSize:13, color:"var(--muted)", marginLeft:8 }}>
-                      {activeSignal.asset} · {activeSignal.mode}
-                    </span>
-                  </div>
-                  <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-                    {/* Confidence circle */}
-                    <div style={{ width:44, height:44, borderRadius:"50%",
-                      display:"flex", alignItems:"center", justifyContent:"center",
-                      fontWeight:900, fontSize:14,
-                      background:activeSignal.confidence>70
-                        ? "rgba(16,185,129,0.15)" : "rgba(245,158,11,0.12)",
-                      color:activeSignal.confidence>70?"#10b981":"#f59e0b",
-                      border:`2px solid ${activeSignal.confidence>70?"#10b981":"#f59e0b"}` }}>
-                      {activeSignal.confidence.toFixed(0)}
-                    </div>
-                    <button onClick={()=>void openPosition(activeSignal)}
-                      style={{ padding:"10px 16px", borderRadius:9, border:"none",
-                        cursor:"pointer", fontWeight:800, fontSize:13,
-                        background:activeSignal.direction==="LONG"
-                          ? "linear-gradient(135deg,#059669,#10b981)"
-                          : "linear-gradient(135deg,#dc2626,#ef4444)",
-                        color:"#fff" }}>
-                      Abrir
-                    </button>
-                  </div>
-                </div>
-
-                {/* Niveles */}
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:6, marginBottom:12 }}>
-                  {[
-                    { lbl:"Entry", val:activeSignal.entry,  col:"var(--text)" },
-                    { lbl:"SL",    val:activeSignal.sl,     col:"#ef4444" },
-                    { lbl:"TP1",   val:activeSignal.tp,     col:"#6ee7b7" },
-                    { lbl:"TP2",   val:activeSignal.tp2,    col:"#10b981" },
-                    { lbl:"TP3",   val:activeSignal.tp3??activeSignal.tp2*1.2, col:"#059669" },
-                  ].map(lv => (
-                    <div key={lv.lbl} style={{ textAlign:"center", padding:"6px 4px",
-                      background:"rgba(255,255,255,0.03)", borderRadius:7 }}>
-                      <p style={{ fontSize:9, color:"var(--muted)", marginBottom:2 }}>{lv.lbl}</p>
-                      <p style={{ fontSize:12, fontWeight:800, color:lv.col,
-                        fontFamily:"'JetBrains Mono',monospace" }}>
-                        {lv.val > 10 ? lv.val.toFixed(2) : lv.val.toFixed(5)}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Métricas */}
-                <div style={{ display:"flex", gap:6, marginBottom:10, flexWrap:"wrap" }}>
-                  {[
-                    { lbl:`RR ${activeSignal.rr.toFixed(2)}×` },
-                    { lbl:`Size ${activeSignal.size.toFixed(3)}L` },
-                    { lbl:`EV ${activeSignal.greeks.ev>0?"+":""}${activeSignal.greeks.ev.toFixed(4)}`,
-                      col:activeSignal.greeks.ev>0?"#10b981":"#ef4444" },
-                    { lbl:`P(TP) ${(activeSignal.greeks.pTP*100).toFixed(0)}%`, col:"#10b981" },
-                    { lbl:`σ ${(activeSignal.greeks.sigma*100).toFixed(1)}%/a` },
-                    ...(activeCalib ? [{ lbl:`Kelly ${(activeCalib.kellyF*100).toFixed(0)}%`, col:"#a5b4fc" }] : []),
-                  ].map((b,i) => (
-                    <span key={i} style={{ fontSize:11, padding:"3px 8px", borderRadius:6,
-                      background:`rgba(${b.col?"16,185,129":"255,255,255"},0.06)`,
-                      color:b.col ?? "var(--text-2)" }}>{b.lbl}</span>
-                  ))}
-                </div>
-
-                {/* Multi-TP info */}
-                <div style={{ padding:"8px 10px", borderRadius:8,
-                  background:"rgba(99,102,241,0.06)", marginBottom:8 }}>
-                  <p style={{ fontSize:10, color:"#a5b4fc", fontWeight:700, marginBottom:3 }}>
-                    Gestión Multi-TP
-                  </p>
-                  <p style={{ fontSize:10, color:"var(--text-2)" }}>
-                    TP1 → cierra 40% + SL a breakeven · TP2 → cierra 40% · TP3 → cierra 20% restante
-                  </p>
-                </div>
-
-                <p style={{ fontSize:9, color:"var(--muted)", fontFamily:"monospace",
-                  lineHeight:1.6, wordBreak:"break-all" }}>
-                  {activeSignal.rationale}
-                </p>
-              </div>
-            ) : (
-              <div className="card" style={{ padding:"30px 20px", textAlign:"center" }}>
-                <p style={{ fontSize:20 }}>📐</p>
-                <p style={{ fontSize:13, color:"var(--muted)", marginTop:6 }}>
-                  Sin señal BS para {activeAsset} en modo {activeMode}
-                </p>
-                <p style={{ fontSize:11, color:"var(--muted)", marginTop:4 }}>
-                  Requiere: filtros Δ·Γ·Wyckoff + EV positivo + conf ≥ floor
-                </p>
-              </div>
-            )}
-
-            {/* Posiciones abiertas */}
-            {openPositions.length > 0 && (
-              <div className="card" style={{ padding:"12px 14px" }}>
-                <p style={{ fontWeight:800, fontSize:12, marginBottom:10 }}>
-                  Posiciones BS abiertas ({openPositions.length})
-                </p>
-                {openPositions.map(pos => {
-                  const px = prices[pos.signal.asset] ?? pos.signal.entry;
-                  const isLong = pos.signal.direction === "LONG";
-                  const pnl = (isLong ? px-pos.signal.entry : pos.signal.entry-px) * pos.signal.size;
-                  const g = pos.currentGreeks ?? pos.signal.greeks;
-                  const pct = pos.tp2Hit ? 80 : pos.tp1Hit ? 40 : 0;
-                  return (
-                    <div key={pos.id} style={{ padding:"10px 12px", borderRadius:8, marginBottom:6,
-                      background:"rgba(255,255,255,0.02)",
-                      border:`1px solid ${pnl>=0?"rgba(16,185,129,0.2)":"rgba(239,68,68,0.2)"}` }}>
-                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
-                        <span style={{ fontWeight:800, fontSize:13 }}>
-                          {isLong?"🐂":"🐻"} {pos.signal.asset}
-                          <span style={{ fontSize:10, color:"var(--muted)", marginLeft:6 }}>
-                            {pos.signal.mode}
-                          </span>
-                          {pct > 0 && (
-                            <span style={{ fontSize:9, marginLeft:6, padding:"1px 6px",
-                              borderRadius:5, background:"rgba(16,185,129,0.1)", color:"#10b981" }}>
-                              {pct}% cerrado
-                            </span>
-                          )}
-                        </span>
-                        <span style={{ fontWeight:800,
-                          color:pnl>=0?"#10b981":"#ef4444" }}>
-                          {pnl>=0?"+":""}${pnl.toFixed(2)}
-                        </span>
-                      </div>
-                      <div style={{ display:"flex", gap:8, fontSize:10, color:"var(--muted)",
-                        marginBottom:8, flexWrap:"wrap" }}>
-                        <span>Δ <strong style={{ color:"var(--text)" }}>{g.delta.toFixed(3)}</strong></span>
-                        <span>Γ <strong style={{ color:g.gammaExtreme?"#a78bfa":"var(--text)" }}>
-                          {g.gamma.toFixed(6)}</strong></span>
-                        <span>EV <strong style={{ color:g.ev>=0?"#10b981":"#ef4444" }}>
-                          {g.ev>=0?"+":""}{g.ev.toFixed(4)}</strong></span>
-                        <span>P(TP) <strong style={{ color:"#10b981" }}>
-                          {(g.pTP*100).toFixed(0)}%</strong></span>
-                        <span>SL <strong style={{ color:"#ef4444", fontFamily:"monospace" }}>
-                          {pos.signal.sl.toFixed(2)}</strong></span>
-                      </div>
-                      {/* TP progress bar */}
-                      <div style={{ height:4, borderRadius:2, background:"rgba(255,255,255,0.06)",
-                        marginBottom:8, overflow:"hidden" }}>
-                        <div style={{ height:"100%", borderRadius:2,
-                          width:`${Math.min(100, Math.max(0,
-                            (isLong ? px-pos.signal.entry : pos.signal.entry-px) /
-                            (pos.signal.tp-pos.signal.entry) * 100
-                          ))}%`,
-                          background:"linear-gradient(90deg,#6366f1,#10b981)" }} />
-                      </div>
-                      <button onClick={()=>void closePosition(pos,"MANUAL")}
-                        style={{ padding:"4px 12px", borderRadius:6, border:"none",
-                          cursor:"pointer", background:"rgba(239,68,68,0.1)", color:"#ef4444",
-                          fontWeight:700, fontSize:11 }}>
-                        Cerrar manual
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+            ))}
           </div>
         </div>
       )}
-
-      {/* ── Vista: GREEKS ── */}
-      {activeView === "greeks" && (
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
-          <div className="card" style={{ padding:"14px" }}>
-            <p style={{ fontWeight:800, fontSize:13, marginBottom:12 }}>
-              Heatmap Δ — todos los activos
-            </p>
-            <DeltaHeatmap greeksMap={greeksMap} assets={assets}
-              activeAsset={activeAsset} onSelect={setActiveAsset} />
-          </div>
-          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-            {/* Walk-forward stats */}
-            <div className="card" style={{ padding:"14px" }}>
-              <p style={{ fontWeight:800, fontSize:13, marginBottom:10 }}>
-                Walk-Forward por activo
-              </p>
-              {Object.keys(calibMap).length === 0 ? (
-                <p style={{ fontSize:12, color:"var(--muted)" }}>
-                  Sin historial aún — se actualiza tras cada trade
-                </p>
-              ) : (
-                <div style={{ overflowY:"auto", maxHeight:300 }}>
-                  <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11 }}>
-                    <thead>
-                      <tr style={{ background:"rgba(255,255,255,0.03)" }}>
-                        {["Activo/Modo","N","WR","Avg RR","Kelly","Floor adj"].map(h=>(
-                          <th key={h} style={{ padding:"5px 8px", textAlign:"left",
-                            fontSize:9, textTransform:"uppercase", color:"var(--muted)",
-                            borderBottom:"1px solid var(--border)" }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Object.entries(calibMap).slice(0,15).map(([k,c]) => (
-                        <tr key={k} style={{ borderBottom:"1px solid rgba(255,255,255,0.03)" }}>
-                          <td style={{ padding:"5px 8px", fontWeight:700, fontSize:11 }}>{k}</td>
-                          <td style={{ padding:"5px 8px", color:"var(--muted)" }}>{c.n}</td>
-                          <td style={{ padding:"5px 8px",
-                            color:c.wr>0.5?"#10b981":"#ef4444", fontWeight:700 }}>
-                            {(c.wr*100).toFixed(0)}%</td>
-                          <td style={{ padding:"5px 8px", fontFamily:"monospace" }}>
-                            {c.avgRR.toFixed(2)}</td>
-                          <td style={{ padding:"5px 8px", color:"#a5b4fc", fontFamily:"monospace" }}>
-                            {(c.kellyF*100).toFixed(0)}%</td>
-                          <td style={{ padding:"5px 8px",
-                            color:c.floorAdj>0?"#ef4444":"#10b981", fontFamily:"monospace" }}>
-                            {c.floorAdj>0?"+":""}{c.floorAdj}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-            {/* σ histórico del activo activo */}
-            {activeSigmaH.length > 2 && (
-              <div className="card" style={{ padding:"14px" }}>
-                <p style={{ fontWeight:800, fontSize:12, marginBottom:8 }}>
-                  σ histórica — {activeAsset}
-                </p>
-                <SigmaSparkline data={activeSigmaH} />
-                <div style={{ marginTop:8, fontSize:10, color:"var(--muted)" }}>
-                  Min: {(Math.min(...activeSigmaH)*100).toFixed(1)}% ·
-                  Max: {(Math.max(...activeSigmaH)*100).toFixed(1)}% ·
-                  Último: {(activeSigmaH[activeSigmaH.length-1]*100).toFixed(1)}%
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── Vista: HISTORY ── */}
-      {activeView === "history" && (
-        <div>
-          {/* Stats por modo */}
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:12 }}>
-            {(["scalp","intradia","swing"] as QMode[]).map(m => {
-              const bm = stats.byMode[m];
-              return (
-                <div key={m} className="card" style={{ padding:"12px 14px" }}>
-                  <p style={{ fontWeight:800, fontSize:12, marginBottom:6 }}>
-                    {m==="scalp"?"⚡":m==="intradia"?"📊":"🌊"} {m.charAt(0).toUpperCase()+m.slice(1)}
-                  </p>
-                  {bm.n === 0 ? (
-                    <p style={{ fontSize:11, color:"var(--muted)" }}>Sin trades</p>
-                  ) : (
-                    <div style={{ fontSize:11 }}>
-                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
-                        <span style={{ color:"var(--muted)" }}>Trades:</span>
-                        <strong>{bm.n}</strong>
-                      </div>
-                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
-                        <span style={{ color:"var(--muted)" }}>WR:</span>
-                        <strong style={{ color:bm.wr>0.5?"#10b981":"#ef4444" }}>
-                          {(bm.wr*100).toFixed(0)}%</strong>
-                      </div>
-                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
-                        <span style={{ color:"var(--muted)" }}>Avg RR:</span>
-                        <strong style={{ color:"#a5b4fc" }}>{bm.avgRR.toFixed(2)}×</strong>
-                      </div>
-                      <div style={{ display:"flex", justifyContent:"space-between" }}>
-                        <span style={{ color:"var(--muted)" }}>P&L:</span>
-                        <strong style={{ color:bm.pnl>=0?"#10b981":"#ef4444" }}>
-                          {bm.pnl>=0?"+":""}${bm.pnl.toFixed(2)}</strong>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Tabla de trades */}
-          <div className="card" style={{ padding:"14px", overflowX:"auto" }}>
-            <p style={{ fontWeight:800, fontSize:12, marginBottom:10 }}>
-              Historial completo ({closedTrades.length} trades)
-            </p>
-            {closedTrades.length === 0 ? (
-              <p style={{ fontSize:12, color:"var(--muted)" }}>Sin trades aún</p>
-            ) : (
-              <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11 }}>
-                <thead>
-                  <tr style={{ background:"rgba(255,255,255,0.03)" }}>
-                    {["Activo","Modo","Dir","Entry","Exit","P&L","RR","Δ","EV","Result","Fecha"].map(h=>(
-                      <th key={h} style={{ padding:"6px 8px", textAlign:"left",
-                        fontSize:9, textTransform:"uppercase", color:"var(--muted)",
-                        borderBottom:"1px solid var(--border)" }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {closedTrades.slice(0,30).map(t => (
-                    <tr key={t.id} style={{ borderBottom:"1px solid rgba(255,255,255,0.03)" }}>
-                      <td style={{ padding:"6px 8px", fontWeight:700 }}>{t.asset.replace("USDT","").replace("USD","")}</td>
-                      <td style={{ padding:"6px 8px", color:"var(--muted)", fontSize:10 }}>{t.mode}</td>
-                      <td style={{ padding:"6px 8px", color:t.direction==="LONG"?"#10b981":"#ef4444", fontWeight:700 }}>
-                        {t.direction==="LONG"?"↑":"↓"}</td>
-                      <td style={{ padding:"6px 8px", fontFamily:"monospace", fontSize:10 }}>
-                        {t.entry>10?t.entry.toFixed(2):t.entry.toFixed(5)}</td>
-                      <td style={{ padding:"6px 8px", fontFamily:"monospace", fontSize:10 }}>
-                        {t.exit>10?t.exit.toFixed(2):t.exit.toFixed(5)}</td>
-                      <td style={{ padding:"6px 8px", fontWeight:800,
-                        color:t.pnl>=0?"#10b981":"#ef4444" }}>
-                        {t.pnl>=0?"+":""}${t.pnl.toFixed(2)}</td>
-                      <td style={{ padding:"6px 8px", fontFamily:"monospace" }}>{t.rrRealized.toFixed(2)}×</td>
-                      <td style={{ padding:"6px 8px", fontFamily:"monospace", fontSize:10, color:"var(--muted)" }}>
-                        {t.greeks.delta.toFixed(3)}</td>
-                      <td style={{ padding:"6px 8px", fontFamily:"monospace", fontSize:10,
-                        color:t.greeks.ev>=0?"#10b981":"#ef4444" }}>
-                        {t.greeks.ev>=0?"+":""}{t.greeks.ev.toFixed(4)}</td>
-                      <td style={{ padding:"6px 8px" }}>
-                        <span style={{ fontSize:9, padding:"2px 6px", borderRadius:5, fontWeight:700,
-                          background:t.result.includes("TP")?"rgba(16,185,129,0.12)":t.result==="SL"?"rgba(239,68,68,0.1)":"rgba(255,255,255,0.05)",
-                          color:t.result.includes("TP")?"#10b981":t.result==="SL"?"#ef4444":"var(--text-2)" }}>
-                          {t.result}</span></td>
-                      <td style={{ padding:"6px 8px", fontSize:9, color:"var(--muted)" }}>
-                        {new Date(t.closedAt).toLocaleString("es",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+      {backtestTrades.length > 0 && (
+        <div className="card">
+          <h4 style={{ fontWeight: 700, marginBottom: 8 }}>Trades del backtest</h4>
+          <TradeHistory trades={backtestTrades} />
         </div>
       )}
     </div>
   );
 }
+
+
+export function App() {
+  // ── Capturar errores de useEffect que no van a ErrorBoundary ────────────
+  React.useEffect(() => {
+    const h = (e: ErrorEvent) => console.error("[TraderLab CRASH]", e.message, "\n", e.error?.stack ?? "");
+    window.addEventListener("error", h);
+    return () => window.removeEventListener("error", h);
+  }, []);
+
+  const [assetIntelligence, setAssetIntelligence] = useState<Record<string, AssetIntelligence>>({});
+  const [correlationMatrix, setCorrelationMatrix] = useState<Record<string, Record<string, number>>>({});
+  const [availableSymbols, setAvailableSymbols] = useState<Array<{name:string;brokerName?:string;category:AssetCategory;spread:number;contractSize:number;digits?:number;volumeMin?:number}>>([]);
+  const [assets, setAssets] = useState<Asset[]>(Object.keys(ASSET_CATALOG) as Asset[]);
+  const assetIntelRef  = useRef<Record<string, AssetIntelligence>>({});
+  const correlationRef = useRef<Record<string, Record<string, number>>>({});
+  const [appTab, setAppTab] = useState<AppTab>("trading");
+  const [tab, setTab] = useState<Mode>("scalping");
+  const [asset, setAsset] = useState<Asset>("BTCUSD");
+  const [prices, setPrices] = useState<Record<Asset, number>>(initialPrices);
+  const [series, setSeries] = useState<Record<Asset, number[]>>({
+    BTCUSD: Array.from({ length: 120 }, () => initialPrices.BTCUSD),
+    ETHUSD: Array.from({ length: 120 }, () => initialPrices.ETHUSD),
+    XAGUSD: Array.from({ length: 120 }, () => initialPrices.XAGUSD),
+    XAUUSD: Array.from({ length: 120 }, () => initialPrices.XAUUSD),
+  });
+  const [candles,    setCandles]    = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles5m,  setCandles5m]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles15m, setCandles15m] = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  // Velas 4H y 1D — exclusivamente para Wyckoff macro (intradía/swing)
+  const [candles4h,  setCandles4h]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [candles1d,  setCandles1d]  = useState<Record<Asset, Candle[]>>({ BTCUSD: [], ETHUSD: [], XAGUSD: [], XAUUSD: [] });
+  const [mt5SpreadMap, setMt5SpreadMap] = useState<Partial<Record<Asset, {spread: number; spread_pct: number; bid: number; ask: number}>>>({});
+  // Leverage real del broker (leído del bridge) — reemplaza los valores hardcodeados
+  const [mt5LeverageMap, setMt5LeverageMap] = useState<Partial<Record<Asset, number>>>({});
+  const [balance, setBalance] = useLocalStorage("tl_balance", 100);
+  const [openPositions, setOpenPositions] = useState<Position[]>([]);
+  const [realTrades, setRealTrades] = useLocalStorage<ClosedTrade[]>("tl_trades", []);
+  const [backtestTrades, setBacktestTrades] = useState<ClosedTrade[]>([]);
+  const [lastSignal, setLastSignal] = useState<Signal | null>(null);
+  const [lastOF, setLastOF] = useState<OrderFlowScore | null>(null);
+  const [volumeShock, setVolumeShock] = useState(0.28);
+  const [learning, setLearning] = useLocalStorage<LearningModel>("tl_learning", initialLearning);
+  const [apiKey, setApiKey] = useLocalStorage("tl_apiKey", "");
+  const [usingGroq,   setUsingGroq]   = useState(false);
+  const [groqModel,   setGroqModel]   = useState("llama-3.3-70b-versatile");
+  const [riskPct, setRiskPct] = useLocalStorage("tl_riskPct", 1.2);
+  const [manualTp, setManualTp] = useState<string>("");
+  const [manualSl, setManualSl] = useState<string>("");
+  const [backtestSize, setBacktestSize] = useState(40);
+  const [lastBacktest, setLastBacktest] = useState<BacktestReport | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [autoScan,    setAutoScan]    = useState(false);
+  const [lastGateLog,  setLastGateLog]  = useState<string>("");   // último motivo de skip
+  const [qeGreeksMap,  setQeGreeksMap]  = useState<Record<string,{delta:number;ev:number;gammaExtreme:boolean;vegaCross:boolean}>>({});
+  const [scanEverySec, setScanEverySec] = useState(20);
+  // ── Circuit breaker ──────────────────────────────────────────────────────
+  const [circuitOpen, setCircuitOpen] = useState(false);   // true = pausado por pérdida diaria
+  const [sessionOverride, setSessionOverride] = useState(false); // true = ignorar filtro sesión manual
+  const dailyPnlRef     = useRef<{ date: string; pnl: number }>({ date: "", pnl: 0 });
+  const circuitOpenRef  = useRef(false);
+  const mt5EquityRef    = useRef<number | null>(null);
+  const equityRef       = useRef<number>(100);
+  const MAX_DAILY_LOSS_PCT = 0.03;   // 3% equity máxima pérdida diaria
+  // ── Rate limiter Groq ────────────────────────────────────────────────────
+  const groqCallsRef   = useRef<number[]>([]);   // timestamps de llamadas recientes
+  const groqPausedRef  = useRef(false);           // true = pausado por rate limit
+  const [groqRateInfo, setGroqRateInfo] = useState({ calls: 0, paused: false, pauseUntil: 0 });
+  const GROQ_MAX_RPM   = 25;   // límite conservador (Groq free = 30 rpm)
+  const GROQ_PAUSE_SEC = 15;   // pausa automática cuando se acerca al límite
+  const [feedStatus, setFeedStatus] = useState("Esperando feed...");
+  const [liveReady, setLiveReady] = useState(false);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [aiStatus, setAiStatus] = useState<AiStatus>("idle");
+  const [aiLatency, setAiLatency] = useState<number | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const [showIndicators, setShowIndicators] = useState(true);
+  const [maxDailyLoss, setMaxDailyLoss] = useLocalStorage("tl_maxDailyLoss", 3);   // % del balance
+  const [maxDailyGain, setMaxDailyGain] = useLocalStorage("tl_maxDailyGain", 6);   // % del balance
+  // ── MT5 Bridge — persistidos en localStorage ──────────────────────────────
+  const [mt5Enabled,  setMt5Enabled]  = useLocalStorage<boolean>("tl_mt5_enabled", false);
+  const [mt5Url,      setMt5Url]      = useLocalStorage<string>("tl_mt5_url", "http://localhost:8000");
+  const [mt5Status,   setMt5Status]   = useState<"disconnected"|"connected"|"error"|"testing">("disconnected");
+  const mt5StatusRef = React.useRef<"disconnected"|"connected"|"error"|"testing">("disconnected");
+  const [mt5Account,  setMt5Account]  = useState<string|null>(null);
+  const [mt5Balance,  setMt5Balance]  = useState<number|null>(null);
+  const [mt5Equity,      setMt5Equity]      = useState<number|null>(null);
+  const [mt5Margin,      setMt5Margin]      = useState<number|null>(null);
+  const [mt5FreeMargin,  setMt5FreeMargin]  = useState<number|null>(null);
+  const [mt5MarginLevel, setMt5MarginLevel] = useState<number|null>(null);
+  const [mt5Positions,   setMt5Positions]   = useState<MT5Position[]>([]);
+  const [mt5History,     setMt5History]     = useState<ClosedTrade[]>([]);
+
+  // ─── Motor cuant — nuevos estados ─────────────────────────────────────────
+  // ─── Correlación de trades ────────────────────────────────────────────────
+  const [tradeCorrelations, setTradeCorrelations] = useLocalStorage<Record<string, TradeCorrelation>>("tl_trade_corr", {});
+  const [portfolioRisk,     setPortfolioRisk]      = useLocalStorage<PortfolioRiskState | null>("tl_portfolio_risk", null);
+  const tradeCorrelationsRef = React.useRef<Record<string, TradeCorrelation>>({});
+
+  const [regimeMap,        setRegimeMap]        = useState<Record<string, RegimeAnalysis>>({});
+  const [assetCalib,       setAssetCalib]        = useLocalStorage<Record<string, AssetCalibration>>("tl_asset_calib", {});
+  const [signalHistMap,    setSignalHistMap]      = useLocalStorage<Record<string, SignalHistory>>("tl_sig_hist", {});
+  const [groqCalib,        setGroqCalib]          = useLocalStorage<GroqCalibration | null>("tl_groq_calib", null);
+  const [lastCalibRun,     setLastCalibRun]       = useState<number>(0);
+  const regimeRef          = React.useRef<Record<string, RegimeAnalysis>>({});
+
+  // Indicadores, Wyckoff y control de mercado calculados por activo
+  const [indicatorsMap, setIndicatorsMap] = useState<Partial<Record<Asset, Indicators>>>({});
+  const [wyckoffMap, setWyckoffMap] = useState<Partial<Record<Asset, WyckoffAnalysis>>>({});
+  const [marketControlMap, setMarketControlMap] = useState<Partial<Record<Asset, MarketControl>>>({});
+
+  const toastIdRef = useRef(0);
+  const prevPricesRef = useRef(initialPrices);
+  const openPositionsRef  = useRef(openPositions);
+  const mt5PositionsRef   = useRef(mt5Positions);
+  const learningRef = useRef(learning);
+  const volumeShockRef = useRef(volumeShock);
+  const seriesRef     = useRef(series);
+  const candlesRef    = useRef(candles);    // refs para evitar stale closure en setInterval
+  const pricesRef     = useRef(prices);
+  const candles5mRef  = useRef(candles5m);
+  const candles15mRef = useRef(candles15m);
+
+  useEffect(() => { openPositionsRef.current  = openPositions;  }, [openPositions]);
+  useEffect(() => { mt5PositionsRef.current   = mt5Positions;   }, [mt5Positions]);
+  useEffect(() => { prevPricesRef.current = prices; }, [prices]);
+  useEffect(() => { learningRef.current = learning; }, [learning]);
+  useEffect(() => { volumeShockRef.current = volumeShock; }, [volumeShock]);
+  useEffect(() => { seriesRef.current   = series;    }, [series]);
+  useEffect(() => { candlesRef.current   = candles;   }, [candles]);
+  useEffect(() => { pricesRef.current    = prices;    }, [prices]);
+  useEffect(() => { candles5mRef.current = candles5m; }, [candles5m]);
+  useEffect(() => { candles15mRef.current= candles15m;}, [candles15m]);
+
+  // Tick cada segundo
+  useEffect(() => {
+    const id = setInterval(() => {
+      setNow(Date.now());
+      if (openPositionsRef.current.length > 0) evaluatePositionsWithCurrentPrices();
+      // Sincronizar posiciones MT5 reales en cada ciclo de autoScan
+      if (mt5Enabled && mt5Status === "connected") syncMT5State();
+    }, 1000);
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Sync inicial al montar — para que liveReady=true desde el arranque
+  useEffect(() => {
+    void syncRealData();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const envKey = import.meta.env.VITE_GROQ_API_KEY as string | undefined;
+    if (envKey && !apiKey) { setApiKey(envKey); setUsingGroq(true); }
+  }, [apiKey]);
+
+  useEffect(() => {
+    if (usingGroq && apiKey.trim()) setAiStatus("idle");
+    else if (!usingGroq) setAiStatus("disabled");
+  }, [usingGroq, apiKey]);
+
+  // Recalcular indicadores y control de mercado al cambiar velas 1m
+  useEffect(() => {
+    assets.forEach(a => {
+      const c = (candles[a] ?? []).filter(x => x.c > 0 && x.h > 0 && x.l > 0);
+      if (c.length > 25) {
+        try {
+          const ind = computeIndicators(c);
+          // Guard NaN: si vwap es NaN las velas son malas, ignorar
+          if (isNaN(ind.vwap) || !isFinite(ind.vwap)) return;
+          setIndicatorsMap(prev => ({ ...prev, [a]: ind }));
+          const atrForControl = Math.max(calcAtrFromSeries(c.map(x=>x.c), 20), getAssetMinAtr(a));
+          setMarketControlMap(prev => ({ ...prev, [a]: analyzeMarketControl(c, ind, atrForControl) }));
+        } catch { /* velas malformadas — ignorar hasta próxima sync */ }
+      }
+    });
+  }, [candles]);
+
+  // Recalcular Wyckoff macro solo cuando cambian velas 4H o 1D reales del bridge
+  // Solo para modo intradía — no afecta scalping
+  useEffect(() => {
+    assets.forEach(a => {
+      const c4h = (candles4h[a] ?? []).filter(x => x.c > 0);
+      const c1d = (candles1d[a] ?? []).filter(x => x.c > 0);
+      try {
+        if (c4h.length >= 20 || c1d.length >= 10) {
+          setWyckoffMap(prev => ({ ...prev, [a]: analyzeWyckoff(c4h, c1d) }));
+        } else {
+          setWyckoffMap(prev => ({
+            ...prev,
+            [a]: {
+              phase: "unknown", bias: "neutral", events: [],
+              supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
+              narrative: "Esperando velas 4H/1D del bridge MT5...",
+              wyckoffLotMult: 1.0, tf4h: null, tf1d: null,
+            },
+          }));
+        }
+      } catch(e) { console.error("[Wyckoff]", a, e); }
+    });
+  }, [candles4h, candles1d]);
+
+  function pushToast(msg: string, type: Toast["type"] = "info") {
+    const id = ++toastIdRef.current;
+    setToasts(prev => [{ id, msg, type }, ...prev].slice(0, 5));
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4800);
+  }
+  function removeToast(id: number) { setToasts(prev => prev.filter(t => t.id !== id)); }
+
+  async function testAiConnection() {
+    if (!apiKey.trim()) { pushToast("Ingrese la API Key de Groq en Config.", "warning"); return; }
+    if (!usingGroq)     { pushToast("Activá el modo Groq en Config.", "warning"); return; }
+    setAiStatus("testing");
+    const t0 = Date.now();
+    const prevModel = groqModel; // guardar para restaurar si todo falla
+    // Modelos Groq 2025 — en orden de preferencia velocidad/capacidad
+    const CANDIDATES = [
+      "llama-3.1-8b-instant",
+      "llama3-8b-8192",
+      "llama-3.3-70b-versatile",
+      "llama3-70b-8192",
+      "gemma2-9b-it",
+    ];
+    let chosenModel = "";
+    let lastStatus = 0;
+    let lastDetail = "";
+    for (const candidate of CANDIDATES) {
+      try {
+        const r = await fetch("/api/groq", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
+          body: JSON.stringify({ model: candidate, temperature: 0, max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+        });
+        lastStatus = r.status;
+        if (r.status === 401) { lastDetail = "API key inválida"; break; }
+        if (r.status === 429) {
+          // Pausa automática de 60s cuando Groq devuelve 429
+          groqPausedRef.current = true;
+          const pauseUntil = Date.now() + 60000;
+          setGroqRateInfo(p => ({ ...p, paused: true, pauseUntil }));
+          setTimeout(() => { groqPausedRef.current = false; setGroqRateInfo(p => ({ ...p, paused: false, pauseUntil: 0 })); }, 60000);
+          lastDetail = "Rate limit 429 — pausa automática 60s";
+          break;
+        }
+        if (r.ok) { chosenModel = candidate; break; }
+        try { const d = await r.json(); lastDetail = d?.error?.message ?? `HTTP ${r.status}`; } catch { lastDetail = `HTTP ${r.status}`; }
+      } catch (fetchErr) {
+        lastDetail = fetchErr instanceof Error ? fetchErr.message : "fetch error";
+        break; // Error de red — no tiene sentido probar más modelos
+      }
+    }
+    if (chosenModel) {
+      setGroqModel(chosenModel);
+      setAiLatency(Date.now() - t0);
+      setAiStatus("ok");
+      pushToast(`✅ Groq OK — ${chosenModel} (${Date.now() - t0}ms)`, "success");
+    } else {
+      // No cambiar a "error" si había una conexión previa — solo mostrar warning
+      const wasConnected = prevModel && aiStatus === "ok";
+      setAiStatus(wasConnected ? "ok" : "error");
+      const hint = lastStatus === 401 ? "API Key inválida"
+        : lastStatus === 400 ? "Modelo no disponible — intentá con otro"
+        : lastStatus === 429 ? "Rate limit — esperá 60s"
+        : lastDetail || `HTTP ${lastStatus}`;
+      pushToast(`⚠ Groq: ${hint}`, "warning");
+      if (wasConnected) {
+        setGroqModel(prevModel); // restaurar modelo anterior
+        pushToast(`ℹ Groq sigue conectado con el modelo anterior: ${prevModel}`, "info");
+      }
+    }
+  }
+
+    // spreadByAsset — usa spread REAL del broker (MT5/PrimeXBT) cuando está disponible.
+  // Fallback: spread estimado por calcCFDSpread (sesión + volatilidad) si bridge no entregó datos.
+  const spreadByAsset = useMemo(() => {
+    const m = {} as Record<Asset, number>;
+    assets.forEach(a => {
+      const real = mt5SpreadMap[a];
+      // spread real = bid-ask absoluto directo de MT5
+      m[a] = real ? real.spread : (getSpreadPct(a, volumeShock) / 100) * prices[a];
+    });
+    return m;
+  }, [prices, volumeShock, mt5SpreadMap]);
+
+  // spreadSnapshot — para UI: usa datos reales del bridge si existen
+  const spreadSnapshot = useMemo(() => {
+    const m = {} as Record<Asset, SpreadSnapshot>;
+    assets.forEach(a => {
+      const real = mt5SpreadMap[a];
+      if (real) {
+        // Construir SpreadSnapshot desde datos reales del broker
+        const spreadPct = real.spread_pct;
+        const base = spreadPct * 0.6 / 100 * prices[a];  // aprox 60% base, resto sesión+vol
+        m[a] = {
+          spread: real.spread, spreadPct, bid: real.bid, ask: real.ask,
+          component: { base, volume: real.spread * 0.2, session: real.spread * 0.2 },
+          sessionLabel: "MT5", isHighVolume: spreadPct > 0.05,
+        };
+      } else {
+        m[a] = calcCFDSpread(a, prices[a], volumeShock);
+      }
+    });
+    return m;
+  }, [prices, volumeShock, mt5SpreadMap]);
+
+  // getLeverage — leverage real del broker si está disponible, fallback a hardcodeado
+  const getLeverage = (asset: Asset): number =>
+    mt5LeverageMap[asset] ?? leverageByAsset[asset];
+
+  const unrealized = useMemo(() => openPositions.reduce((acc, p) => {
+    const mark = prices[p.signal.asset];
+    const spread = spreadByAsset[p.signal.asset];
+    const eff = p.signal.direction === "LONG" ? mark - spread / 2 : mark + spread / 2;
+    return acc + (p.signal.direction === "LONG" ? eff - p.signal.entry : p.signal.entry - eff) * p.size;
+  }, 0), [openPositions, prices, spreadByAsset]);
+
+  // Equity real: usar mt5Equity del broker si está conectado, sino el simulado
+  const equity = (mt5Enabled && mt5Equity !== null && mt5Equity > 0)
+    ? mt5Equity
+    : balance + unrealized;
+  const riskMetrics = useMemo(() => calcRiskMetrics(realTrades, balance, 5), [realTrades, balance]);
+
+  const currentIndicators = indicatorsMap[asset] ?? null;
+  const currentWyckoff = wyckoffMap[asset] ?? null;
+
+  // Order Flow en tiempo real para el activo/modo seleccionado
+  const currentOF = useMemo(() => {
+    if (tab !== "scalping") return null;
+    const c = candles[asset];
+    const ind = currentIndicators;
+    if (!c?.length || !ind) return null;
+    return analyzeOrderFlow(c, prices[asset] ?? 0, ind.vwap, calcAtrFromSeries(series[asset] ?? [], 20));
+  }, [tab, asset, candles, prices, currentIndicators, series]);
+
+  const stats = useMemo(() => {
+    const t = realTrades; const total = t.length;
+    const wins = t.filter(x => x.pnl > 0); const losses = t.filter(x => x.pnl <= 0);
+    const pnl = t.reduce((a, x) => a + x.pnl, 0);
+    const gp = wins.reduce((a, x) => a + x.pnl, 0);
+    const gl = Math.abs(losses.reduce((a, x) => a + x.pnl, 0));
+    const returns = t.map(x => x.pnlPct / 100);
+      const sharpe = std(returns) === 0 ? 0 : (avg(returns) / std(returns)) * Math.sqrt(Math.max(returns.length, 1));
+    return { total, winRate: total ? (wins.length / total) * 100 : 0, pnl, expectancy: total ? pnl / total : 0, profitFactor: gl > 0 ? gp / gl : gp > 0 ? 99 : 0, sharpe, maxDrawdown: calcDrawdown(t) };
+  }, [realTrades]);
+
+  const bestHours = useMemo(() =>
+    Object.entries(learning.hourEdge).map(([h, e]) => ({ hour: Number(h), edge: e }))
+      .sort((a, b) => b.edge - a.edge).slice(0, 4), [learning.hourEdge]);
+
+
+    const visibleCandles = useMemo(() => {
+    const c = candles[asset] ?? [];
+    return c.length > 0 ? c : deriveSyntheticCandles(series[asset] ?? []);
+  }, [asset, candles, series]);
+
+  function refreshLearning(trades: ClosedTrade[]) {
+    const real = trades.filter(t => t.source === "real");
+    if (!real.length) return;
+    const wr = real.filter(t => t.pnl > 0).length / real.length;
+    const exp = real.reduce((a, t) => a + t.pnl, 0) / real.length;
+    const hourMap: Record<number, number[]> = {};
+    real.forEach(t => { const h = new Date(t.closedAt).getHours(); if (!hourMap[h]) hourMap[h] = []; hourMap[h].push(t.pnl); });
+    const hourEdge: Record<number, number> = {};
+    Object.entries(hourMap).forEach(([h, vs]) => { hourEdge[Number(h)] = avg(vs); });
+    const minTrades = real.length;
+    // ── Walk-forward validation: rolling 20 trades ────────────────────────────
+    // Usa solo los últimos 20 para no dejar que el pasado lejano domine
+    const rolling  = real.slice(-20);
+    const rollingWR = rolling.length >= 5
+      ? rolling.filter(t => t.pnl > 0).length / rolling.length
+      : wr;
+    const rollingRR  = rolling.length >= 5
+      ? rolling.reduce((a, t) => {
+          const rr = (t as ClosedTrade & { rr?: number }).rr ?? 1.5;
+          return a + rr;
+        }, 0) / rolling.length
+      : 1.5;
+    const rollingExp = rolling.length >= 5
+      ? rolling.reduce((a, t) => a + t.pnl, 0) / rolling.length
+      : 0;
+
+    // Floor adaptativo: alto WR → bajar piso (buscar más señales), bajo WR → subir piso
+    // Rango 46-60: nunca demasiado permisivo ni demasiado estricto
+    const floorFromWR = 52 + (0.5 - rollingWR) * 20;     // WR 60% → 46, WR 40% → 54
+    const floorFromRR = rollingRR < 1.3 ? 2 : -1;        // si RR bajo, más estricto
+    const floorAdjust = minTrades >= 5
+      ? clamp(floorFromWR + floorFromRR, 46, 60)
+      : 52;
+
+    // Kelly fraccionario calibrado con el historial real
+    const kellyFrac = calcKellyFraction(
+      rolling.map(t => ({ pnl: t.pnl, rr: (t as ClosedTrade & { rr?: number }).rr }))
+    );
+    // ── AssetEdge legacy ──────────────────────────────────────────────────────
+    const assetEdge: Partial<Record<string, AssetEdge>> = { ...learningRef.current.assetEdge };
+    real.forEach(t => {
+      const key = `${t.asset}_${t.mode}`;
+      if (!assetEdge[key]) assetEdge[key] = { wins: 0, total: 0, pnl: 0, byHour: {} };
+      const ae = assetEdge[key]!;
+      ae.total++; if (t.pnl > 0) ae.wins++; ae.pnl += t.pnl;
+      const h = new Date(t.closedAt).getHours();
+      ae.byHour[h] = (ae.byHour[h] ?? 0) + t.pnl;
+    });
+    setLearning({
+      // Kelly calibra el riskScale: half-kelly para producción
+      riskScale: clamp(kellyFrac * 2, 0.7, 1.5),
+      confidenceFloor: floorAdjust,
+      // TP ATR basado en RR realizado: si el mercado da más, ampliar
+      scalpingTpAtr: clamp(1.8 + rollingRR * 0.3, 1.8, 3.5),
+      intradayTpAtr: clamp(3.5 + rollingRR * 0.8, 3.5, 8.0),
+      // Trail: más ajustado si WR alto (más trades ganan → proteger más)
+      atrTrailMult: clamp(0.2 + rollingWR * 0.4, 0.2, 0.6),
+      hourEdge, assetEdge,
+    });
+    // ── AssetIntelligence: reconstruir desde cero con todos los trades reales ─
+    const intelMap: Record<string, AssetIntelligence> = {};
+    real.forEach(t => {
+      const sym = t.asset;
+      if (!intelMap[sym]) {
+        intelMap[sym] = {
+          symbol: sym, category: getAssetCategory(sym),
+          totalTrades: 0, winRate: 0, avgRR: 0, avgPnl: 0, profitFactor: 1,
+          sessionStats: {}, modeStats: {}, hourlyStats: {},
+          optimalSLMult: 1.0, optimalTPMult: 2.0,
+          avgSpreadPct: getAssetCatalog(sym).spreadPct,
+          spreadByHour: {}, avgVolatility: 0, trendStrength: 0,
+          bestMode: "scalping", bestSession: "NY", bestHourUTC: 14,
+          correlations: assetIntelRef.current[sym]?.correlations ?? {},
+          lastUpdated: new Date().toISOString(),
+        };
+      }
+      const intel = intelMap[sym];
+      intel.totalTrades++;
+      if (t.pnl > 0) {
+        // wins se computa al final con totalTrades
+      }
+      intel.avgPnl = (intel.avgPnl * (intel.totalTrades-1) + t.pnl) / intel.totalTrades;
+      // Session
+      const sess = t.closedAt ? (() => {
+        const h = new Date(t.closedAt).getUTCHours();
+        const d = new Date(t.closedAt).getUTCDay();
+        if (d === 0 || d === 6) return "Weekend";
+        if (h >= 13 && h < 21) return "NY";
+        if (h >= 7  && h < 16) return "London";
+        if (h >= 0  && h < 7 ) return "Asia";
+        return "Post-NY";
+      })() : "NY";
+      const ss = intel.sessionStats[sess] ?? { trades:0, wins:0, pnl:0, avgSpread:0 };
+      intel.sessionStats[sess] = { trades:ss.trades+1, wins:ss.wins+(t.pnl>0?1:0), pnl:ss.pnl+t.pnl, avgSpread:ss.avgSpread };
+      // Mode
+      const ms = intel.modeStats[t.mode] ?? { trades:0, wins:0, pnl:0, avgRR:0 };
+      intel.modeStats[t.mode] = { trades:ms.trades+1, wins:ms.wins+(t.pnl>0?1:0), pnl:ms.pnl+t.pnl, avgRR:ms.avgRR };
+      // Hour
+      const h = new Date(t.closedAt).getUTCHours();
+      const hs = intel.hourlyStats[h] ?? { trades:0, wins:0, pnl:0 };
+      intel.hourlyStats[h] = { trades:hs.trades+1, wins:hs.wins+(t.pnl>0?1:0), pnl:hs.pnl+t.pnl };
+    });
+    // Finalizar métricas derivadas
+    Object.values(intelMap).forEach(intel => {
+      const allWins = Object.values(intel.sessionStats).reduce((s,v)=>s+v.wins,0);
+      intel.winRate = intel.totalTrades > 0 ? allWins / intel.totalTrades : 0;
+      const grossProfit = Object.values(intel.sessionStats).reduce((s,v)=>s+(v.pnl>0?v.pnl:0),0);
+      const grossLoss   = Math.abs(Object.values(intel.sessionStats).reduce((s,v)=>s+(v.pnl<0?v.pnl:0),0));
+      intel.profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 3 : 1;
+      // Best session
+      const sessEntries = Object.entries(intel.sessionStats);
+      if (sessEntries.length) {
+        intel.bestSession = sessEntries.sort((a,b)=>(b[1].pnl/Math.max(b[1].trades,1))-(a[1].pnl/Math.max(a[1].trades,1)))[0][0];
+      }
+      // Best mode
+      const modeEntries = Object.entries(intel.modeStats);
+      if (modeEntries.length) {
+        intel.bestMode = modeEntries.sort((a,b)=>(b[1].pnl/Math.max(b[1].trades,1))-(a[1].pnl/Math.max(a[1].trades,1)))[0][0];
+      }
+      // Best hour
+      const hourEntries = Object.entries(intel.hourlyStats);
+      if (hourEntries.length) {
+        intel.bestHourUTC = Number(hourEntries.sort((a,b)=>(b[1].pnl/Math.max(b[1].trades,1))-(a[1].pnl/Math.max(a[1].trades,1)))[0][0]);
+      }
+    });
+    assetIntelRef.current = intelMap;
+    setAssetIntelligence(intelMap);
+  }
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ─── FUNCIONES DE ANÁLISIS TÉCNICO ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── getAssetMinAtr ────────────────────────────────────────────────────────────
+// ── deriveSyntheticCandles: genera velas OHLC desde serie de precios ─────────
+function deriveSyntheticCandles(prices: number[]): Candle[] {
+  if (!prices.length) return [];
+  const now = Math.floor(Date.now() / 1000);
+  return prices.map((p, i) => {
+    const prev = prices[i - 1] ?? p;
+    const noise = p * 0.0003;
+    return {
+      t: now - (prices.length - i) * 60,
+      o: prev,
+      h: Math.max(prev, p) + noise,
+      l: Math.min(prev, p) - noise,
+      c: p,
+      v: 100 + Math.random() * 200,
+    };
+  });
+}
+
+
+// ── getSpreadPct: spread estimado % para activo (fallback sin bridge) ─────────
+function getSpreadPct(asset: Asset, shock: number): number {
+  // 1. Spread del catálogo fine-tuned (si existe)
+  const catalog = ASSET_CATALOG[asset];
+  const base = catalog?.spreadPct
+    ?? CFD_BASE_SPREAD_PCT[asset]
+    ?? 0.02; // fallback genérico 0.02%
+
+  // 2. Ajuste por sesión (spread sube fuera de horario prime)
+  const session = getSessionProfile().name;
+  const sessionMult = session === "Weekend" ? 2.5
+    : session === "Post-NY" || session === "Asia — Crypto" ? 1.6
+    : 1.0;
+
+  // 3. Ajuste por volatilidad (shock alto = spread mayor en crypto)
+  const shockMult = shock > 0.8 ? 1.8 : shock > 0.5 ? 1.35 : shock > 0.3 ? 1.15 : 1.0;
+
+  return base * 100 * sessionMult * shockMult; // retorna en %
+}
+
+// ── calcDrawdown: máximo drawdown desde equity curve ─────────────────────────
+function calcDrawdown(trades: ClosedTrade[]): number {
+  if (trades.length < 2) return 0;
+  let peak = 0, maxDD = 0, equity = 0;
+  for (const t of trades) {
+    equity += t.pnl;
+    if (equity > peak) peak = equity;
+    const dd = peak - equity;
+    if (dd > maxDD) maxDD = dd;
+  }
+  return maxDD;
+}
+
+function getAssetMinAtr(a: string): number {
+  return ASSET_CATALOG[a]?.minAtr ?? 0.0001;
+}
+
+// ── calcCFDSpread: spread estimado cuando bridge no entrega datos reales ───────
+function calcCFDSpread(asset: string, price: number, shock: number): SpreadSnapshot {
+  const session = getSessionProfile();
+  const basePct = (ASSET_CATALOG[asset]?.spreadPct ?? CFD_BASE_SPREAD_PCT[asset] ?? 0.002);
+  const sessionMult = session.name === "Weekend" ? 2.5
+    : (session.name.includes("Post") || session.name.includes("Asia")) ? 1.6 : 1.0;
+  const shockMult = shock > 0.8 ? 1.8 : shock > 0.5 ? 1.35 : 1.0;
+  const spreadPct = basePct * sessionMult * shockMult;
+  const spread = spreadPct * price;
+  return {
+    spread, spreadPct: spreadPct * 100,
+    bid: price - spread / 2, ask: price + spread / 2,
+    component: { base: basePct, volume: shockMult - 1, session: sessionMult - 1 },
+    sessionLabel: session.name, isHighVolume: spreadPct > 0.0005,
+  };
+}
+
+// ── computeIndicators: calcula todos los indicadores técnicos desde velas ─────
+function computeIndicators(candles: Candle[]): Indicators {
+  const closes = candles.map(c => c.c);
+  const highs  = candles.map(c => c.h);
+  const lows   = candles.map(c => c.l);
+  const vols   = candles.map(c => c.v);
+  const n = closes.length;
+
+  // RSI(14)
+  function calcRsi(arr: number[], p = 14): number {
+    if (arr.length < p + 1) return 50;
+    let gains = 0, losses = 0;
+    for (let i = arr.length - p; i < arr.length; i++) {
+      const d = arr[i] - arr[i - 1];
+      if (d > 0) gains += d; else losses -= d;
+    }
+    const rs = losses === 0 ? 100 : gains / losses;
+    return 100 - 100 / (1 + rs);
+  }
+
+  // Stochastic(14,3)
+  function calcStoch(cls: number[], hi: number[], lo: number[], p = 14): [number, number] {
+    if (cls.length < p) return [50, 50];
+    const slice = cls.slice(-p);
+    const hiS = Math.max(...hi.slice(-p));
+    const loS = Math.min(...lo.slice(-p));
+    const k = loS === hiS ? 50 : ((cls[cls.length - 1] - loS) / (hiS - loS)) * 100;
+    const kPrev = loS === hiS ? 50 : ((cls[cls.length - 2] - loS) / (hiS - loS)) * 100;
+    return [k, (k + kPrev) / 2];
+  }
+
+  // EMA wrapper
+  const maFor = (p: number) => ema(closes, p);
+
+  // VWAP
+  const totalVolume = vols.reduce((a, b) => a + b, 0) || 1;
+  const vwap = candles.reduce((s, c) => s + ((c.h + c.l + c.c) / 3) * c.v, 0) / totalVolume;
+
+  // Bollinger Bands (20, 2)
+  const ma20 = maFor(20);
+  const slice20 = closes.slice(-20);
+  const bbStd = std(slice20);
+  const bbUpper = ma20 + 2 * bbStd;
+  const bbLower = ma20 - 2 * bbStd;
+  const bbMiddle = ma20;
+
+  // Keltner (20, 1.5*ATR)
+  const atr = calcAtr(candles, 14);
+  const keltnerUpper = ma20 + 1.5 * atr;
+  const keltnerLower = ma20 - 1.5 * atr;
+  const bbSqueeze = bbUpper < keltnerUpper && bbLower > keltnerLower;
+
+  // VWAP bands (1σ, 2σ)
+  const vwapStd = std(closes.slice(-20));
+  const vwapUpperBand1 = vwap + vwapStd;
+  const vwapLowerBand1 = vwap - vwapStd;
+  const vwapUpperBand2 = vwap + 2 * vwapStd;
+  const vwapLowerBand2 = vwap - 2 * vwapStd;
+
+  // Volume delta (aprox: verde=compra, rojo=venta)
+  const buyVol  = candles.slice(-20).filter(c => c.c >= c.o).reduce((s, c) => s + c.v, 0);
+  const sellVol = candles.slice(-20).filter(c => c.c < c.o).reduce((s, c) => s + c.v, 0);
+  const totalVol = buyVol + sellVol || 1;
+  const volumeDelta = buyVol - sellVol;
+  const volumeDeltaPct = (volumeDelta / totalVol) * 100;
+
+  // RSI divergence (simple)
+  const rsi = calcRsi(closes);
+  const rsiPrev = n > 20 ? calcRsi(closes.slice(0, -5)) : rsi;
+  const priceTrend = closes[n - 1] > closes[Math.max(0, n - 6)];
+  const rsiTrend = rsi > rsiPrev;
+  const rsiDivergence: "bullish" | "bearish" | "none" =
+    priceTrend && !rsiTrend ? "bearish" :
+    !priceTrend && rsiTrend ? "bullish" : "none";
+
+  // Imbalances (zonas donde bid/ask se cruzaron bruscamente)
+  const imbalances: Array<{ idx: number; type: "bullish" | "bearish"; price: number }> = [];
+  for (let i = 2; i < Math.min(n, 20); i++) {
+    const c = candles[n - i];
+    const pct = Math.abs(c.c - c.o) / Math.max(c.o, 0.0001);
+    if (pct > 0.003) {
+      imbalances.push({ idx: n - i, type: c.c > c.o ? "bullish" : "bearish", price: (c.h + c.l) / 2 });
+    }
+  }
+
+  const [stochK, stochD] = calcStoch(closes, highs, lows);
+
+  return {
+    rsi, rsiDivergence, stochK, stochD,
+    ma5: maFor(5), ma10: maFor(10), ma20, ma50: maFor(50),
+    vwap, vwapUpperBand1, vwapLowerBand1, vwapUpperBand2, vwapLowerBand2,
+    bbUpper, bbMiddle, bbLower, bbSqueeze,
+    volumeDelta, volumeDeltaPct,
+    imbalances,
+    atr, keltnerUpper, keltnerLower,
+  };
+}
+
+// ── analyzeOrderFlow: genera OrderFlowScore desde velas y datos de mercado ────
+function analyzeOrderFlow(
+  candles: Candle[], price: number, vwap: number, atr: number
+): OrderFlowScore {
+  const n = candles.length;
+  if (n < 5) return { control: "contested", controlScore: 0, cvdScore: 0, footprintScore: 0 };
+
+  // CVD acumulado últimas 20 velas
+  const recent = candles.slice(-20);
+  let cvd = 0;
+  for (const c of recent) {
+    const delta = c.c >= c.o ? c.v : -c.v;
+    cvd += delta;
+  }
+  const maxVol = recent.reduce((s, c) => s + c.v, 0) || 1;
+  const cvdScore = clamp((cvd / maxVol) * 100, -100, 100);
+
+  // Footprint: ratio candles alcistas vs bajistas por volumen
+  const bullVol = recent.filter(c => c.c >= c.o).reduce((s, c) => s + c.v, 0);
+  const bearVol = recent.filter(c => c.c < c.o).reduce((s, c) => s + c.v, 0);
+  const footprintScore = clamp(((bullVol - bearVol) / maxVol) * 100, -100, 100);
+
+  // Control neto
+  const controlScore = (cvdScore * 0.6 + footprintScore * 0.4);
+  const control: "bulls" | "bears" | "contested" =
+    controlScore > 20 ? "bulls" : controlScore < -20 ? "bears" : "contested";
+
+  return { control, controlScore, cvdScore, footprintScore };
+}
+
+// ── analyzeMarketControl: mapa de control por activo ─────────────────────────
+function analyzeMarketControl(
+  candles: Candle[], ind: Indicators, atr: number
+): { bull: boolean; score: number; reason: string } {
+  const price = candles[candles.length - 1]?.c ?? 0;
+  let score = 0;
+  const reasons: string[] = [];
+
+  if (ind.ma5 > ind.ma20) { score += 20; reasons.push("MA5>MA20"); }
+  if (price > ind.vwap)   { score += 15; reasons.push("precio>VWAP"); }
+  if (ind.rsi > 55)       { score += 10; reasons.push(`RSI${(ind.rsi ?? 0).toFixed(0)}`); }
+  if (ind.volumeDeltaPct > 10) { score += 15; reasons.push("CVD+"); }
+  if (ind.bbSqueeze)      { score += 5;  reasons.push("squeeze"); }
+
+  return { bull: score >= 35, score, reason: reasons.join(", ") || "neutral" };
+}
+
+// ── analyzeWyckoff: análisis de fases Wyckoff desde velas 4H + 1D ────────────
+function analyzeWyckoff(candles4h: Candle[], candles1d: Candle[]): WyckoffAnalysis {
+  const neutral: WyckoffAnalysis = {
+    phase: "unknown", bias: "neutral",
+    events: [], supportZone: null, resistanceZone: null,
+  };
+  const c = candles4h.length > 0 ? candles4h : candles1d;
+  if (c.length < 10) return neutral;
+
+  const closes = c.map(x => x.c);
+  const highs  = c.map(x => x.h);
+  const lows   = c.map(x => x.l);
+  const n = c.length;
+
+  const hiAll = Math.max(...highs);
+  const loAll = Math.min(...lows);
+  const range = hiAll - loAll || 1;
+
+  // Tendencia macro: últimos 20 vs primeros 20
+  const early = avg(closes.slice(0, Math.min(20, Math.floor(n / 2))));
+  const late  = avg(closes.slice(-Math.min(20, Math.floor(n / 2))));
+  const trend = late > early * 1.02 ? "up" : late < early * 0.98 ? "down" : "flat";
+
+  // Fase simplificada
+  const lastClose = closes[n - 1];
+  const midRange = loAll + range * 0.5;
+  const lowerThird = loAll + range * 0.33;
+  const upperThird = loAll + range * 0.66;
+
+  let phase: WyckoffPhase = "unknown";
+  let bias: WyckoffBias = "neutral";
+
+  if (trend === "down" && lastClose < midRange) {
+    phase = "A"; bias = "accumulation";
+  } else if (trend === "flat" && lastClose < midRange) {
+    phase = "B"; bias = "accumulation";
+  } else if (lastClose < lowerThird && trend !== "up") {
+    phase = "C"; bias = "accumulation";
+  } else if (trend === "up" && lastClose > midRange) {
+    phase = "D"; bias = "accumulation";
+  } else if (lastClose > upperThird) {
+    phase = "E"; bias = lastClose > hiAll * 0.95 ? "distribution" : "accumulation";
+  }
+
+  // Zonas soporte / resistencia
+  const supportZone: [number, number] = [loAll, loAll + range * 0.15];
+  const resistanceZone: [number, number] = [hiAll - range * 0.15, hiAll];
+
+  // Eventos básicos
+  const events: WyckoffEvent[] = [];
+  // Spring: mínimo reciente cerca del soporte
+  const recentLow = Math.min(...lows.slice(-5));
+  if (recentLow <= supportZone[1]) {
+    events.push({ label: "Spring", candleIndex: n - lows.slice(-5).indexOf(recentLow) - 1, price: recentLow, color: "#10b981" });
+  }
+
+  return { phase, bias, events, supportZone, resistanceZone };
+}
+
+// ── calcRiskMetrics: métricas de riesgo y Kelly ───────────────────────────────
+function calcRiskMetrics(
+  trades: ClosedTrade[], balance: number, maxDailyLossPct: number
+): { kellyFraction: number; kellyWR: number; kellyRR: number; ruinProb: number; dailyLossPct: number } {
+  if (trades.length < 5) {
+    return { kellyFraction: 0, kellyWR: 0, kellyRR: 0, ruinProb: 0, dailyLossPct: 0 };
+  }
+  const wins   = trades.filter(t => t.pnl > 0);
+  const losses = trades.filter(t => t.pnl <= 0);
+  const wr     = wins.length / trades.length;
+  const avgW   = wins.length  ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length   : 0;
+  const avgL   = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 1;
+  const rr     = avgL > 0 ? avgW / avgL : 0;
+  const kelly  = wr - (1 - wr) / Math.max(rr, 0.01);
+  const kellyFraction = Math.max(0, Math.min(kelly * 0.5, 0.25)); // half-Kelly, capped 25%
+
+  // Ruin probability (simple Monte Carlo aprox)
+  const ruinProb = Math.max(0, (1 - wr) ** 5 * 100); // prob de 5 losses seguidos
+
+  // Daily loss hoy
+  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+  const todayTrades = trades.filter(t => new Date(t.closedAt) >= todayStart);
+  const dailyPnl = todayTrades.reduce((s, t) => s + t.pnl, 0);
+  const dailyLossPct = dailyPnl < 0 ? Math.abs(dailyPnl) / balance * 100 : 0;
+
+  return { kellyFraction, kellyWR: wr, kellyRR: rr, ruinProb, dailyLossPct };
+}
+
+// ── calcScalpingRisk: racha de pérdidas y métricas de riesgo scalping ─────────
+function calcScalpingRisk(
+  trades: ClosedTrade[], balance: number, maxDailyLoss: number, maxDailyGain: number
+): { streak: number; consecLoss: number; dailyPnl: number; circuitBreaker: boolean } {
+  let streak = 0, maxStreak = 0, cur = 0;
+  for (const t of [...trades].reverse().slice(0, 20)) {
+    if (t.pnl < 0) { cur++; maxStreak = Math.max(maxStreak, cur); }
+    else cur = 0;
+  }
+  streak = maxStreak;
+
+  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+  const todayTrades = trades.filter(t => new Date(t.closedAt) >= todayStart);
+  const dailyPnl = todayTrades.reduce((s, t) => s + t.pnl, 0);
+  const circuitBreaker = dailyPnl < -Math.abs(maxDailyLoss);
+
+  return { streak, consecLoss: streak, dailyPnl, circuitBreaker };
+}
+
+
+  function getMtfScore(a: Asset, mode: Mode = "intradia") {
+    // Usar refs para evitar stale closure (datos del render anterior)
+    const vals  = seriesRef.current[a]    ?? [];
+    const c5m   = candles5mRef.current[a] ?? [];
+    const c15m  = candles15mRef.current[a]?? [];
+    const px    = pricesRef.current[a]    ?? prices[a] ?? 0;
+
+    const minLen = mode === "scalping" ? 13 : 20;
+    if (!vals || vals.length < minLen) {
+      const atrFallback = Math.max(getAssetMinAtr(a) ?? px * 0.001, px * 0.001);
+      return { htf: 0, ltf: 0, exec: 0, atr: atrFallback, hasRealTF: false };
+    }
+    const atr = Math.max(calcAtrFromSeries(vals, 20), getAssetMinAtr(a) ?? px * 0.001);
+
+    if (mode === "scalping") {
+      // ── MTF REAL: usa velas 5m y 15m si vienen del bridge ──────────────────
+      // Con bridge: HTF = EMA8/21 sobre velas 15m reales, LTF = EMA5/13 sobre 5m reales
+      // Sin bridge: sintético (velas 1m agrupadas) — menos preciso
+      const real15m = c15m;
+      const real5m  = c5m;
+      const hasReal = real15m?.length >= 21 && real5m?.length >= 13;
+
+      let htf: number, ltf: number;
+
+      if (hasReal) {
+        // HTF 15m REAL — EMA8/21 sobre closes de velas 15m
+        const closes15 = real15m.map(c => c.c);
+        const atr15    = Math.max(calcAtr(real15m, 14), atr);
+        const e8_15    = ema(closes15, 8);
+        const e21_15   = ema(closes15, 21);
+        htf = (e8_15 - e21_15) / atr15;
+        // LTF 5m REAL — EMA5/13 sobre closes de velas 5m
+        const closes5 = real5m.map(c => c.c);
+        const atr5    = Math.max(calcAtr(real5m, 14), atr);
+        const e5_5    = ema(closes5, 5);
+        const e13_5   = ema(closes5, 13);
+        ltf = (e5_5 - e13_5) / atr5;
+      } else {
+        // Sintético desde velas 1m (fallback sin bridge)
+        const n = vals.length;
+        const slice45 = vals.slice(-Math.min(45, n));
+        htf = (ema(slice45, Math.min(8, slice45.length)) - ema(slice45, Math.min(21, slice45.length))) / atr;
+        const slice20 = vals.slice(-Math.min(20, n));
+        ltf = (ema(slice20, Math.min(5, slice20.length)) - ema(slice20, Math.min(13, slice20.length))) / atr;
+      }
+
+      // Exec 1m: últimas 3 velas (igual en ambos casos — siempre 1m)
+      const n    = vals.length;
+      const exec = n >= 3 ? (vals[n-1] - vals[n-3]) / atr : 0;
+      return { htf, ltf, exec, atr, hasRealTF: hasReal };
+    }
+
+    // Intradía: usar candles4h/1d reales si existen, sino fallback 1m
+    const c4h = candles4hRef.current[a] ?? [];
+    const c1d = candles1dRef.current[a] ?? [];
+
+    if (c4h.length >= 8) {
+      // HTF real: EMA8/21 sobre velas 4H
+      const closes4h = c4h.map((c: Candle) => c.c);
+      const atr4h    = Math.max(calcAtr(c4h, 14), atr);
+      const e8_4h    = ema(closes4h, 8);
+      const e21_4h   = ema(closes4h, 21);
+      const htf      = (e8_4h - e21_4h) / atr4h;
+
+      // LTF: últimas 20 velas 1m (momentum reciente) o 1D si hay
+      const c1dArr = c1d.length >= 5 ? c1d.map((c: Candle) => c.c) : [];
+      const ltfRaw = c1dArr.length >= 5
+        ? (ema(c1dArr, 3) - ema(c1dArr, 8)) / atr
+        : (avg(vals.slice(-8)) - avg(vals.slice(-20))) / atr;
+
+      // Exec: momentum 1m reciente (últimas 5 velas)
+      const n    = vals.length;
+      const exec = n >= 5 ? (vals[n-1] - vals[n-5]) / atr : 0;
+      return { htf, ltf: ltfRaw, exec, atr, hasRealTF: true };
+    }
+
+    // Fallback: 1m solamente
+    const ma10 = avg(vals.slice(-10));
+    const ma20 = avg(vals.slice(-20));
+    const ma50 = vals.length >= 50 ? avg(vals.slice(-50)) : avg(vals);
+    const execSlice = vals.slice(-8);
+    return {
+      htf:  (ma20 - ma50) / atr,
+      ltf:  (ma10 - ma20) / atr,
+      exec: ((execSlice[execSlice.length - 1] ?? 0) - (execSlice[0] ?? 0)) / atr,
+      atr,
+      hasRealTF: false,
+    };
+  }
+
+
+
+  // ─── Perfil de sesión: detecta horario y ajusta parámetros automáticamente ───
+  // NY semana  → todos los activos, parámetros normales
+  // Fuera NY   → solo crypto, SL/TP más conservadores
+  // Finde      → solo crypto, parámetros especiales anti-pump
+  function getSessionProfile() {
+    const now       = new Date();
+    const hour      = now.getUTCHours();
+    const dow       = now.getUTCDay(); // 0=dom, 6=sab
+    const isWeekend = dow === 0 || dow === 6;
+    const isNY      = !isWeekend && hour >= 13 && hour < 22;  // NY extendido 13-22 UTC
+    const isLondon  = !isWeekend && hour >= 7  && hour < 13;
+    const isAsia    = hour >= 0  && hour < 7;
+
+    if (isWeekend) return {
+      name:         "Finde — Crypto",
+      emoji:        "🪙",
+      label:        `Finde semana ${now.toLocaleString("es", { weekday: "short" }).toUpperCase()} ${hour.toString().padStart(2,"0")}:${now.getUTCMinutes().toString().padStart(2,"0")} UTC`,
+      isCryptoOnly: true,
+      slMult:       1.0,   // SL más ajustado — crypto finde impulsos rápidos
+      tp1Mult:      1.0,   // TP1 rápido para asegurar
+      tp2Mult:      2.2,   // TP2 moderado (finde = reversiones repentinas)
+      confAdjust:   -2,    // piso levemente más permisivo
+      spreadTol:    1.25,  // tolerar 25% más spread (liquidez menor)
+      maxPositions: 2,     // máximo 2 posiciones crypto simultáneas
+      description:  "Mercados cerrados salvo crypto. Bot especializado BTC/ETH.",
+    };
+
+    if (isNY) return {
+      name:         "NY",
+      emoji:        "🗽",
+      label:        `NY ${hour.toString().padStart(2,"0")}:${now.getUTCMinutes().toString().padStart(2,"0")} UTC`,
+      isCryptoOnly: false,
+      slMult:       1.2,
+      tp1Mult:      1.2,
+      tp2Mult:      2.4,
+      confAdjust:   0,
+      spreadTol:    1.0,
+      maxPositions: 3,
+      description:  "Sesión principal. Todos los activos activos.",
+    };
+
+    if (isLondon) return {
+      name:         "London",
+      emoji:        "🏦",
+      label:        `London ${hour.toString().padStart(2,"0")}:${now.getUTCMinutes().toString().padStart(2,"0")} UTC`,
+      isCryptoOnly: false,
+      slMult:       1.1,
+      tp1Mult:      1.1,
+      tp2Mult:      2.2,
+      confAdjust:   0,
+      spreadTol:    1.1,
+      maxPositions: 3,
+      description:  "Sesión London. Oro y crypto activos.",
+    };
+
+    if (isAsia) return {
+      name:         "Asia — Crypto",
+      emoji:        "🌏",
+      label:        `Asia ${hour.toString().padStart(2,"0")}:${now.getUTCMinutes().toString().padStart(2,"0")} UTC`,
+      isCryptoOnly: true,
+      slMult:       0.9,   // Asia = rango lateral → SL ajustado
+      tp1Mult:      0.9,
+      tp2Mult:      1.8,
+      confAdjust:   -3,    // más permisivo, señales menos limpias
+      spreadTol:    1.3,
+      maxPositions: 2,
+      description:  "Sesión Asia. Solo crypto. Rangos laterales frecuentes.",
+    };
+
+    // Post-NY (21-00 UTC)
+    return {
+      name:         "Post-NY — Crypto",
+      emoji:        "🌙",
+      label:        `Post-NY ${hour.toString().padStart(2,"0")}:${now.getUTCMinutes().toString().padStart(2,"0")} UTC`,
+      isCryptoOnly: true,
+      slMult:       1.0,
+      tp1Mult:      1.0,
+      tp2Mult:      2.0,
+      confAdjust:   -2,
+      spreadTol:    1.2,
+      maxPositions: 2,
+      description:  "Post cierre NY. Crypto activo con impulsos. Metales cerrados.",
+    };
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DETECTOR DE GIRO ANTICIPADO — combina 3 señales de agotamiento
+  // Filosofía: el mercado avisa ANTES del giro con divergencias, climax y absorción
+  // Wyckoff en 4H/1D es contexto/amplificador, no filtro
+  // ═══════════════════════════════════════════════════════════════════════════
+  function detectReversalSetup(
+    candles: Candle[],
+    of: ReturnType<typeof analyzeOrderFlow> | null,
+    wyckoff: WyckoffAnalysis | null,
+    direction: Direction,  // dirección actual de la tendencia (la que estamos contra)
+    atr: number,
+  ): { score: number; reversalDir: Direction; components: Record<string, number> } {
+
+    const reversalDir: Direction = direction === "LONG" ? "SHORT" : "LONG";
+    // Giramos contra la tendencia actual — buscamos agotamiento del movimiento vigente
+    // reversalDir = dirección del giro que anticipamos
+
+    let scoreA = 0, scoreB = 0, scoreC = 0;
+    const components: Record<string, number> = {};
+
+    // ── A) CVD DIVERGENCIA con intensidad ─────────────────────────────────
+    if (of) {
+      const { cvd } = of;
+      const priceChange10 = candles.length >= 10
+        ? candles[candles.length-1].c - candles[candles.length-10].c : 0;
+
+      // Divergencia alcista (reversal a LONG): precio baja pero CVD sube
+      // Divergencia bajista (reversal a SHORT): precio sube pero CVD baja
+      const isBullishDiv = priceChange10 < -atr * 0.3 && cvd.slope10 > 0;
+      const isBearishDiv = priceChange10 >  atr * 0.3 && cvd.slope10 < 0;
+      const hasDivergence = reversalDir === "LONG" ? isBullishDiv : isBearishDiv;
+
+      if (hasDivergence) {
+        // Intensidad: ratio entre movimiento del precio y movimiento del CVD
+        const divIntensity = Math.abs(cvd.slope10) / Math.max(Math.abs(cvd.slope50) * 0.1, 1e-9);
+        scoreA = divIntensity > 2.0 ? 3 : divIntensity > 1.0 ? 2 : 1;
+      }
+      components.cvdDiv = scoreA;
+    }
+
+    // ── B) CLIMAX DE VOLUMEN ───────────────────────────────────────────────
+    if (candles.length >= 20) {
+      const recent   = candles.slice(-20);
+      const lastCandle = candles[candles.length - 1];
+      const avgVol   = recent.slice(0, -1).reduce((s, c) => s + c.v, 0) / 19;
+      const volRatio = lastCandle.v / Math.max(avgVol, 1e-9);
+
+      // Climax: volumen alto pero precio no avanza (vela con mucha mecha)
+      const body    = Math.abs(lastCandle.c - lastCandle.o);
+      const range   = Math.max(lastCandle.h - lastCandle.l, atr * 0.1);
+      const wickPct = 1 - (body / range);  // % del rango que son mechas
+
+      // Reversal LONG: climax de venta = vela bajista con vol alto + mecha inferior grande
+      // Reversal SHORT: climax de compra = vela alcista con vol alto + mecha superior grande
+      const isSellingClimax  = lastCandle.c < lastCandle.o && volRatio > 1.8 && wickPct > 0.35;
+      const isBuyingClimax   = lastCandle.c > lastCandle.o && volRatio > 1.8 && wickPct > 0.35;
+      const hasClimax = reversalDir === "LONG" ? isSellingClimax : isBuyingClimax;
+
+      if (hasClimax) {
+        scoreB = volRatio > 3.0 ? 3 : volRatio > 2.2 ? 2 : 1;
+      }
+      components.volClimax = scoreB;
+    }
+
+    // ── C) ABSORCIÓN EN ORDER BOOK (FP extremo sin movimiento) ────────────
+    if (of) {
+      const { absorptionScore, controlScore } = of;
+      // FP extremo en una dirección pero precio absorbe sin moverse = alguien grande compra/vende
+      // Absorción alcista: mucha presión vendedora (FP negativo) pero precio no cae
+      // Absorción bajista: mucha presión compradora (FP positivo) pero precio no sube
+      const priceChange5 = candles.length >= 5
+        ? candles[candles.length-1].c - candles[candles.length-5].c : 0;
+
+      const bullishAbsorption = controlScore < -15 && Math.abs(priceChange5) < atr * 0.15;
+      const bearishAbsorption = controlScore >  15 && Math.abs(priceChange5) < atr * 0.15;
+      const hasAbsorption = reversalDir === "LONG" ? bullishAbsorption : bearishAbsorption;
+
+      if (hasAbsorption) {
+        scoreC = absorptionScore > 60 ? 3 : absorptionScore > 35 ? 2 : 1;
+      }
+      components.absorption = scoreC;
+    }
+
+    // ── Multiplicador Wyckoff ──────────────────────────────────────────────
+    // Wyckoff alineado con el giro = amplifica. Opuesto = reduce.
+    // NO bloquea nada. Solo contexto macro.
+    let wyckoffBonus = 0;
+    if (wyckoff) {
+      const phase = wyckoff.phase;
+      const bias  = wyckoff.bias;
+      const aligned = (reversalDir === "LONG" && (bias === "bullish" || phase === "C" || phase === "D"))
+                   || (reversalDir === "SHORT" && (bias === "bearish" || phase === "C" || phase === "D"));
+      const opposed = (reversalDir === "LONG"  && bias === "bearish")
+                   || (reversalDir === "SHORT" && bias === "bullish");
+      wyckoffBonus = aligned ? 1 : (opposed ? -1 : 0);
+    }
+    components.wyckoffBonus = wyckoffBonus;
+
+    const rawScore = scoreA + scoreB + scoreC;
+    const score    = clamp(rawScore + wyckoffBonus, 0, 9);
+
+    return { score, reversalDir, components };
+  }
+
+  // ── Calcular wyckoffSizeMult para scalping y intradía ────────────────────
+  function getWyckoffSizeMult(wyckoff: WyckoffAnalysis | null, direction: Direction): number {
+    if (!wyckoff) return 1.0;
+    const { phase, bias, events } = wyckoff;
+
+    // Spring (fase C acumulación) o Upthrust (fase C distribución) = máxima convicción de giro
+    const hasSpring    = events?.some(e => e.type === "spring")   ?? false;
+    const hasUpthrust  = events?.some(e => e.type === "upthrust") ?? false;
+    const hasSOS       = events?.some(e => e.type === "SOS")      ?? false;
+    const hasSOW       = events?.some(e => e.type === "SOW")      ?? false;
+
+    // Fase C con evento confirmado: tamaño máximo (1.5×)
+    if (phase === "C") {
+      if (direction === "LONG"  && (hasSpring   || bias === "bullish")) return 1.5;
+      if (direction === "SHORT" && (hasUpthrust || bias === "bearish")) return 1.5;
+    }
+    // Fase D/E en tendencia: tamaño ampliado (1.3×) — tendencia confirmada con SOS/SOW
+    if (phase === "D" || phase === "E") {
+      if (direction === "LONG"  && (bias === "bullish" || hasSOS)) return 1.3;
+      if (direction === "SHORT" && (bias === "bearish" || hasSOW)) return 1.3;
+    }
+    // Fase A/B: mercado en rango, estructura no definida → tamaño reducido
+    if (phase === "A" || phase === "B") return 0.8;
+
+    // Wyckoff contradictorio (tendencia opuesta a dirección) → reducir
+    const opposed = (direction === "LONG"  && bias === "bearish")
+                 || (direction === "SHORT" && bias === "bullish");
+    if (opposed) return 0.6;
+
+    // Alineado pero sin evento confirmado
+    const aligned = (direction === "LONG"  && bias === "bullish")
+                 || (direction === "SHORT" && bias === "bearish");
+    if (aligned) return 1.15;
+
+    return 1.0;
+  }
+
+
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MOTOR DE CORRELACIÓN DE TRADES
+  // Analiza P&L, timing y descorrelación entre activos
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── calcTradeCorrelations: analiza trades históricos par a par ──────────────
+  function calcTradeCorrelations(trades: ClosedTrade[]): Record<string, TradeCorrelation> {
+    if (trades.length < 4) return tradeCorrelationsRef.current;
+
+    const result: Record<string, TradeCorrelation> = { ...tradeCorrelationsRef.current };
+    const assetList = [...new Set(trades.map(t => t.asset))];
+
+    for (let i = 0; i < assetList.length; i++) {
+      for (let j = i + 1; j < assetList.length; j++) {
+        const a = assetList[i];
+        const b = assetList[j];
+        const key = `${a}_${b}`;
+
+        const tradesA = trades.filter(t => t.asset === a);
+        const tradesB = trades.filter(t => t.asset === b);
+        if (tradesA.length < 2 || tradesB.length < 2) continue;
+
+        // Encontrar trades simultáneos (overlapping por openedAt/closedAt)
+        const simultaneous: Array<{ pnlA: number; pnlB: number }> = [];
+        for (const ta of tradesA) {
+          for (const tb of tradesB) {
+            const openA  = new Date(ta.openedAt).getTime();
+            const closeA = new Date(ta.closedAt).getTime();
+            const openB  = new Date(tb.openedAt).getTime();
+            const closeB = new Date(tb.closedAt).getTime();
+            // Overlap: uno empieza antes de que el otro termine
+            const overlaps = openA < closeB && openB < closeA;
+            if (overlaps) simultaneous.push({ pnlA: ta.pnl, pnlB: tb.pnl });
+          }
+        }
+
+        // P&L Pearson sobre todos los trades (alinear por fecha de cierre)
+        const pnlA = tradesA.map(t => t.pnl);
+        const pnlB = tradesB.map(t => t.pnl);
+        const pnlPearson = calcPearsonCorrelation(
+          pnlA.map((v, i) => v + i * 0),  // usar como series
+          pnlB.map((v, i) => v + i * 0)
+        );
+
+        // Precio Pearson (ya calculado en correlationRef)
+        const pricePearson = correlationRef.current[a]?.[b] ?? 0;
+
+        // Estadísticas de simultaneidad
+        const n = simultaneous.length;
+        const bothWin  = n > 0 ? simultaneous.filter(s => s.pnlA > 0 && s.pnlB > 0).length / n : 0;
+        const bothLose = n > 0 ? simultaneous.filter(s => s.pnlA < 0 && s.pnlB < 0).length / n : 0;
+        const diverge  = n > 0 ? simultaneous.filter(s => (s.pnlA > 0) !== (s.pnlB > 0)).length / n : 0;
+
+        // Risk score: alto si ambos pierden juntos frecuentemente
+        // Risk = 0 (perfecto) si divergen siempre, 1 (malo) si siempre pierden juntos
+        const riskScore = Math.max(0, Math.min(1,
+          bothLose * 0.7 +           // pesa más las pérdidas conjuntas
+          Math.abs(pricePearson) * 0.2 +  // correlación de precio suma algo de riesgo
+          (1 - diverge) * 0.1        // menos divergencia = más riesgo
+        ));
+
+        result[key] = {
+          pairKey: key,
+          pricePearson,
+          pnlPearson,
+          avgSimultaneous: n,
+          bothWin,  bothLose,  diverge,
+          riskScore,
+          lastUpdated: Date.now(),
+        };
+      }
+    }
+    tradeCorrelationsRef.current = result;
+    return result;
+  }
+
+  // ── calcPortfolioRisk: estado de riesgo total del portfolio ──────────────────
+  function calcPortfolioRisk(
+    corrs: Record<string, TradeCorrelation>,
+    openPos: Position[]
+  ): PortfolioRiskState {
+    const prev = portfolioRisk;
+    if (Object.keys(corrs).length === 0) {
+      return prev ?? {
+        maxDrawdownSimul: 0, bestCombo: [], worstCombo: [],
+        currentRiskScore: 0, groqInsights: "", lastAnalysis: 0
+      };
+    }
+
+    // Riesgo actual: pares de posiciones abiertas
+    let currentRisk = 0;
+    if (openPos.length >= 2) {
+      for (let i = 0; i < openPos.length; i++) {
+        for (let j = i + 1; j < openPos.length; j++) {
+          const a = openPos[i].signal.asset;
+          const b = openPos[j].signal.asset;
+          const key = `${a}_${b}`;
+          const keyRev = `${b}_${a}`;
+          const corr = corrs[key] ?? corrs[keyRev];
+          if (corr) currentRisk = Math.max(currentRisk, corr.riskScore);
+        }
+      }
+    }
+
+    const sorted = Object.values(corrs).sort((a, b) => a.riskScore - b.riskScore);
+    const best   = sorted[0];
+    const worst  = sorted[sorted.length - 1];
+
+    return {
+      maxDrawdownSimul: prev?.maxDrawdownSimul ?? 0,
+      bestCombo:  best  ? best.pairKey.split("_")  : [],
+      worstCombo: worst ? worst.pairKey.split("_") : [],
+      currentRiskScore: currentRisk,
+      groqInsights: prev?.groqInsights ?? "",
+      lastAnalysis: prev?.lastAnalysis ?? 0,
+    };
+  }
+
+  // ── corrSizeMultiplier: reduce size si hay concentración de riesgo ───────────
+  // Retorna 0.5-1.0: cuánto reducir el tamaño de una nueva posición
+  function getCorrSizeMultiplier(asset: string, openPos: Position[]): number {
+    if (openPos.length === 0) return 1.0;
+
+    // Groq override si existe y es reciente
+    const groqAdj = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)
+      ? (groqCalib.corrSizeAdj?.[asset] ?? null) : null;
+    if (groqAdj !== null) return Math.max(0.3, Math.min(1.0, groqAdj));
+
+    let maxRisk = 0;
+    for (const pos of openPos) {
+      if (pos.signal.asset === asset) continue;
+      const key    = `${asset}_${pos.signal.asset}`;
+      const keyRev = `${pos.signal.asset}_${asset}`;
+      const corr   = tradeCorrelationsRef.current[key] ?? tradeCorrelationsRef.current[keyRev];
+      if (corr) maxRisk = Math.max(maxRisk, corr.riskScore);
+
+      // También usar correlación de precio en tiempo real
+      const pxCorr = Math.abs(correlationRef.current[asset]?.[pos.signal.asset] ?? 0);
+      // Misma dirección + alta correlación precio = riesgo concentración
+      if (pos.signal.direction === "LONG" && pxCorr > 0.80) maxRisk = Math.max(maxRisk, 0.75);
+      if (pos.signal.direction === "SHORT" && pxCorr > 0.80) maxRisk = Math.max(maxRisk, 0.75);
+    }
+
+    // Mapear riskScore → size multiplier
+    if (maxRisk > 0.75) return 0.40;   // alto riesgo sistémico → 40% del size
+    if (maxRisk > 0.50) return 0.60;   // riesgo moderado → 60%
+    if (maxRisk > 0.30) return 0.80;   // riesgo bajo → 80%
+    return 1.0;                         // sin correlación → size completo
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MOTOR CUANTITATIVO — funciones core
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── 1. Regime Filter: detecta régimen de mercado por activo ─────────────────
+  function calcRegime(asset: string): RegimeAnalysis {
+    const candles = candlesRef.current[asset] ?? [];
+    const series  = seriesRef.current[asset]  ?? [];
+    if (candles.length < 21 || series.length < 21) {
+      return { regime: "unknown", atrRatio: 1, adxProxy: 0.5,
+               strategy: "both", confAdjust: 0, sizeAdjust: 0.8, note: "Sin datos suficientes" };
+    }
+
+    // ATR ratio: ATR actual vs ATR 20 períodos
+    const atr1  = calcAtr(candles.slice(-14), 14);
+    const atr20 = calcAtr(candles.slice(-34, -14), 14);
+    const atrRatio = atr20 > 0 ? atr1 / atr20 : 1;
+
+    // ADX proxy: usando varianza normalizada de los closes
+    const closes   = candles.map(c => c.c);
+    const closes20 = closes.slice(-20);
+    const mean20   = closes20.reduce((a,b) => a+b, 0) / 20;
+    const std20    = Math.sqrt(closes20.reduce((s,v) => s + (v-mean20)**2, 0) / 20);
+    const cv       = std20 / (mean20 || 1);   // coeficiente de variación
+
+    // Dirección del trend: EMA8 vs EMA21
+    const e8  = ema(closes.slice(-30), 8);
+    const e21 = ema(closes.slice(-30), 21);
+    const trendDir = e8 > e21 ? 1 : -1;
+
+    // Slope de EMA21 normalizado
+    const e21prev = ema(closes.slice(-31, -1), 21);
+    const slope   = (e21 - e21prev) / (atr1 || 1);
+    const adxProxy = Math.min(Math.abs(slope) * 3 + cv * 20, 1);
+
+    let regime: MarketRegime;
+    let strategy: RegimeAnalysis["strategy"];
+    let confAdjust: number;
+    let sizeAdjust: number;
+    let note: string;
+
+    if (atrRatio > 1.4 && adxProxy > 0.55) {
+      regime     = trendDir > 0 ? "trending_up" : "trending_down";
+      strategy   = "momentum";
+      confAdjust = -4;   // más permisivo en tendencia clara
+      sizeAdjust = 1.2;  // más size en tendencia
+      note = `Tendencia ${trendDir > 0 ? "alcista" : "bajista"} confirmada (ATR×${atrRatio.toFixed(2)})`;
+    } else if (atrRatio > 1.6) {
+      regime     = "expanding";
+      strategy   = "momentum";
+      confAdjust = -2;
+      sizeAdjust = 0.9;  // reducir size en expansión extrema
+      note = `Expansión de volatilidad (ATR×${atrRatio.toFixed(2)}) — momentum`;
+    } else if (atrRatio < 0.7 || adxProxy < 0.3) {
+      regime     = "ranging";
+      strategy   = "mean_reversion";
+      confAdjust = +3;   // más estricto en rango
+      sizeAdjust = 0.7;
+      note = `Mercado lateral (ATR×${atrRatio.toFixed(2)}) — mean reversion`;
+    } else {
+      regime     = "unknown";
+      strategy   = "both";
+      confAdjust = 0;
+      sizeAdjust = 1.0;
+      note = `Régimen mixto — estrategia normal`;
+    }
+
+    return { regime, atrRatio, adxProxy, strategy, confAdjust, sizeAdjust, note };
+  }
+
+  // ── 2. Multi-factor vote: 4 factores ortogonales ─────────────────────────────
+  // Retorna { votes: 0-4, direction, passed }
+  function multifactorVote(asset: string, mode: Mode): {
+    votes: number; direction: "LONG" | "SHORT"; passed: boolean; detail: string
+  } {
+    const candles = candlesRef.current[asset] ?? [];
+    const ind     = indicatorsMap[asset];
+    const mtf     = getMtfScore(asset, mode);
+
+    if (candles.length < 14) return { votes: 0, direction: "LONG", passed: false, detail: "Sin datos (<14 velas)" };
+
+    const closes = candles.map(c => c.c);
+    const vols   = candles.map(c => c.v);
+    const n      = closes.length;
+    const price  = closes[n - 1];
+    const atr    = mtf.atr || price * 0.001;
+
+    // ── F1: Dirección MTF (EMA crossover) — umbral reducido a 0.05 ────────────
+    // mtfSum puede ser pequeño pero consistente; 0.15 era demasiado estricto
+    const mtfSum   = mtf.htf + mtf.ltf + mtf.exec;
+    const f1_long  = mtfSum > 0.05;
+    const f1_short = mtfSum < -0.05;
+
+    // ── F2: OBV delta — solo últimas 20 velas (más reactivo) ─────────────────
+    let obv = 0;
+    const recent = Math.min(n, 20);
+    for (let i = n - recent + 1; i < n; i++) {
+      obv += candles[i].c > candles[i-1].c ? candles[i].v
+           : candles[i].c < candles[i-1].c ? -candles[i].v : 0;
+    }
+    const f2_long  = obv > 0;
+    const f2_short = obv < 0;
+
+    // ── F3: Volatilidad relativa — robusto con datos escasos ─────────────────
+    // Si hay >= 30 velas: ATR ratio. Si no: spread de BB como proxy.
+    let f3_ok = true;
+    if (n >= 30) {
+      const atrNow  = calcAtr(candles.slice(-15), 14);
+      const atrPrev = calcAtr(candles.slice(-30, -15), 14);
+      f3_ok = atrPrev > 0 ? (atrNow / atrPrev) > 0.60 : true;  // umbral 0.60 (antes 0.75)
+    } else if (ind) {
+      // Proxy: BB width > 0.3% del precio = mercado con movimiento
+      const bbWidth = ind.bbUpper - ind.bbLower;
+      f3_ok = bbWidth > price * 0.003;
+    }
+
+    // ── F4: ROC momentum — solo 2 períodos alineados (antes requería 3) ───────
+    const roc3  = n > 4  ? (closes[n-1] - closes[n-4])  / closes[n-4]  : 0;
+    const roc8  = n > 9  ? (closes[n-1] - closes[n-9])  / closes[n-9]  : 0;
+    const roc14 = n > 15 ? (closes[n-1] - closes[n-15]) / closes[n-15] : 0;
+    const rocScore = Math.sign(roc3) + Math.sign(roc8) + Math.sign(roc14);
+    const f4_long  = rocScore >= 2;   // 2/3 períodos alcistas (antes 2/3 con roc21)
+    const f4_short = rocScore <= -2;
+
+    // ── F5: RSI / Stoch extremo — bonus 0.5 ──────────────────────────────────
+    const rsiLong  = ind ? ind.rsi < 42 : false;  // ampliado de 38 → 42
+    const rsiShort = ind ? ind.rsi > 58 : false;  // ampliado de 62 → 58
+    const stochLong  = ind ? ind.stochK < 35 : false;
+    const stochShort = ind ? ind.stochK > 65 : false;
+    const f5_long  = rsiLong  || stochLong;
+    const f5_short = rsiShort || stochShort;
+
+    const longVotes  = [f1_long,  f2_long,  f3_ok, f4_long ].filter(Boolean).length + (f5_long  ? 0.5 : 0);
+    const shortVotes = [f1_short, f2_short, f3_ok, f4_short].filter(Boolean).length + (f5_short ? 0.5 : 0);
+
+    const direction: "LONG" | "SHORT" = longVotes >= shortVotes ? "LONG" : "SHORT";
+    const votes = direction === "LONG" ? longVotes : shortVotes;
+
+    // Umbral: 2/4 factores + F3 activo (antes 2.5 + f3)
+    // En trending fuerte (f1 + f4 alineados): solo necesita 1 confirmador más
+    const trendingStrong = (f1_long && f4_long) || (f1_short && f4_short);
+    const passed = f3_ok && (votes >= 2.0 || (trendingStrong && votes >= 1.5));
+
+    const detail = `F1:MTF=${f1_long||f1_short?1:0}(${mtfSum.toFixed(2)}) F2:OBV=${f2_long||f2_short?1:0} F3:Vol=${f3_ok?1:0} F4:ROC=${rocScore}→${f4_long||f4_short?1:0} F5:RSI/St=${f5_long||f5_short?0.5:0} → ${votes.toFixed(1)}/4 ${passed?"✅":"❌"}`;
+    return { votes, direction, passed, detail };
+  }
+
+  // ── 3. Kelly fraccionario por activo ──────────────────────────────────────────
+  function calcKellySize(asset: string, rrRatio: number): number {
+    const calib = assetCalib[asset];
+    if (!calib || calib.n < 5) return 0.5;  // sin datos: Kelly neutral
+    const p = calib.wr;
+    const b = Math.max(rrRatio, 0.5);
+    const q = 1 - p;
+    const rawKelly = (p * b - q) / b;
+    // Fracción del Kelly (25%) para evitar over-sizing
+    const fracKelly = Math.max(0.1, Math.min(rawKelly * 0.25, 1.0));
+    return fracKelly;
+  }
+
+  // ── 4. Z-score: normalizar confidence contra historial del activo ─────────────
+  function normalizeConfidenceZScore(asset: string, rawScore: number): number {
+    const hist = signalHistMap[asset];
+    if (!hist || hist.scores.length < 10) return rawScore;  // sin historial: usar raw
+    const z = hist.std > 0 ? (rawScore - hist.mean) / hist.std : 0;
+    // Mapear z a rango de confianza: z=0 → 55, z=2 → 85, z=-2 → 35
+    return Math.max(35, Math.min(95, 55 + z * 15));
+  }
+
+  // ── 5. Walk-forward: actualizar calibración tras cada trade ───────────────────
+  function updateWalkForward(trade: ClosedTrade) {
+    setAssetCalib(prev => {
+      const existing = prev[trade.asset] ?? {
+        symbol: trade.asset, n: 0, wr: 0.5, avgRR: 1.5,
+        sharpe20: 0, floorAdj: 0, kellyF: 0.5, lastUpdated: 0
+      };
+      const n    = existing.n + 1;
+      const isWin = trade.pnl > 0;
+      const rr   = (trade as ClosedTrade & {rr?:number}).rr ?? 1.5;
+      const newWr  = (existing.wr * existing.n + (isWin ? 1 : 0)) / n;
+      const newRR  = (existing.avgRR * existing.n + rr) / n;
+      // Ajuste al floor: WR < 40% → subir floor +4, WR > 55% → bajar -3
+      const floorAdj = newWr < 0.40 ? Math.min(existing.floorAdj + 2, 12)
+                     : newWr > 0.55 ? Math.max(existing.floorAdj - 1, -8)
+                     : existing.floorAdj;
+      const b      = Math.max(newRR, 0.5);
+      const rawK   = (newWr * b - (1-newWr)) / b;
+      const kellyF = Math.max(0.1, Math.min(rawK * 0.25, 1.0));
+      const updated: AssetCalibration = {
+        symbol: trade.asset, n, wr: newWr, avgRR: newRR,
+        sharpe20: existing.sharpe20, floorAdj, kellyF, lastUpdated: Date.now()
+      };
+      return { ...prev, [trade.asset]: updated };
+    });
+
+    // Actualizar historial de z-score
+    setSignalHistMap(prev => {
+      const rawConf = (trade as ClosedTrade & {confidence?:number}).confidence ?? 60;
+      const hist    = prev[trade.asset] ?? { asset: trade.asset, scores: [], mean: 60, std: 10 };
+      const scores  = [...hist.scores, rawConf].slice(-100);
+      const mean    = scores.reduce((a,b) => a+b,0) / scores.length;
+      const std     = Math.sqrt(scores.reduce((s,v) => s+(v-mean)**2,0) / scores.length) || 10;
+      return { ...prev, [trade.asset]: { asset: trade.asset, scores, mean, std } };
+    });
+  }
+
+  // ── 6. Groq como Calibrador (nuevo rol) — corre cada 15 min ──────────────────
+  // NO decide operaciones. Solo ajusta parámetros del motor.
+  async function runGroqCalibrator() {
+    if (!usingGroq || !apiKey.trim()) return;
+    if (!canCallGroq()) return;
+    const now = Date.now();
+    if (now - lastCalibRun < 15 * 60 * 1000) return;  // cada 15 min máximo
+
+    setLastCalibRun(now);
+    try {
+      trackGroqCall();
+      const calibCtx = assets.map(a => {
+        const r   = regimeRef.current[a];
+        const c   = assetCalib[a];
+        const p   = pricesRef.current[a];
+        const ind = indicatorsMap[a];
+        return `${a}: precio=${p?.toFixed(2)??"-"} régimen=${r?.regime??"?"} ` +
+               `WR=${c ? (c.wr*100).toFixed(1)+"%" : "N/A"} ` +
+               `trades=${c?.n??0} RSI=${ind?.rsi?.toFixed(1)??"?"} ` +
+               `ATRratio=${r?.atrRatio?.toFixed(2)??"?"} strategy=${r?.strategy??"?"}`;
+      }).join("\n");
+
+      // ── Contexto de correlaciones para Groq ────────────────────────────────
+      const corrCtx = Object.values(tradeCorrelations).slice(0, 6).map(c => {
+        const [a, b] = c.pairKey.split("_");
+        return `${a}↔${b}: precioCorr=${c.pricePearson.toFixed(2)} ` +
+               `pnlCorr=${c.pnlPearson.toFixed(2)} ` +
+               `ambosGanan=${(c.bothWin*100).toFixed(0)}% ` +
+               `ambosPierden=${(c.bothLose*100).toFixed(0)}% ` +
+               `divergen=${(c.diverge*100).toFixed(0)}% ` +
+               `riskScore=${c.riskScore.toFixed(2)} ` +
+               `nSimult=${c.avgSimultaneous}`;
+      }).join("\n") || "Sin historial de trades suficiente aún.";
+
+      // ── Últimos 10 trades para contexto ──────────────────────────────────────
+      const recentTrades = realTrades.slice(0, 10).map(t =>
+        `${t.asset} ${t.direction} ${t.mode}: ${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(2)} | ${t.result}`
+      ).join("\n") || "Sin trades aún.";
+
+      // ── Portfolio risk actual ─────────────────────────────────────────────────
+      const portRisk = portfolioRisk
+        ? `riesgoActual=${portfolioRisk.currentRiskScore.toFixed(2)} ` +
+          `mejorPar=${portfolioRisk.bestCombo.join("+")} ` +
+          `peorPar=${portfolioRisk.worstCombo.join("+")}`
+        : "Sin datos de portfolio.";
+
+      const systemPrompt = `Eres un gestor de riesgo cuantitativo especializado en correlaciones de portfolio.
+Analizás el estado de un motor de trading algorítmico, sus correlaciones históricas entre activos, y ajustás parámetros para MINIMIZAR el riesgo sistémico y MAXIMIZAR la diversificación.
+NUNCA sugerís abrir o cerrar trades específicos.
+
+Ajustás:
+- confidenceFloor por activo (rango 44-72): más alto = más exigente
+- sizeMultiplier por activo (0.3-1.5): reducir en activos correlacionados positivamente
+- corrSizeAdj por activo (0.3-1.0): cuánto reducir size cuando ya hay una posición abierta en activo correlacionado
+- corrBlacklist: pares que NO deben operarse simultáneamente (array de strings "BTCUSD_ETHUSD")
+- macro: nota de mercado <70 chars
+- corrNote: insight sobre correlaciones detectadas <100 chars
+
+REGLA CLAVE: Si dos activos tienen bothLose > 30%, recomendar reducir size de ambos cuando estén simultáneos.
+Si divergen > 50%, son buenos para combinar (descorrelación natural = menor riesgo sistémico).
+
+Respondé SOLO con JSON válido, sin texto adicional ni markdown:
+{"floors":{"BTCUSD":52},"sizes":{"BTCUSD":1.0},"corrSizeAdj":{"BTCUSD":0.7},"corrBlacklist":[],"macro":"nota","corrNote":"insight correlaciones"}`;
+
+      const userPrompt = `Estado del motor (${new Date().toUTCString()}):
+
+ACTIVOS:
+${calibCtx}
+
+CORRELACIONES DE TRADES (basado en historial real):
+${corrCtx}
+
+ÚLTIMOS TRADES:
+${recentTrades}
+
+PORTFOLIO RISK: ${portRisk}
+
+Ajustá los parámetros priorizando la descorrelación del portfolio.`;
+
+      const r = await fetch("/api/groq", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
+        body: JSON.stringify({
+          model: groqModel || "llama-3.1-8b-instant",
+          temperature: 0.1,
+          max_tokens: 350,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user",   content: userPrompt }
+          ],
+        }),
+      });
+      if (!r.ok) return;
+      const data = await r.json() as { choices: Array<{ message: { content: string } }> };
+      const txt  = data?.choices?.[0]?.message?.content?.trim() ?? "";
+      // Parsear JSON — si falla, ignorar sin romper nada
+      const parsed = JSON.parse(txt.replace(/```json|```/g, "").trim()) as {
+        floors?:       Record<string, number>;
+        sizes?:        Record<string, number>;
+        corrSizeAdj?:  Record<string, number>;
+        corrBlacklist?: string[];
+        macro?:        string;
+        corrNote?:     string;
+      };
+      const calib: GroqCalibration = {
+        timestamp: now,
+        regime: Object.fromEntries(assets.map(a => [a, regimeRef.current[a]?.regime ?? "unknown"])),
+        floorOverrides:  parsed.floors       ?? {},
+        sizeOverrides:   parsed.sizes        ?? {},
+        corrSizeAdj:     parsed.corrSizeAdj  ?? {},
+        corrBlacklist:   parsed.corrBlacklist ?? [],
+        macroNote:  parsed.macro    ?? "",
+        corrNote:   parsed.corrNote ?? "",
+        nextRunAt:  now + 15 * 60 * 1000,
+      };
+      setGroqCalib(calib);
+      // Guardar insights de correlación en portfolioRisk
+      if (parsed.corrNote || parsed.macro) {
+        setPortfolioRisk(prev => prev
+          ? { ...prev, groqInsights: parsed.corrNote ?? prev.groqInsights, lastAnalysis: now }
+          : { maxDrawdownSimul: 0, bestCombo: [], worstCombo: [], currentRiskScore: 0,
+              groqInsights: parsed.corrNote ?? "", lastAnalysis: now }
+        );
+      }
+      const toastMsg = [parsed.macro, parsed.corrNote].filter(Boolean).join(" · ");
+      if (toastMsg) pushToast(`🤖 ${toastMsg.slice(0, 90)}`, "info");
+      console.log("[GROQ-CALIB]", calib);
+    } catch (e) {
+      console.warn("[GROQ-CALIB] falló (ignorado):", e);
+    }
+  }
+
+  function generateSignal(currentMode: Mode, currentAsset: Asset, overrides?: { tp?: number; sl?: number }): Signal {
+    // Leer SIEMPRE de refs (no del closure state) para evitar stale data
+    // Los refs se actualizan sincrónicamente en cada render via useEffect
+    const _prices    = pricesRef.current;
+    const _series    = seriesRef.current;
+    const _candles   = candlesRef.current;
+    const _c5m       = candles5mRef.current;
+    const _c15m      = candles15mRef.current;
+
+    const price = _prices[currentAsset];
+    if (!price || price <= 0) {
+      console.warn(`[TraderLab] generateSignal: sin precio para ${currentAsset} — bridge ok?`);
+    }
+    const spreadPct = getSpreadPct(currentAsset, volumeShock);
+    const spread = (spreadPct / 100) * price;
+    const mtf = getMtfScore(currentAsset, currentMode);
+    const ind = indicatorsMap[currentAsset] ?? computeIndicators(_candles[currentAsset] ?? []);
+    // Wyckoff: solo en intradía, solo del wyckoffMap (calculado desde velas 4H/1D reales)
+    // En scalping: se omite completamente — Order Flow es la autoridad
+    const wyckoff = currentMode === "intradia"
+      ? (wyckoffMap[currentAsset] ?? {
+          bias: "neutral" as const, phase: "unknown" as const, events: [],
+          supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
+          narrative: "Sin datos 4H/1D del bridge.", wyckoffLotMult: 1.0, tf4h: null, tf1d: null,
+        })
+      : { bias: "neutral" as const, phase: "unknown" as const, events: [],
+          supportZone: null, resistanceZone: null, volumeClimaxIdx: [],
+          narrative: "N/A (scalping)", wyckoffLotMult: 1.0, tf4h: null, tf1d: null };
+    const lrn = learningRef.current;
+
+    // ── Scalping: dirección determinada por control de mercado ────────────────
+    // En scalping: Order Flow es la autoridad. MTF confirma, no dicta.
+    const price0 = _series[currentAsset]?.[_series[currentAsset].length-1] ?? 0;
+    const of = currentMode === "scalping"
+      ? analyzeOrderFlow(_candles[currentAsset] ?? [], price0, ind.vwap, mtf.atr)
+      : null;
+    const mc = currentMode === "scalping"
+      ? (marketControlMap[currentAsset] ?? analyzeMarketControl(_candles[currentAsset] ?? [], ind, mtf.atr))
+      : null;
+
+    // ── Detección de giro anticipado ─────────────────────────────────────────
+    // Corre ANTES de decidir dirección — puede sobreescribir el bias del OF/MTF
+    // ── Dirección primaria: OF > MC > MTF (el reversal ajustará después) ───────
+    let mtfDir: Direction;
+    if (currentMode === "scalping" && of) {
+      // Prioridad 1: mean reversion desde extremo — adelantarse al rebote
+      const isOversold   = of.narrative.includes("bajo VAL") || of.narrative.includes("aceptación bajista");
+      const isOverbought = of.narrative.includes("sobre VAH") || of.narrative.includes("aceptación alcista");
+      if (of.longSetup && isOversold && of.cvd.divergence) {
+        mtfDir = "LONG";  // rebote desde sobreventa con divergencia
+      } else if (of.shortSetup && isOverbought && of.cvd.divergence) {
+        mtfDir = "SHORT"; // rebote desde sobrecompra con divergencia
+      // Prioridad 2: momentum con control claro
+      } else if (of.control === "bulls" && of.longSetup)  mtfDir = "LONG";
+      else if   (of.control === "bears" && of.shortSetup) mtfDir = "SHORT";
+      else if   (mc && mc.bias !== "neutral")              mtfDir = mc.bias === "bull" ? "LONG" : "SHORT";
+      else mtfDir = (mtf.htf + mtf.ltf + mtf.exec) >= 0 ? "LONG" : "SHORT";
+    } else {
+      mtfDir = (mtf.htf + mtf.ltf + mtf.exec) >= 0 ? "LONG" : "SHORT";
+    }
+    const mtfStrength = Math.abs(mtf.htf + mtf.ltf + mtf.exec);
+
+    // ── Paso 2: Indicador de confirmación (el más fuerte disponible) ──────────
+    // Elige el indicador con mayor convicción en la dirección MTF
+    type ConfirmIndicator = { name: string; confirms: boolean; strength: number };
+
+    const confirmCandidates: ConfirmIndicator[] = currentMode === "scalping"
+      ? [
+          // SCALPING — Confirmadores con Order Flow integrado
+          { name: "CVD-Flow",
+            confirms: of
+              ? (mtfDir === "LONG"
+                  ? of.cvd.trend !== "bearish" && of.cvd.cvd10 >= 0 && !of.cvd.divergence
+                  : of.cvd.trend !== "bullish" && of.cvd.cvd10 <= 0 && !of.cvd.divergence)
+              : true,
+            strength: of ? clamp(Math.abs(of.cvdScore) / 80, 0, 1) : 0.5 },
+          { name: "Vol-Profile",
+            confirms: of
+              ? (mtfDir === "LONG" ? price >= of.profile.val : price <= of.profile.vah)
+              : true,
+            strength: of ? clamp(Math.abs(of.profileScore) / 80, 0, 1) : 0.4 },
+          { name: "Footprint",
+            confirms: of ? (mtfDir === "LONG" ? of.footprintScore > 0 : of.footprintScore < 0) : true,
+            strength: of ? clamp(Math.abs(of.footprintScore) / 60, 0, 1) : 0.4 },
+          { name: "Stoch",
+            confirms: mtfDir === "LONG" ? ind.stochK > ind.stochD : ind.stochK < ind.stochD,
+            strength: clamp(Math.abs(ind.stochK - ind.stochD)/20 + (mtfDir==="LONG" && ind.stochK<50 ? 0.3 : mtfDir==="SHORT" && ind.stochK>50 ? 0.3 : 0), 0, 1) },
+          { name: "VolDelta",
+            confirms: mtfDir === "LONG" ? ind.volumeDeltaPct > 5 : ind.volumeDeltaPct < -5,
+            strength: Math.min(Math.abs(ind.volumeDeltaPct) / 35, 1) },
+          { name: "Absorcion",
+            confirms: of ? (mtfDir === "LONG" ? of.absorptionScore > 0 : of.absorptionScore < 0) : false,
+            strength: of ? clamp(Math.abs(of.absorptionScore) / 60, 0, 1) : 0 },
+          { name: "BB-Squeeze", confirms: ind.bbSqueeze, strength: ind.bbSqueeze ? 0.72 : 0 },
+          { name: "Stoch-Extreme",
+            confirms: mtfDir === "LONG" ? ind.stochK < 25 : ind.stochK > 75,
+            strength: mtfDir === "LONG" ? clamp((25-ind.stochK)/25+0.4,0.4,1) : clamp((ind.stochK-75)/25+0.4,0.4,1) },
+        ]
+      : [
+          // INTRADÍA — RSI primario (umbrales crypto OS<20/OB>80), MAs tendenciales
+          {
+            name: "RSI",
+            confirms: mtfDir === "LONG" ? (ind.rsi > 30 && ind.rsi < 65) : (ind.rsi > 35 && ind.rsi < 70),
+            strength: mtfDir === "LONG"
+              ? clamp((ind.rsi - 30) / 35, 0, 1)
+              : clamp((70 - ind.rsi) / 35, 0, 1),
+          },
+          {
+            name: "RSI-Extreme",
+            confirms: mtfDir === "LONG" ? ind.rsi < 30 : ind.rsi > 70,
+            strength: mtfDir === "LONG"
+              ? clamp((30 - ind.rsi) / 30 + 0.6, 0.6, 1)
+              : clamp((ind.rsi - 70) / 30 + 0.6, 0.6, 1),
+          },
+          {
+            name: "RSI-Div",
+            confirms: (mtfDir === "LONG" && ind.rsiDivergence === "bullish") ||
+                      (mtfDir === "SHORT" && ind.rsiDivergence === "bearish"),
+            strength: ind.rsiDivergence !== "none" ? 0.92 : 0,
+          },
+          {
+            name: "MA10/20/50",
+            confirms: mtfDir === "LONG"
+              ? (ind.ma10 > ind.ma20 && ind.ma20 > ind.ma50)
+              : (ind.ma10 < ind.ma20 && ind.ma20 < ind.ma50),
+            strength: clamp((Math.abs(ind.ma10 - ind.ma20) / (price * 0.003) + Math.abs(ind.ma20 - ind.ma50) / (price * 0.005)) / 2, 0, 1),
+          },
+          {
+            name: "MA10/20",
+            confirms: mtfDir === "LONG" ? ind.ma10 > ind.ma20 : ind.ma10 < ind.ma20,
+            strength: Math.min(Math.abs(ind.ma10 - ind.ma20) / (price * 0.002), 1),
+          },
+          {
+            name: "VWAP",
+            confirms: mtfDir === "LONG" ? price > ind.vwap : price < ind.vwap,
+            strength: Math.min(Math.abs(price - ind.vwap) / (ind.vwap * 0.005), 1),
+          },
+          {
+            name: "VolDelta",
+            confirms: mtfDir === "LONG" ? ind.volumeDeltaPct > 8 : ind.volumeDeltaPct < -8,
+            strength: Math.min(Math.abs(ind.volumeDeltaPct) / 40, 1),
+          },
+          { name: "BB-Squeeze", confirms: ind.bbSqueeze, strength: ind.bbSqueeze ? 0.75 : 0 },
+        ];
+
+        // Selecciona el confirmador con mayor strength que confirma
+    const bestConfirm = confirmCandidates
+      .filter(c => c.confirms && c.strength > 0)
+      .sort((a, b) => b.strength - a.strength)[0] ?? null;
+
+    const confirmed = bestConfirm !== null;
+    const confirmStrength = bestConfirm?.strength ?? 0;
+
+    // ── Paso 3: Dirección final ───────────────────────────────────────────────
+    // MTF dicta la dirección. Si hay confirmación, refuerza. Sin confirmación, sigue igual.
+    const direction = mtfDir;
+
+    // ── Reversal anticipatorio: corre con direction base, puede sobreescribirla ──
+    // detectReversalSetup recibe la dirección ACTUAL de la tendencia para buscar su agotamiento
+    // Si score ≥ 5: alta convicción de giro → sobreescribir dirección
+    // Si score 3-4: señal débil → solo boost de confianza, no cambia dirección
+    const reversalData = detectReversalSetup(
+      _candles[currentAsset] ?? [],
+      of,
+      wyckoff,
+      direction,
+      baseAtr,
+    );
+    // Sobreescribir dirección si hay setup de giro con alta convicción
+    const finalDirection: Direction = reversalData.score >= 5
+      ? reversalData.reversalDir
+      : direction;
+
+    // ── Paso 4a: Regime filter ───────────────────────────────────────────────
+    // Detectar régimen de mercado para adaptar la lógica de entrada
+    const regime = detectRegime(seriesRef.current[currentAsset] ?? []);
+
+    // ── Paso 4b: Multi-factor vote ────────────────────────────────────────────
+    // 4 factores ortogonales: EMA, momentum ROC, volatilidad, OBV
+    const mfv = calcMultiFactorVote(
+      seriesRef.current[currentAsset] ?? [],
+      _candles[currentAsset] ?? [],
+      finalDirection,
+      mtf.atr,
+    );
+
+    // ── Paso 4c: Penalización por régimen incompatible ────────────────────────
+    // Range + momentum fuerte → penalizar. Expansion + sin votos → penalizar.
+    const regimePenalty = (() => {
+      if (regime.regime === "unknown") return 0;
+      if (regime.regime === "range" && currentMode === "intradia") return -8;
+      if (regime.regime === "expansion" && mfv.votes < 2) return -12;
+      if (regime.regime === "trend" && mfv.votes >= 3) return 5; // bonus: régimen claro + votos alineados
+      return 0;
+    })();
+
+    // ── Paso 4d: Bonus multi-factor (reemplaza parte del bonus confirmador) ───
+    const mfvBonus = mfv.votes >= 3 ? mfv.votes * 4 : mfv.votes >= 2 ? mfv.votes * 2 : -5;
+
+    // ── Paso 4: Calcular confianza ────────────────────────────────────────────
+    // Score de control de mercado para scalping (0-20 puntos adicionales)
+    const mcScore    = (of && currentMode === "scalping")
+      ? Math.abs(of.controlScore) * 0.22
+      : (mc ? Math.abs(mc.score) * 0.2 : 0);
+    const ofSetupBonus      = (of && currentMode === "scalping")
+      ? ((mtfDir === "LONG" && of.longSetup) || (mtfDir === "SHORT" && of.shortSetup) ? 8 : 0) : 0;
+    const divergencePenalty = (of?.cvd.divergence && currentMode === "scalping") ? 10 : 0;
+    const mcConflict = (of && currentMode === "scalping")
+      ? (of.control === "bulls" && mtfDir === "SHORT") || (of.control === "bears" && mtfDir === "LONG")
+      : (mc ? (mc.bias === "bull" && mtfDir === "SHORT") || (mc.bias === "bear" && mtfDir === "LONG") : false);
+    // spreadCostRatio: fracción que el spread representa respecto al take profit esperado
+    // Si spread > 35% del TP → setup caro (penaliza confianza)
+    const estTpDist = Math.max(mtf.atr * (currentMode === "scalping" ? lrn.scalpingTpAtr : lrn.intradayTpAtr), spread * 2);
+    const spreadCostRatio = spread / Math.max(estTpDist, 1e-9);
+    // Bonus Wyckoff: distribución/acumulación alineada con dirección
+    const wyckoffBonus = (() => {
+      if (currentMode !== "intradia") return 0;
+      if (wyckoff.bias === "neutral") return 0;
+      const aligned =
+        (wyckoff.bias === "distribution" && finalDirection === "SHORT") ||
+        (wyckoff.bias === "accumulation" && finalDirection === "LONG");
+      const conflicted =
+        (wyckoff.bias === "distribution" && finalDirection === "LONG") ||
+        (wyckoff.bias === "accumulation" && finalDirection === "SHORT");
+      return aligned ? 14 : conflicted ? -10 : 0;
+    })();
+
+    // Bonus RSI extremo (sobrecompra/sobreventa alineado)
+    const rsiBonus = (() => {
+      if (!ind) return 0;
+      const rsiOversold   = ind.rsi < 35 && finalDirection === "LONG";
+      const rsiOverbought = ind.rsi > 65 && finalDirection === "SHORT";
+      return (rsiOversold || rsiOverbought) ? 8 : 0;
+    })();
+
+    // Bonus precio bajo/sobre VWAP alineado con dirección
+    const vwapBonus = (() => {
+      if (!ind || !price || !ind.vwap) return 0;
+      const belowVwap = price < ind.vwap && finalDirection === "LONG";
+      const aboveVwap = price > ind.vwap && finalDirection === "SHORT";
+      return (belowVwap || aboveVwap) ? 5 : -3;
+    })();
+
+    const confidence = clamp(
+      54                                                          // base sólida
+      + mtfStrength * 10                                         // peso mayor al MTF
+      + (confirmed ? confirmStrength * 20 : 0)                   // confirmación pesa más
+      + (ind.rsiDivergence !== "none" ? 7 : 0)                  // divergencia RSI
+      + mcScore
+      + ofSetupBonus
+      + wyckoffBonus                                             // Wyckoff alineado = +14
+      + rsiBonus                                                 // RSI extremo = +8
+      + vwapBonus                                               // VWAP posición = ±5
+      + mfvBonus                                                 // multi-factor vote ±20
+      + regimePenalty                                            // régimen incompatible = -8/-12
+      - divergencePenalty
+      - (mcConflict ? 8 : 0)
+      - (currentMode === "scalping" ? spreadPct * 25 : spreadPct * 10)
+      - (spreadCostRatio > 0.5 ? 5 : spreadCostRatio > 0.35 ? 2 : 0),
+      40, 96                                                     // piso 40 — más tráfico
+    );
+
+    // ── Paso 5: Sizing — Wyckoff como multiplicador solo en intradía ──────────
+    const wyckoffMult = currentMode === "intradia" ? (wyckoff as WyckoffAnalysis & { wyckoffLotMult?: number }).wyckoffLotMult ?? 1.0 : 1.0;
+
+    const entry = direction === "LONG" ? price + spread / 2 : price - spread / 2;
+    const baseAtr = mtf.atr;
+    // ── SL: bajo/sobre el swing más reciente + buffer ATR ───────────────────
+    // Multiplicadores ajustados por sesión (crypto finde vs NY institucional)
+    const prof    = getSessionProfile();
+    const slMult  = currentMode === "scalping" ? prof.slMult  : 3.0;
+    const tp1Mult = currentMode === "scalping" ? prof.tp1Mult : 2.0;
+    const tp2Mult = currentMode === "scalping" ? prof.tp2Mult : 5.0;
+    // Para scalping: buscar swing low/high reciente en las últimas 8 velas
+    const recentC = _candles[currentAsset]?.slice(-8) ?? [];
+    let structuralSl: number;
+    if (currentMode === "scalping" && recentC.length >= 3) {
+      const swingLow  = Math.min(...recentC.map(c => c.l));
+      const swingHigh = Math.max(...recentC.map(c => c.h));
+      structuralSl = direction === "LONG"
+        ? swingLow  - baseAtr * 0.2
+        : swingHigh + baseAtr * 0.2;
+      // Si el swing queda más cerca que 0.8×ATR, usar ATR como fallback
+      const slDist = Math.abs(entry - structuralSl);
+      if (slDist < baseAtr * 0.8) structuralSl = direction === "LONG"
+        ? entry - baseAtr * slMult : entry + baseAtr * slMult;
+    } else {
+      structuralSl = direction === "LONG"
+        ? entry - baseAtr * slMult : entry + baseAtr * slMult;
+    }
+    const stopLoss = structuralSl;
+
+    // ── TPs escalonados: scalping = TP1 + TP2, intradía = TP1 + TP2 + TP3 ─────
+    // Scalping: TP1 = 1.2×ATR (rápido, asegurar), TP2 = 2.4×ATR (completo)
+    // Intradía: TP1 = 2.0×ATR, TP2 = 4.0×ATR, TP3 = 6.0×ATR (extensión)
+    let tp1: number, tp2: number, tp3: number | undefined;
+    const dir = finalDirection;
+
+    if (currentMode === "scalping") {
+      const tp1Dist = baseAtr * tp1Mult;   // varía por sesión (finde: 1.0, NY: 1.2)
+      const tp2Dist = baseAtr * tp2Mult;   // varía por sesión (finde: 2.2, NY: 2.4)
+      // Anclar al perfil de volumen si está disponible
+      const mcVah = mc?.vah ?? entry + tp2Dist;
+      const mcVal = mc?.val ?? entry - tp2Dist;
+      tp1 = dir === "LONG"
+        ? entry + tp1Dist
+        : entry - tp1Dist;
+      tp2 = dir === "LONG"
+        ? Math.max(mcVah, entry + tp2Dist)
+        : Math.min(mcVal, entry - tp2Dist);
+    } else {
+      // Intradía: niveles 2×, 4× y 6× ATR
+      const t1m = lrn.intradayTpAtr * 0.4;  // ~2×ATR
+      const t2m = lrn.intradayTpAtr;          // ~5×ATR
+      const t3m = lrn.intradayTpAtr * 1.6;  // ~8×ATR
+      tp1 = dir === "LONG" ? entry + baseAtr * t1m : entry - baseAtr * t1m;
+      tp2 = dir === "LONG" ? entry + baseAtr * t2m : entry - baseAtr * t2m;
+      tp3 = dir === "LONG" ? entry + baseAtr * t3m : entry - baseAtr * t3m;
+    }
+    // ── Overrides manuales (tp/sl pasado desde la UI) ──────────────────────
+    if (overrides?.tp && overrides.tp > 0) {
+      // Recalcular tp1 como punto intermedio entre entry y tp override
+      const tpDist = Math.abs(overrides.tp - entry);
+      tp1 = dir === "LONG" ? entry + tpDist * 0.4 : entry - tpDist * 0.4;
+      tp2 = overrides.tp;
+      tp3 = dir === "LONG" ? entry + tpDist * 1.3 : entry - tpDist * 1.3;
+    }
+    if (overrides?.sl && overrides.sl > 0) {
+      structuralSl = overrides.sl;
+    }
+    const takeProfit = tp2; // alias principal = TP final
+
+    // ── Costo real del spread (en USD) — CfD: sin comisión, solo spread ──────
+    // Spread real viene del bridge MT5 cuando está conectado, sino se estima
+    const realSpreadPct = mt5SpreadMap[currentAsset]?.spread_pct ?? spreadPct;
+    const contractSz    = contractSize[currentAsset] ?? 1;
+    const lotSize       = 1; // referencia 1 lote para el costo unitario
+    const spreadCostUsd = (realSpreadPct / 100) * entry * contractSz * lotSize;
+
+    // ── Paso 6: Rationale ─────────────────────────────────────────────────────
+    const mtfCtx = `HTF ${(mtf.htf ?? 0).toFixed(2)} / LTF ${(mtf.ltf ?? 0).toFixed(2)} / Exec ${(mtf.exec ?? 0).toFixed(2)}`;
+    const confirmCtx = bestConfirm ? `Confirmación: ${bestConfirm.name} (${(bestConfirm.strength * 100).toFixed(0)}%)` : "Sin confirmación adicional";
+    const wyckoffCtx = currentMode === "intradia" && wyckoff.bias !== "neutral"
+      ? ` | Wyckoff ${wyckoff.bias === "accumulation" ? "Acum" : "Dist"} F${wyckoff.phase} mult×${wyckoffMult.toFixed(2)}` : "";
+    // En scalping: el rationale comienza con el control de mercado (quién manda)
+    const controlLabel = (of && currentMode === "scalping")
+      ? (of.control === "bulls" ? "🟢 TOROS" : of.control === "bears" ? "🔴 OSOS" : "⚪ DISPUTADO")
+      : "";
+    const cvdArrow = of ? (of.cvd.trend === "bullish" ? "↑" : of.cvd.trend === "bearish" ? "↓" : "→") : "";
+    const mcCtx = (of && currentMode === "scalping")
+      ? ` | OF: ${controlLabel} score=${(of.controlScore ?? 0).toFixed(0)} CVD${cvdArrow} FP=${(of.footprintScore ?? 0).toFixed(0)} Vol=${price>of.profile.poc?"▲POC":"▼POC"}`
+      : (mc ? ` | Control: ${mc.dominantSide} (${(mc.score ?? 0).toFixed(0)}) CVD${mc.cvdSlope>=0?"↑":"↓"} POC:${(mc.poc ?? 0).toFixed(2)}` : "");
+    const rationale = currentMode === "scalping"
+      ? `${controlLabel} ${finalDirection} | CVD${cvdArrow} FP:${of?.footprintScore.toFixed(0)??"?"} | ${confirmCtx}${mcCtx}`
+      : `${finalDirection} | ${mtfCtx} | ${confirmCtx}${wyckoffCtx}${mcCtx}`;
+
+    // ── Bonus/penalidad por historial de asset+modo ─────────────────────────
+    const aeKey = `${currentAsset}_${currentMode}`;
+    const ae    = learningRef.current.assetEdge[aeKey];
+    let aeBonus = 0;
+    if (ae && ae.total >= 5) {
+      const aeWr = ae.wins / ae.total;
+      aeBonus = clamp((aeWr - 0.5) * 20, -8, 8); // ±8 puntos según historial del activo
+    }
+    // Sanitizar: si algo se volvió NaN (ej. ema de array vacío), usar base 52
+    const safeConf = isNaN(confidence) || !isFinite(confidence) ? 52 : confidence;
+    const finalConfidence = clamp(safeConf + aeBonus, 40, 96);
+
+    // ── Reversal setup: detectar agotamiento de la tendencia opuesta ──────────
+    // "finalDirection" es hacia donde va el bot — detectamos agotamiento de ESA dirección
+    // para saber si hay un giro inminente EN CONTRA (reversalDir = opuesto)
+    // También usamos direction=finalDirection para detectar si la tendencia actual está agotada
+    const wyckoffSizeMult = getWyckoffSizeMult(wyckoff, finalDirection);
+
+    // Boost de confianza si el setup tiene score de reversión alto y va a favor
+    // (el bot ya eligió esta dirección — si hay reversal score es señal de convicción)
+    const reversalBoost = reversalData.score >= 7 ? 8
+                        : reversalData.score >= 5 ? 4
+                        : reversalData.score >= 3 ? 1 : 0;
+    // ── Coordinador v1×BS: si las griegas Black-Scholes confirman dirección ──────
+    // Delta > 0.55 para LONG o < 0.45 para SHORT = momentum BS alineado
+    // EV positivo = trade matemáticamente favorable bajo distribución log-normal
+    // Este es el "supra-bot": los dos motores se votan entre sí
+    // Usar griegas del Motor Quant BS si disponibles, sino las del v1
+    const bsGreeks = (qeGreeksMap?.[currentAsset] ?? 
+      (typeof greeksMap !== "undefined" ? (greeksMap as Record<string, {delta:number;ev:number;gammaExtreme:boolean;vegaCross:boolean}>)[currentAsset] : null));
+    const bsConfirms = bsGreeks
+      ? (finalDirection === "LONG"  ? bsGreeks.delta > 0.52 : bsGreeks.delta < 0.48)
+      : false;
+    const bsEVpositive = bsGreeks ? bsGreeks.ev > 0 : false;
+    const bsGammaExt   = bsGreeks ? bsGreeks.gammaExtreme : false;
+    const bsVegaCross  = bsGreeks ? bsGreeks.vegaCross     : false;
+    const bsBoost = bsConfirms
+      ? (bsEVpositive ? 12 : 6)   // BS confirma + EV positivo → +12, solo dirección → +6
+      + (bsGammaExt  ? 4  : 0)   // Gamma extrema (punto inflexión) → +4
+      + (bsVegaCross ? 4  : 0)   // Vega cross (expansión inminente) → +4
+      : 0;
+
+    const boostedConfidence = clamp(finalConfidence + reversalBoost + bsBoost, 40, 98);
+
+    return {
+      asset: currentAsset, mode: currentMode, finalDirection, entry, stopLoss,
+      takeProfit, tp1, tp2, tp3,
+      confidence: boostedConfidence, spreadPct, spreadCostUsd, atr: baseAtr, mtf,
+      indicators: ind, wyckoff, rationale,
+      reversalScore:     reversalData.score,
+      reversalDir:       reversalData.reversalDir,
+      isReversalSetup:   reversalData.score >= 5,
+      wyckoffSizeMult,
+      isPyramidAdd:      false,
+    } as Signal & { _wyckoffMult?: number };
+  }
+
+  // ── IA: trader experto con master en estadística ──
+  // ── Rate limiter: controla que no supere GROQ_MAX_RPM ──────────────────────
+  function canCallGroq(): boolean {
+    const now = Date.now();
+    // Si está en pausa manual o automática
+    if (groqPausedRef.current) return false;
+    if (groqRateInfo.pauseUntil > now) return false;
+    // Limpiar llamadas que tienen más de 60 segundos
+    groqCallsRef.current = groqCallsRef.current.filter(t => now - t < 60000);
+    return groqCallsRef.current.length < GROQ_MAX_RPM;
+  }
+
+  function trackGroqCall() {
+    const now = Date.now();
+    groqCallsRef.current.push(now);
+    groqCallsRef.current = groqCallsRef.current.filter(t => now - t < 60000);
+    const calls = groqCallsRef.current.length;
+    // Pausa automática si está a 3 llamadas del límite
+    if (calls >= GROQ_MAX_RPM - 3) {
+      const pauseUntil = now + GROQ_PAUSE_SEC * 1000;
+      setGroqRateInfo({ calls, paused: true, pauseUntil });
+      setTimeout(() => setGroqRateInfo(p => ({ ...p, paused: false, pauseUntil: 0 })), GROQ_PAUSE_SEC * 1000);
+      pushToast(`⏸ Groq pausado ${GROQ_PAUSE_SEC}s — ${calls}/${GROQ_MAX_RPM} rpm`, "warning");
+    } else {
+      setGroqRateInfo({ calls, paused: false, pauseUntil: 0 });
+    }
+  }
+
+  async function aiDecision(signal: Signal): Promise<"OPEN" | "SKIP" | "WAIT"> {
+    const lrn = learningRef.current;
+    // Fallback local puro si no hay Groq
+    const localDecide = () => {
+      const floor = signal.mode === "scalping"
+        ? Math.max(44, lrn.confidenceFloor - 6)
+        : Math.max(48, lrn.confidenceFloor - 2);
+      return signal.confidence >= floor ? "OPEN" : "SKIP";
+    };
+    if (!usingGroq || !apiKey.trim() || !canCallGroq()) return localDecide();
+
+    // Scalping: Groq NO veta nunca — la latencia supera el horizonte temporal
+    // Solo enriquece el rationale asincrónicamente
+    if (signal.mode === "scalping") return localDecide();
+
+    try {
+      trackGroqCall();
+      const lrnSnap      = learningRef.current;
+      const equitySnap   = (mt5Enabled && mt5Equity !== null && mt5Equity > 0) ? mt5Equity : balance + unrealized;
+      const openCount    = openPositionsRef.current.length;
+      const rrRatio      = Math.abs(signal.takeProfit - signal.entry) /
+                           Math.max(Math.abs(signal.stopLoss - signal.entry), 1e-9);
+      const wr01         = Math.max(stats.winRate / 100, 0.01);
+      const edge         = wr01 - (1 - wr01) / Math.max(rrRatio, 0.5);
+      const fewTrades    = stats.total < 15;
+      const expectedValue = (wr01 * (stats.pnl / Math.max(stats.total, 1)) -
+                            (1 - wr01) * Math.abs(stats.pnl / Math.max(stats.total, 1))).toFixed(3);
+      const evSign       = fewTrades ? "N/A" : parseFloat(expectedValue) >= 0 ? "POSITIVE ✓" : "NEGATIVE ✗";
+      const peakEquity   = Math.max(100, equitySnap, ...realTrades.map((_,i2) =>
+        100 + realTrades.slice(0,i2+1).reduce((a,t)=>a+t.pnl,0)));
+      const currentDD    = ((peakEquity - equitySnap) / peakEquity * 100).toFixed(1);
+      const consecLoss   = calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain).streak;
+
+      const systemPrompt = `You are an algorithmic trading validator for a quant fund. You are a SECONDARY validator — the quant engine already approved this trade.
+
+MANDATE:
+- DEFAULT TO OPEN. Only veto with a SPECIFIC documented reason.
+- A veto (SKIP) requires: (1) equity drawdown > 4% today, OR (2) more than 5 consecutive losses, OR (3) a clear macro event that directly contradicts the trade direction.
+- DO NOT veto due to: general uncertainty, low confidence scores, missing data, or "caution."
+- In COLD START (< 15 trades), always OPEN unless a hard risk rule is broken.
+${fewTrades ? "⚠ COLD START: < 15 trades. DO NOT apply statistical filters. Trust RR ratio." : ""}
+
+ACCOUNT:
+- Equity: $${equitySnap.toFixed(2)} | Drawdown from peak: ${currentDD}%
+- Consecutive losses: ${consecLoss} | Open positions: ${openCount}
+- EV per trade: $${expectedValue} [${evSign}]
+
+SIGNAL (intradía only):
+- Asset: ${signal.asset} | Direction: ${signal.direction}
+- Confidence: ${signal.confidence.toFixed(1)}% | RR: ${rrRatio.toFixed(2)}×
+- Entry: ${signal.entry.toFixed(5)} | SL: ${signal.stopLoss.toFixed(5)} | TP: ${signal.takeProfit.toFixed(5)}
+- Rationale: ${signal.rationale?.slice(0,120)}
+- Wyckoff: ${signal.rationale?.includes("Wyckoff") ? "aligned" : "neutral"}
+
+HARD STOP RULES (only these justify SKIP):
+1. Daily drawdown > 4%
+2. Consecutive losses > 5
+3. Open positions > 4
+4. RR < 1.0 (the quant engine already blocks < 1.3, so this shouldn't fire)
+
+Reply with EXACTLY one word: OPEN, SKIP, or WAIT`;
+
+      const r = await fetch("/api/groq", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
+        body: JSON.stringify({
+          model: groqModel || "llama-3.1-8b-instant",
+          temperature: 0.05, // casi determinista — no queremos creatividad aquí
+          max_tokens: 8,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: "Decision?" }
+          ],
+        }),
+      });
+      if (!r.ok) {
+        if (r.status === 429) {
+          groqPausedRef.current = true;
+          const pauseUntil = Date.now() + 60000;
+          setGroqRateInfo(p => ({ ...p, paused: true, pauseUntil }));
+          setTimeout(() => { groqPausedRef.current = false; setGroqRateInfo(p => ({ ...p, paused: false, pauseUntil: 0 })); }, 60000);
+        }
+        return localDecide();
+      }
+      const data = await r.json() as { choices: Array<{ message: { content: string } }> };
+      const reply = data?.choices?.[0]?.message?.content?.trim().toUpperCase() ?? "";
+      if (reply.includes("SKIP")) return "SKIP";
+      if (reply.includes("WAIT")) return "WAIT";
+      return "OPEN";
+    } catch {
+      return localDecide();
+    }
+  }
+
+  const closePosition = useCallback(async (position: Position, exit: number, result: ExitReason) => {
+    // Si MT5 está conectado, cerrar en el broker PRIMERO y esperar confirmación
+    if (mt5Enabled && mt5Status === "connected") {
+      try {
+        const body: Record<string, unknown> = {
+          asset: position.signal.asset,
+          direction: position.signal.direction,
+        };
+        const r = await fetch(`${mt5Url}/close`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body), signal: AbortSignal.timeout(8000),
+        });
+        const d = await r.json() as { ok: boolean; closed: number[]; errors?: Array<{ticket:number;error:string}> };
+        if (!d.ok || !d.closed?.length) {
+          pushToast(`⚠️ MT5 no pudo cerrar ${position.signal.asset}: ${d.errors?.[0]?.error ?? "sin respuesta"}`, "error");
+          return; // No registrar el cierre si MT5 falló
+        }
+      } catch (e) {
+        pushToast(`⚠️ MT5 timeout al cerrar ${position.signal.asset}`, "error");
+        return;
+      }
+    }
+    // Registrar el cierre localmente
+    const pnl = position.signal.direction === "LONG"
+      ? (exit - position.signal.entry) * position.size
+      : (position.signal.entry - exit) * position.size;
+    const icon = result === "TP" ? "✅" : result === "SL" ? "❌" : "⟳";
+    pushToast(`${icon} ${position.signal.asset} ${position.signal.direction} → ${exitLabel[result]}  ${pnl >= 0 ? "+" : ""}${money(pnl)}`, pnl >= 0 ? "success" : "error");
+    setBalance(prev => prev + pnl);
+    setOpenPositions(prev => prev.filter(p => p.id !== position.id));
+    const rrRealized = Math.abs(exit - position.signal.entry) /
+      Math.max(Math.abs(position.signal.stopLoss - position.signal.entry), 1e-9);
+    const closedTrade: ClosedTrade = {
+      id: position.id, asset: position.signal.asset, mode: position.signal.mode,
+      direction: position.signal.direction, entry: position.signal.entry, exit, pnl,
+      pnlPct: (pnl / Math.max(position.marginUsed, 0.01)) * 100,
+      result, openedAt: position.openedAt, closedAt: new Date().toISOString(), source: "real",
+    };
+    // ── Walk-forward + correlación: actualizar al cerrar ───────────────────
+    updateWalkForward({ ...closedTrade, rr: rrRealized, confidence: position.signal.confidence } as ClosedTrade & { rr: number; confidence: number });
+    setRealTrades(prev => {
+      const next: ClosedTrade[] = [closedTrade, ...prev].slice(0, 400);
+      refreshLearning(next);
+      // Recalcular correlaciones de trades con el historial actualizado
+      try {
+        const newCorrs = calcTradeCorrelations(next);
+        setTradeCorrelations(newCorrs);
+        const newRisk = calcPortfolioRisk(newCorrs, openPositionsRef.current);
+        setPortfolioRisk(newRisk);
+      } catch (e) { console.warn("[TraderLab] corrCalc error:", e); }
+      return next;
+    });
+    // ── Groq Coach post-trade (asíncrono, no bloquea) ─────────────────────────
+    // Rol: analizar el trade cerrado y sugerir ajustes al learning model
+    // Se ejecuta en background — el resultado actualiza learningRef
+    if (usingGroq && apiKey.trim() && canCallGroq()) {
+      void (async () => {
+        try {
+          trackGroqCall();
+          const tradeResult = result === "TP" ? "WIN" : result === "SL" ? "LOSS" : "PARTIAL";
+          const rrActual    = Math.abs(exit - position.signal.entry) /
+                              Math.max(Math.abs(position.signal.stopLoss - position.signal.entry), 1e-9);
+          const allTrades   = [{ pnl, result, rr: rrActual }, ...realTrades.slice(0, 19)];
+          const recentWR    = allTrades.filter(t => t.pnl > 0).length / Math.max(allTrades.length, 1);
+          const recentRR    = allTrades.reduce((a, t) => a + ((t as { rr?: number }).rr ?? 0), 0) / Math.max(allTrades.length, 1);
+          const lrn         = learningRef.current;
+
+          const coachPrompt = `You are a quantitative trading model calibrator. A trade just closed. Analyze and suggest parameter adjustments.
+
+TRADE CLOSED:
+- Asset: ${position.signal.asset} | Mode: ${position.signal.mode} | Direction: ${position.signal.direction}
+- Result: ${tradeResult} | P&L: $${pnl.toFixed(2)} | RR achieved: ${rrActual.toFixed(2)}×
+- Confidence score was: ${position.signal.confidence.toFixed(1)}%
+- Rationale: ${position.signal.rationale?.slice(0, 120)}
+
+CURRENT MODEL PARAMS:
+- confidenceFloor: ${lrn.confidenceFloor.toFixed(1)}
+- riskScale: ${lrn.riskScale.toFixed(2)}
+- scalpingTpAtr: ${lrn.scalpingTpAtr.toFixed(2)}
+- intradayTpAtr: ${lrn.intradayTpAtr.toFixed(2)}
+- atrTrailMult: ${lrn.atrTrailMult.toFixed(2)}
+
+RECENT PERFORMANCE (last 20 trades):
+- Win rate: ${(recentWR * 100).toFixed(1)}% | Avg RR: ${recentRR.toFixed(2)}×
+
+TASK: Reply ONLY with a JSON object (no explanation, no markdown) adjusting 1-2 params based on this trade result.
+Rules:
+- If LOSS with high confidence (>65%): raise confidenceFloor by +0.5 to +1.5
+- If WIN with low confidence (<55%): lower confidenceFloor by -0.3 to -0.8
+- If RR achieved < 50% of target: lower scalpingTpAtr by -0.1 or intradayTpAtr by -0.2
+- If 3+ consecutive losses: raise confidenceFloor by +1, lower riskScale by -0.05
+- If WR > 60% last 20: lower confidenceFloor by -0.5
+- Keep all values in reasonable ranges: confidenceFloor 44-60, riskScale 0.5-1.5, scalpingTpAtr 1.5-4.0, intradayTpAtr 3.0-8.0, atrTrailMult 0.2-0.6
+- If no adjustment needed, return {}
+
+Example valid response: {"confidenceFloor": 53.5, "riskScale": 0.95}`;
+
+          const r2 = await fetch("/api/groq", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
+            body: JSON.stringify({
+              model: groqModel || "llama-3.1-8b-instant",
+              temperature: 0.1, max_tokens: 60,
+              messages: [
+                { role: "system", content: coachPrompt },
+                { role: "user", content: "Provide parameter adjustment JSON." }
+              ],
+            }),
+          });
+          if (r2.ok) {
+            const d2 = await r2.json() as { choices: Array<{ message: { content: string } }> };
+            const raw = d2?.choices?.[0]?.message?.content?.trim() ?? "{}";
+            const jsonStr = raw.replace(/```json|```/g, "").trim();
+            try {
+              const adj = JSON.parse(jsonStr) as Partial<typeof lrn>;
+              if (Object.keys(adj).length > 0) {
+                const clamped: typeof lrn = {
+                  ...lrn,
+                  confidenceFloor: adj.confidenceFloor !== undefined
+                    ? Math.max(44, Math.min(60, adj.confidenceFloor)) : lrn.confidenceFloor,
+                  riskScale: adj.riskScale !== undefined
+                    ? Math.max(0.5, Math.min(1.5, adj.riskScale)) : lrn.riskScale,
+                  scalpingTpAtr: adj.scalpingTpAtr !== undefined
+                    ? Math.max(1.5, Math.min(4.0, adj.scalpingTpAtr)) : lrn.scalpingTpAtr,
+                  intradayTpAtr: adj.intradayTpAtr !== undefined
+                    ? Math.max(3.0, Math.min(8.0, adj.intradayTpAtr)) : lrn.intradayTpAtr,
+                  atrTrailMult: adj.atrTrailMult !== undefined
+                    ? Math.max(0.2, Math.min(0.6, adj.atrTrailMult)) : lrn.atrTrailMult,
+                };
+                learningRef.current = clamped;
+                setLearning(clamped);
+                const changed = Object.entries(adj)
+                  .filter(([k]) => k in lrn)
+                  .map(([k, v]) => `${k}: ${(v as number).toFixed(2)}`)
+                  .join(", ");
+                if (changed) pushToast(`🧠 Groq Coach ajustó modelo: ${changed}`, "info");
+              }
+            } catch { /* JSON inválido — ignorar */ }
+          }
+        } catch { /* Coach falló — sin impacto en el trade */ }
+      })();
+    }
+
+    // ── Circuit breaker: acumula P&L del día ────────────────────────────────
+    {
+      const today = new Date().toISOString().slice(0, 10);
+      if (dailyPnlRef.current.date !== today) dailyPnlRef.current = { date: today, pnl: 0 };
+      dailyPnlRef.current.pnl += pnl;
+      const eq = mt5EquityRef.current ?? 1000;
+      const lossPct = Math.abs(Math.min(dailyPnlRef.current.pnl, 0)) / eq;
+      if (lossPct >= MAX_DAILY_LOSS_PCT && !circuitOpenRef.current) {
+        circuitOpenRef.current = true;
+        setCircuitOpen(true);
+        setAutoScan(false);
+        pushToast(`🔴 Circuit breaker: pérdida diaria ${(lossPct * 100).toFixed(1)}% — autoScan pausado hasta que lo reactivés`, "error");
+      }
+    }
+    // Sincronizar MT5 para reflejar el cierre inmediatamente
+    if (mt5Enabled && mt5Status === "connected") setTimeout(() => void syncMT5State(), 500);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mt5Enabled, mt5Status, mt5Url]);
+
+  function evaluatePositionsWithCurrentPrices() {
+    const pp    = prevPricesRef.current;
+    const shock = volumeShockRef.current;
+    const sv    = seriesRef.current;
+    const cc    = candlesRef.current;
+    const lrn   = learningRef.current;
+
+    openPositionsRef.current.forEach(pos => {
+      const px = pp[pos.signal.asset];
+      if (!px) return;
+
+      const spread   = (getSpreadPct(pos.signal.asset, shock) / 100) * px;
+      const isLong   = pos.signal.direction === "LONG";
+      const tradable = isLong ? px - spread / 2 : px + spread / 2;
+      const peak     = Math.max(pos.peak,   tradable);
+      const trough   = Math.min(pos.trough, tradable);
+
+      // ── Trailing estructural: mover SL solo a niveles de swing ────────────
+      const swingLookback = pos.signal.mode === "scalping" ? 8 : 20;
+      const recentCandles = (cc[pos.signal.asset] ?? []).slice(-swingLookback);
+      const currentSl     = pos.signal.stopLoss;
+      let   newSl         = currentSl;
+
+      if (recentCandles.length >= 4) {
+        const lookSlice = recentCandles.slice(0, -2);
+        if (isLong) {
+          const swingLow  = Math.min(...lookSlice.map(c => c.l));
+          const candidate = swingLow - pos.signal.atr * lrn.atrTrailMult;
+          if (candidate > currentSl && candidate < tradable - pos.signal.atr * 0.3) {
+            newSl = candidate;
+          }
+        } else {
+          const swingHigh = Math.max(...lookSlice.map(c => c.h));
+          const candidate = swingHigh + pos.signal.atr * lrn.atrTrailMult;
+          if (candidate < currentSl && candidate > tradable + pos.signal.atr * 0.3) {
+            newSl = candidate;
+          }
+        }
+      }
+
+      // ── Trailing ATR dinámico (Chandelier Exit) ─────────────────────────────
+      // ATR trailing: SL = peak/trough ± atr × multiplier dinámico
+      // El multiplier se adapta al progreso del trade (se ajusta a medida que gana)
+      const profitDistRaw = isLong ? tradable - pos.signal.entry : pos.signal.entry - tradable;
+      const tpDistRaw     = Math.abs(pos.signal.tp2 - pos.signal.entry) || Math.abs(pos.signal.takeProfit - pos.signal.entry);
+      const progressPct   = tpDistRaw > 0 ? Math.max(0, profitDistRaw / tpDistRaw) : 0;
+      // A mayor progreso → trailing más ajustado (protege más ganancia)
+      const dynMult = lrn.atrTrailMult * (progressPct > 0.75 ? 0.6 : progressPct > 0.5 ? 0.8 : 1.0);
+      const atrTrailCandidate = isLong
+        ? peak - pos.signal.atr * dynMult          // LONG: SL bajo el pico - ATR
+        : trough + pos.signal.atr * dynMult;        // SHORT: SL sobre el trough + ATR
+
+      // Tomar el mejor entre swing trailing y ATR trailing (el más favorable = más protector)
+      if (isLong && atrTrailCandidate > newSl && atrTrailCandidate < tradable - pos.signal.atr * 0.2)
+        newSl = atrTrailCandidate;
+      if (!isLong && atrTrailCandidate < newSl && atrTrailCandidate > tradable + pos.signal.atr * 0.2)
+        newSl = atrTrailCandidate;
+
+      const trailMoved  = isLong ? newSl > currentSl : newSl < currentSl;
+      const effectiveSl = newSl;
+
+      // ── Breakeven: mover SL a entrada cuando ganancia ≥ 40% del TP ──────────
+      // (reducido de 50% a 40% — más agresivo al proteger capital)
+      const tpDist      = Math.abs(pos.signal.takeProfit - pos.signal.entry);
+      const profitDist  = isLong ? tradable - pos.signal.entry : pos.signal.entry - tradable;
+      const profitRatio = tpDist > 0 ? profitDist / tpDist : 0;
+      const bePrice     = pos.signal.entry + (isLong ? 1 : -1) * (pos.signal.atr * 0.08); // buffer mínimo
+      const shouldBE    = profitRatio >= 0.40 && (isLong ? newSl < bePrice : newSl > bePrice);
+      if (shouldBE) {
+        newSl = bePrice; // SL a breakeven
+      }
+
+      // ── Lógica multi-TP ─────────────────────────────────────────────────────
+      const tp1 = pos.signal.tp1 ?? pos.signal.takeProfit;
+      const tp2 = pos.signal.tp2 ?? pos.signal.takeProfit;
+      const tp3 = pos.signal.tp3;
+      const beBuffer = pos.signal.entry + (isLong ? 1 : -1) * pos.signal.atr * 0.1;
+
+      const hitTp1 = !pos.tp1Hit && (isLong ? tradable >= tp1 : tradable <= tp1);
+      const hitTp2 = pos.tp1Hit && !pos.tp2Hit && (isLong ? tradable >= tp2 : tradable <= tp2);
+      const hitTp3 = tp3 !== undefined && pos.tp2Hit && !pos.tp3Hit && (isLong ? tradable >= tp3 : tradable <= tp3);
+
+      if (pos.signal.mode === "scalping") {
+        if (hitTp2) {
+          void closePosition(pos, tradable, "TP"); return;
+        }
+        if (hitTp1) {
+          // Scalp TP1 tocado: mover SL a BE y esperar TP2
+          const nextSl = isLong ? Math.max(newSl, beBuffer) : Math.min(newSl, beBuffer);
+          setOpenPositions(prev => prev.map(p =>
+            p.id === pos.id ? { ...p, tp1Hit: true, signal: { ...p.signal, stopLoss: nextSl } } : p
+          ));
+          pushToast(`🎯 ${pos.signal.asset} TP1 → SL movido a BE, esperando TP2`, "success");
+          return;
+        }
+      } else {
+        // Intradía: TP1 → BE, TP2 → SL a TP1, TP3 → cierre
+        if (hitTp3) {
+          void closePosition(pos, tradable, "TP"); return;
+        }
+        if (hitTp2 && tp3 !== undefined) {
+          // Mover SL a TP1 para asegurar mínimo ese profit
+          const lockSl = tp1;
+          setOpenPositions(prev => prev.map(p =>
+            p.id === pos.id ? { ...p, tp2Hit: true, signal: { ...p.signal, stopLoss: lockSl } } : p
+          ));
+          pushToast(`🎯 ${pos.signal.asset} TP2 → SL asegurado en TP1, esperando TP3`, "success");
+          return;
+        }
+        if (hitTp2 && tp3 === undefined) {
+          void closePosition(pos, tradable, "TP"); return;
+        }
+        if (hitTp1 && !pos.tp1Hit) {
+          const nextSl = isLong ? Math.max(newSl, beBuffer) : Math.min(newSl, beBuffer);
+          setOpenPositions(prev => prev.map(p =>
+            p.id === pos.id ? { ...p, tp1Hit: true, signal: { ...p.signal, stopLoss: nextSl } } : p
+          ));
+          pushToast(`🎯 ${pos.signal.asset} TP1 → SL a BE, esperando TP2/TP3`, "success");
+          return;
+        }
+      }
+
+      // ── Reversión: solo intradía con ganancia minima 1×ATR ─────────────────
+      const vals         = sv[pos.signal.asset] ?? [];
+      const maFast       = avg(vals.slice(-(pos.signal.mode === "scalping" ? 5 : 10)));
+      const maSlow       = avg(vals.slice(-(pos.signal.mode === "scalping" ? 10 : 20)));
+      const hasMinProfit = profitDist >= pos.signal.atr * 1.0;
+      const maCross      = isLong ? maFast < maSlow : maFast > maSlow;
+      const reversal     = pos.signal.mode === "intradia" && hasMinProfit && maCross && pos.tp1Hit;
+
+      // ── SL ──────────────────────────────────────────────────────────────────
+      const hitSl = isLong ? tradable <= effectiveSl : tradable >= effectiveSl;
+      if (hitSl)    { void closePosition(pos, tradable, trailMoved ? "TRAIL" : "SL"); return; }
+      if (reversal) { void closePosition(pos, tradable, "REVERSAL");                  return; }
+
+      if (trailMoved || shouldBE || peak !== pos.peak || trough !== pos.trough) {
+        setOpenPositions(prev => prev.map(p =>
+          p.id === pos.id
+            ? { ...p, peak, trough, signal: { ...p.signal, stopLoss: newSl } }
+            : p
+        ));
+      }
+    });
+  }
+
+
+  // ─── Guard de correlación: evitar doble riesgo en activos correlacionados ──
+  // BTC/ETH correlación ~0.85 — no abrir mismo lado simultáneamente
+  // XAU/XAG correlación ~0.80 — idem
+  const CORR_GROUPS: Asset[][] = [
+    ["BTCUSD", "ETHUSD"],
+    ["XAUUSD", "XAGUSD"],
+  ];
+  function hasCorrConflict(asset: Asset, direction: Direction, positions: Position[]): boolean {
+    if (positions.length === 0) return false;
+
+    // 0. Groq blacklist — pares explícitamente bloqueados por análisis histórico
+    if (groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)) {
+      const blacklisted = (groqCalib.corrBlacklist ?? []).some(pair => {
+        const [a, b] = pair.split("_");
+        return positions.some(p =>
+          (asset === a && p.signal.asset === b) ||
+          (asset === b && p.signal.asset === a)
+        );
+      });
+      if (blacklisted) return true;
+    }
+
+    // 1. Correlación de P&L histórica: si bothLose > 35% → conflicto
+    const tradeCorrConflict = positions.some(p => {
+      if (p.signal.asset === asset) return false;
+      const key    = `${asset}_${p.signal.asset}`;
+      const keyRev = `${p.signal.asset}_${asset}`;
+      const corr   = tradeCorrelationsRef.current[key] ?? tradeCorrelationsRef.current[keyRev];
+      // Solo bloquear si misma dirección y alta correlación de pérdidas
+      return corr && corr.bothLose > 0.35 && p.signal.direction === direction;
+    });
+    if (tradeCorrConflict) return true;
+
+    // 2. Correlación dinámica de precio (umbral 0.75)
+    const dynConflict = positions.some(p => {
+      if (p.signal.asset === asset) return false;
+      if (p.signal.direction !== direction) return false;
+      const corr = correlationRef.current[asset]?.[p.signal.asset] ?? 0;
+      return Math.abs(corr) >= 0.75;
+    });
+    if (dynConflict) return true;
+
+    // 3. Fallback estático para activos sin correlación calculada
+    const group = CORR_GROUPS.find(g => g.includes(asset));
+    if (!group) return false;
+    return positions.some(p =>
+      group.includes(p.signal.asset) &&
+      p.signal.asset !== asset &&
+      p.signal.direction === direction
+    );
+  }
+
+  async function createSignalAndExecute(mode: Mode, targetAsset: Asset, autoLabel = false, overrides?: { tp?: number; sl?: number }) {
+    // ── Modo: real (MT5) o simulado (sin bridge) ─────────────────────────────
+    // El bot SIEMPRE puede generar señales y operar en simulación
+    // Si MT5 está conectado, ejecuta órdenes reales en el broker
+    const isMT5Live = mt5Enabled && (mt5Status === "connected" || mt5StatusRef.current === "connected");
+
+    if (!liveReady && isMT5Live) {
+      // Bridge conectado pero datos no frescos — reconectar silenciosamente
+      try {
+        await syncRealData(mt5Url);
+      } catch { /* ignorar */ }
+    }
+
+    if (!liveReady && !isMT5Live) {
+      // Sin datos en absoluto — pedir al usuario que conecte
+      if (!autoLabel) pushToast(
+        "⚠ Sin datos de mercado — conectá el bridge MT5 en ⚙ Config, o activá el auto-scan para simular",
+        "warning"
+      );
+      // Permitir continuar en modo demo solo si hay al menos precios básicos
+      const hasPrices = Object.keys(pricesRef.current).length > 0;
+      if (!hasPrices) return;
+    }
+    if (circuitOpenRef.current) {
+      if (!autoLabel) pushToast("🔴 Circuit breaker activo — límite de pérdida diaria alcanzado. Reactivá el autoScan manualmente cuando estés listo.", "error");
+      return;
+    }
+
+    // ── Log de diagnóstico del flujo ─────────────────────────────────────────
+    console.log(
+      `[FLOW] ${targetAsset} ${mode}` +
+      ` | liveReady=${liveReady} mt5=${mt5Status} isMT5Live=${isMT5Live}` +
+      ` | circuit=${circuitOpenRef.current} openPos=${openPositionsRef.current.length}`
+    );
+    // ── Verificar límites diarios antes de generar señal ─────────────────────
+    if (mode === "scalping") {
+      const risk = calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain);
+      if (risk.blocked) {
+        if (!autoLabel) pushToast(`🛑 ${risk.blockReason}`, "warning");
+        return;
+      }
+      // Modo defensivo si expectancy negativa con suficientes trades
+      if (risk.mathExpectancy < -0.5 && risk.dailyTrades > 5) {
+        if (!autoLabel) pushToast(`⚠️ Expectativa negativa ($${(risk.mathExpectancy ?? 0).toFixed(2)}). Modo defensivo.`, "warning");
+      }
+    }
+
+    // ── Guard: no abrir si ya hay posición abierta en este activo ─────────────
+    const existingInAsset = openPositionsRef.current.filter(p => p.signal.asset === targetAsset);
+    if (existingInAsset.length > 0) {
+      if (!autoLabel) pushToast(`⏸ ${targetAsset}: ya hay ${existingInAsset.length} posición abierta`, "warning");
+      return;
+    }
+    // ── Guard MT5: verificar posiciones reales del broker ───────────────────
+    if (mt5Enabled && mt5Status === "connected") {
+      const mt5InAsset = mt5PositionsRef.current.filter(p =>
+        p.symbol.startsWith(targetAsset) || p.asset === targetAsset
+      );
+      if (mt5InAsset.length > 0) {
+        if (!autoLabel) pushToast(`⏸ ${targetAsset}: ${mt5InAsset.length} posición real en MT5`, "warning");
+        return;
+      }
+    }
+
+    const signal = generateSignal(mode, targetAsset, overrides);
+    if (!autoLabel) setLastSignal(signal);
+
+    // ── DEBUG: log completo de la señal para diagnosticar por qué no abre ───
+    {
+      const rrDbg = Math.abs(signal.tp2 - signal.entry) /
+                    Math.max(Math.abs(signal.entry - signal.stopLoss), 1e-9);
+      const lrnDbg = learningRef.current;
+      const floorDbg = mode === "scalping"
+        ? Math.max(46, lrnDbg.confidenceFloor - 4)
+        : Math.max(50, lrnDbg.confidenceFloor);
+      console.log(`[TraderLab] ${targetAsset} ${mode} | price=${(signal.entry ?? 0).toFixed(2)} | conf=${(signal.confidence ?? 0).toFixed(1)}% (floor=${floorDbg}) | RR=${rrDbg.toFixed(2)} | SL=${(signal.stopLoss ?? 0).toFixed(2)} | TP1=${(signal.tp1 ?? 0).toFixed(2)} TP2=${(signal.tp2 ?? 0).toFixed(2)} | ${signal.rationale.slice(0,80)}`);
+    }
+
+    // ── Guard correlación ────────────────────────────────────────────────────
+    if (hasCorrConflict(targetAsset, signal.direction, openPositionsRef.current)) {
+      if (!autoLabel) pushToast(`⚡ ${targetAsset} ${signal.direction}: correlado con posición abierta — skip`, "warning");
+      return;
+    }
+
+    // ── Decisión: confidence + RR — todo lo demás ya está integrado en confidence ──
+    const calib    = assetCalib[targetAsset];
+    const prof     = getSessionProfile();
+    const hasManualOverrides = !!(overrides?.tp || overrides?.sl);
+    const rrActual = Math.abs(signal.tp2 - signal.entry) /
+                     Math.max(Math.abs(signal.entry - signal.stopLoss), 1e-9);
+
+    // NaN guard
+    if (isNaN(signal.confidence) || isNaN(rrActual)) {
+      console.error(`[TraderLab] NaN — conf=${signal.confidence} RR=${rrActual} ${targetAsset}`);
+      if (!autoLabel) pushToast(`⚠ ${targetAsset}: señal NaN — bridge ok?`, "error");
+      return;
+    }
+
+    // Confidence ya integra: MFV, régimen, Wyckoff, Order Flow, RSI, VWAP, reversal
+    // Floor: base 52 scalp / 54 intradía → ajuste walk-forward → ajuste Groq
+    const groqFloor = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)
+      ? (groqCalib.floorOverrides?.[targetAsset] ?? null) : null;
+    // Floor permisivo — confidence base=54 debe poder pasar sin historial
+    // Groq puede subir o bajar ±5 pts según contexto macro
+    const baseFloor = mode === "scalping" ? 48 : 50;
+    const floor     = groqFloor ?? Math.max(44, baseFloor + (calib?.floorAdj ?? 0) + prof.confAdjust);
+
+    if (!hasManualOverrides && signal.confidence < floor) {
+      const msg = `⏭ ${targetAsset} ${mode} conf=${signal.confidence.toFixed(0)} < piso=${floor.toFixed(0)}`;
+      setLastGateLog(`${msg} | ${signal.rationale.slice(0,50)}`);
+      if (!autoLabel) pushToast(`${msg} | ${signal.rationale.slice(0,50)}`, "warning");
+      return;
+    }
+
+    // RR mínimo: 1.0× (cualquier trade positivo es válido)
+    const minRR = 1.0;
+    if (!hasManualOverrides && rrActual < minRR) {
+      const msg = `⏭ ${targetAsset} RR=${rrActual.toFixed(2)} < 1.0`;
+      setLastGateLog(msg);
+      if (!autoLabel) pushToast(`${msg} — SL muy ancho`, "warning");
+      return;
+    }
+
+    // Log diagnóstico F12 — incluye desglose completo
+    console.log(
+      `[SIGNAL] ✅ ${targetAsset} ${mode}` +
+      ` | conf=${signal.confidence.toFixed(0)} piso=${floor}` +
+      ` | RR=${rrActual.toFixed(2)}` +
+      ` | BS: delta=${bsGreeks?.delta.toFixed(3)??"n/a"} EV=${bsGreeks?.ev.toFixed(4)??"n/a"} boost=+${bsBoost}` +
+      ` | ${signal.rationale?.slice(0,60)}`
+    );
+    setLastGateLog(""); // señal aprobada — limpiar último gate
+
+    // ── Groq como enricher puro (no veta, no bloquea, solo enriquece) ─────────
+    // En scalping: NUNCA esperar respuesta — latencia > horizonte de señal
+    // En intradía: enriquecer rationale en paralelo, timeout 3s
+    if (usingGroq && apiKey.trim() && canCallGroq() && mode === "intradia") {
+      // Fire-and-forget: no await, no veto
+      void (async () => {
+        try {
+          trackGroqCall();
+          const groqResult = await Promise.race([
+            aiDecision(signal),
+            new Promise<"TIMEOUT">((res) => setTimeout(() => res("TIMEOUT"), 3000)),
+          ]);
+          if (groqResult !== "TIMEOUT" && groqResult !== "OPEN" && groqResult !== "SKIP") {
+            // groqResult es string de rationale extendido
+            signal.aiRationale = String(groqResult).slice(0, 120);
+          }
+        } catch { /* ignorar — ejecución ya fue */ }
+      })();
+    }
+    const lrn = learningRef.current;
+    const wyckoffMult = (signal as Signal & { _wyckoffMult?: number })._wyckoffMult ?? 1.0;
+    // Ajustar sizing por riesgo de ruina en scalping
+    const riskMult = signal.mode === "scalping"
+      ? calcScalpingRisk(realTrades, balance, maxDailyLoss, maxDailyGain).sizeMultiplier
+      : 1.0;
+    // ── Size ajustado por reversal score y Wyckoff ───────────────────────────
+    // isReversalSetup: entrada anticipatoria → size reducido (más riesgo de timing)
+    // wyckoffSizeMult: amplifica si Wyckoff macro alineado, reduce si opuesto
+    // Los dos pueden combinarse: setup anticipatorio + Wyckoff alineado = 0.75× (prudente pero convicción)
+    const reversalSizeMult = signal.isReversalSetup
+      ? (signal.wyckoffSizeMult > 1.0 ? 0.75 : 0.5)  // Wyckoff alineado → más convicción
+      : signal.wyckoffSizeMult;                         // tendencia → usar mult Wyckoff directo
+    // ── Kelly × Regime × Correlación × Groq sizing ──────────────────────────
+    const kellyMult      = calcKellySize(targetAsset, rrActual);         // 0.1–1.0
+    const regimeNow      = regimeRef.current[targetAsset] ?? { sizeAdjust: 1.0 };
+    const regimeSizeMult = regimeNow.sizeAdjust ?? 1.0;                  // 0.7–1.2
+    const corrSizeMult   = getCorrSizeMultiplier(targetAsset, openPositionsRef.current);  // 0.4–1.0
+    const groqSizeMult   = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000)
+      ? (groqCalib.sizeOverrides[targetAsset] ?? 1.0) : 1.0;
+    const combinedSizeMult = kellyMult * regimeSizeMult * corrSizeMult * groqSizeMult;
+    // Log para auditoría de sizing
+    if (corrSizeMult < 1.0) console.log(
+      `[SIZING] ${targetAsset}: kelly=${kellyMult.toFixed(2)} regime=${regimeSizeMult.toFixed(2)}` +
+      ` corr=${corrSizeMult.toFixed(2)} groq=${groqSizeMult.toFixed(2)} combined=${combinedSizeMult.toFixed(2)}`
+    );
+    const riskUsd = Math.max(0.5, equity * (riskPct / 100) * lrn.riskScale * wyckoffMult * riskMult * reversalSizeMult * combinedSizeMult);
+    // stopDistance mínimo: el mayor entre el SL calculado y 0.3% del precio
+    // Evita que ATR pequeño en plata/gold genere sizes irreales
+    const minStop = signal.entry * 0.003;
+    const stopDistance = Math.max(Math.abs(signal.entry - signal.stopLoss), minStop);
+    // Calcular lotes respetando volMin y volStep del broker
+    const cs   = contractSize[signal.asset] ?? 1;
+    const vMin = volMin[signal.asset]       ?? 0.01;
+    const vStp = volStep[signal.asset]      ?? 0.01;
+    // size en lotes = riskUsd / (stopDistance * contractSize)
+    const rawLots = riskUsd / (stopDistance * cs);
+    // Redondear al volStep más cercano hacia abajo, asegurar >= volMin
+    const size = Math.max(vMin, Math.floor(rawLots / vStp) * vStp);
+    const marginUsed = (size * cs * signal.entry) / getLeverage(signal.asset);
+    // ── Riesgo de margen total (anti-liquidación) ──────────────────────────
+    const totalMarginUsed = openPositionsRef.current.reduce((a, p) => a + p.marginUsed, 0);
+    // Usar margen libre real de MT5 si está disponible (fuente de verdad)
+    const realEquity    = (mt5Enabled && mt5Equity    !== null && mt5Equity    > 0) ? mt5Equity    : equity;
+    const realFreeMargin = (mt5Enabled && mt5FreeMargin !== null && mt5FreeMargin > 0) ? mt5FreeMargin : null;
+
+    // Si tenemos margen libre real de MT5, usarlo directamente
+    const freeMarginPct = realFreeMargin !== null && realEquity > 0
+      ? (realFreeMargin / realEquity) * 100
+      : realEquity > 0
+        ? ((realEquity - totalMarginUsed - marginUsed) / realEquity) * 100
+        : 100; // si no hay datos, no bloquear
+
+    // Bloquear solo si el margen libre real baja del 20% (umbral de liquidación inminente)
+    if (freeMarginPct < 20) {
+      pushToast(`🛑 Margen libre crítico: ${freeMarginPct.toFixed(1)}% — operación bloqueada`, "error");
+      return;
+    }
+    if (freeMarginPct < 40) {
+      pushToast(`⚠️ Margen libre bajo: ${freeMarginPct.toFixed(1)}%`, "warning");
+    }
+    // Bloquear solo si la posición usaría más del 40% del equity (era 20%, muy restrictivo)
+    if (marginUsed > realEquity * 0.40) {
+      pushToast(`⚠️ Posición demasiado grande: $${marginUsed.toFixed(0)} vs equity $${realEquity.toFixed(0)}`, "warning");
+      return;
+    }
+    const multTag     = wyckoffMult > 1 ? ` | Wyckoff ×${wyckoffMult.toFixed(2)}` : "";
+    const bsTag       = bsBoost > 0 ? ` | BS+${bsBoost}` : "";
+    const modeIcon    = isMT5Live ? "🚀 MT5" : "🟡 SIM";
+
+    if (isMT5Live) {
+      // ── Ejecutar en broker real ─────────────────────────────────────────────
+      await sendToMT5(signal, size, marginUsed, (ticket, execPrice) => {
+        const entry = execPrice ?? signal.entry;
+        const pos = { id: ticket ?? Date.now(), signal: { ...signal, entry },
+          size, marginUsed, openedAt: new Date().toISOString(), peak: entry, trough: entry };
+        setOpenPositions(prev => [...prev, pos]);
+        if (!autoLabel) pushToast(
+          `${modeIcon} #${ticket} ${signal.asset} ${signal.direction} @ ${entry.toFixed(signal.entry > 1 ? 2 : 5)} | conf ${signal.confidence.toFixed(0)}${bsTag}`,
+          "success"
+        );
+      });
+    } else {
+      // ── Modo simulación — agregar al panel sin confirmación del broker ──────
+      const simPos = { id: Date.now(), signal, size, marginUsed,
+        openedAt: new Date().toISOString(), peak: signal.entry, trough: signal.entry };
+      setOpenPositions(prev => [...prev, simPos]);
+      if (!autoLabel) pushToast(
+        `${modeIcon} ${signal.asset} ${signal.direction} @ ${(signal.entry).toFixed(signal.entry > 1 ? 2 : 5)} | conf ${signal.confidence.toFixed(0)}${bsTag}${multTag}`,
+        "info"   // info (no success) para distinguir de orden real
+      );
+    }
+  }
+
+  // ── MT5: test de conexión ────────────────────────────────────────────────
+  // ── Sincronizar posiciones y historial reales desde MT5 ───────────────────
+  async function syncMT5State() {
+    if (!mt5Enabled || mt5Status !== "connected") return;
+    try {
+      // Posiciones abiertas reales
+      const rPos = await fetch(`${mt5Url}/positions`, { signal: AbortSignal.timeout(5000) });
+      if (rPos.ok) {
+        const dPos = await rPos.json() as {
+          positions: MT5Position[];
+          total: number;
+          total_profit?: number;
+          balance?: number;
+          equity?: number;
+          margin?: number;
+          free_margin?: number;
+          margin_level?: number;
+        };
+        // Mapear symbol → Asset (ej: BTCUSD → BTCUSD)
+        const mapped = dPos.positions.map(p => ({
+          ...p,
+          asset: (assets.find(a => p.symbol.startsWith(a) || a === p.symbol) ?? p.symbol) as Asset,
+        }));
+        setMt5Positions(mapped);
+        // Actualizar datos del encabezado desde /positions (más fresco que /status)
+        if (dPos.balance   !== undefined && dPos.balance   !== null) setMt5Balance(dPos.balance);
+        if (dPos.equity    !== undefined && dPos.equity    !== null) setMt5Equity(dPos.equity);
+        if (dPos.margin    !== undefined && dPos.margin    !== null) setMt5Margin(dPos.margin);
+        if (dPos.free_margin !== undefined && dPos.free_margin !== null) setMt5FreeMargin(dPos.free_margin);
+        if (dPos.margin_level !== undefined && dPos.margin_level !== null) setMt5MarginLevel(dPos.margin_level);
+      }
+      // Historial reciente (últimos 7 días)
+      const rHist = await fetch(`${mt5Url}/history?days=7`, { signal: AbortSignal.timeout(5000) });
+      if (rHist.ok) {
+        const dHist = await rHist.json() as { deals: Array<{
+          ticket: number; symbol: string; entry: string; type: string;
+          volume: number; price: number; profit: number; time: string;
+        }> };
+        // Convertir deals de cierre a ClosedTrade
+        const closedDeals = dHist.deals.filter(d => d.entry === "OUT");
+        const mt5Trades: ClosedTrade[] = closedDeals.map(d => {
+          const asset = (assets.find(a => d.symbol.startsWith(a) || a === d.symbol) ?? d.symbol) as Asset;
+          return {
+            id: d.ticket,
+            asset,
+            mode: "scalping" as Mode,
+            direction: d.type === "buy" ? "LONG" : "SHORT" as Direction,
+            entry: d.price, // precio aproximado — MT5 no separa entrada/salida en deal OUT
+            exit: d.price,
+            pnl: d.profit,
+            pnlPct: d.profit / Math.max(balance, 1) * 100,
+            result: d.profit > 0 ? "TP" : "SL" as ExitReason,
+            openedAt: d.time,
+            closedAt: d.time,
+            source: "real" as const,
+          };
+        });
+        if (mt5Trades.length > 0) setMt5History(mt5Trades);
+      }
+    } catch { /* sync silencioso — no interrumpir el flujo */ }
+  }
+
+  async function testMT5Bridge(): Promise<boolean> {
+    setMt5Status("testing");
+    const currentUrl = mt5Url;   // capturar antes de cualquier await — evita stale closure
+    try {
+      const r = await fetch(`${currentUrl}/status`, { signal: AbortSignal.timeout(6000) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json() as {
+        connected: boolean; account?: string; balance?: number;
+        equity?: number; demo?: boolean; broker?: string; leverage?: number;
+      };
+      if (d.connected) {
+        setMt5Status("connected");
+        mt5StatusRef.current = "connected";
+        setMt5Account(d.account ?? null);
+        setMt5Balance(d.balance ?? null);
+        if (d.equity !== undefined) setMt5Equity(d.equity);
+        void fetchMT5SymbolsDirect();
+        await syncMT5State();
+        void syncRealData(currentUrl);
+        // Activar autoScan automáticamente al conectar el bridge
+        setAutoScan(true);
+        pushToast(
+          `✅ MT5 — Cta ${d.account} | $${d.balance?.toFixed(0)} | ${d.demo ? "DEMO ✓" : "⚠ REAL"} | ${d.broker ?? ""}`,
+          "success"
+        );
+        return true;
+      } else {
+        setMt5Status("error");
+        mt5StatusRef.current = "error";
+        pushToast("MT5: bridge activo pero MT5 no conectado — abrí MetaTrader 5", "warning");
+        return false;
+      }
+    } catch (e) {
+      setMt5Status("error");
+      mt5StatusRef.current = "error";
+      const msg = e instanceof Error ? e.message : String(e);
+      pushToast(`MT5: bridge no responde en ${mt5Url} (${msg})`, "error");
+      return false;
+    }
+  }
+
+  // fetchMT5SymbolsDirect — sin guard mt5Status (para llamar justo después de conectar)
+  // fetchMT5SymbolsDirect: alias para llamar fetchMT5Symbols
+  // sin esperar que mt5Status state se propague (usa el ref síncrono)
+  async function fetchMT5SymbolsDirect() {
+    // mt5StatusRef ya está en "connected" — llamar fetchMT5Symbols directamente
+    // sobreescribiendo el guard de estado
+    try {
+      const r = await fetch(`${mt5Url}/symbols`, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) return;
+      const data = await r.json() as {
+        symbols: Array<{
+          name: string; description?: string;
+          spread: number; bid: number; ask: number;
+          trade_mode?: number; digits: number; contract_size: number;
+          volume_min: number; volume_step: number;
+          currency_base?: string; currency_profit?: string;
+          trade_allowed: boolean; visible?: boolean;
+        }>;
+        resolved_map?: Record<string,string>;
+        total?: number;
+      };
+      if (!data.symbols?.length) return;
+
+      const brokerToTL: Record<string,string> = {};
+      if (data.resolved_map) {
+        Object.entries(data.resolved_map).forEach(([tl, broker]) => { brokerToTL[broker] = tl; });
+      }
+
+      const tradeable = data.symbols.filter(s => s.bid > 0 && s.trade_allowed !== false);
+      const mapped = tradeable.map(s => {
+        const tlName = brokerToTL[s.name] ?? s.name;
+        const known  = ASSET_CATALOG[tlName] ?? ASSET_CATALOG[s.name];
+        const cat    = known?.category ?? inferCategoryFromSymbol(
+          s.name, s.description ?? "", s.currency_base ?? "", s.currency_profit ?? ""
+        );
+        return { name: tlName, brokerName: s.name, category: cat,
+          spread: s.spread, contractSize: s.contract_size,
+          digits: s.digits, volumeMin: s.volume_min };
+      });
+
+      setAvailableSymbols(mapped);
+
+      const tlNames = mapped.map(m => m.name);
+      setAssets(() => {
+        const base         = ["BTCUSD","ETHUSD","XAUUSD","XAGUSD"];
+        const fromCatalog  = tlNames.filter(n => ASSET_CATALOG[n] && !base.includes(n));
+        const fromBroker   = tlNames.filter(n => !ASSET_CATALOG[n] && !base.includes(n));
+        const all = [...new Set([...base, ...fromCatalog, ...fromBroker])];
+        console.log(`[ASSETS] ${all.length} activos del broker:`, all.join(", "));
+        return all as Asset[];
+      });
+
+      // Enriquecer catálogo con parámetros reales del broker
+      mapped.forEach(m => {
+        if (!ASSET_CATALOG[m.name]) {
+          (ASSET_CATALOG as Record<string, typeof ASSET_CATALOG[string]>)[m.name] = {
+            category: m.category, digits: m.digits ?? 5,
+            contractSize: m.contractSize ?? 1, leverage: 50,
+            minAtr: 0.0001, spreadPct: 0.025,
+            sessions: ["NY","London","Asia","Post-NY"],
+          };
+        }
+      });
+      pushToast(`📡 ${mapped.length} activos del broker cargados`, "info");
+    } catch(e) { console.warn("[fetchMT5SymbolsDirect]", e); }
+  }
+
+  // ── MT5: enviar señal de apertura ─────────────────────────────────────────
+  async function sendToMT5(signal: Signal, size: number, marginUsed: number, onConfirm?: (ticket: number, price: number) => void) {
+    if (!mt5Enabled || mt5Status !== "connected") return;
+    try {
+      const r = await fetch(`${mt5Url}/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          asset: signal.asset, direction: signal.direction, mode: signal.mode,
+          entry: signal.entry, stopLoss: signal.stopLoss, takeProfit: signal.takeProfit,
+          size, confidence: signal.confidence, rationale: signal.rationale, marginUsed,
+        }),
+        signal: AbortSignal.timeout(8000),
+      });
+      const d = await r.json() as { ok: boolean; ticket?: number; price?: number; error?: string };
+      if (d.ok && d.ticket) {
+        onConfirm?.(d.ticket, d.price ?? signal.entry);
+      } else {
+        const errMsg = d.error ?? JSON.stringify(d);
+        pushToast(`❌ MT5 rechazó: ${errMsg}`, "error");
+        console.error("[sendToMT5] Bridge rechazó:", d);
+      }
+    } catch { pushToast("MT5: timeout al enviar señal", "error"); }
+  }
+
+  // ── MT5: cerrar posición con ticket específico o por asset ──────────────
+  async function closeInMT5(asset: Asset, direction?: string, ticket?: number) {
+    if (!mt5Enabled || mt5Status !== "connected") return;
+    try {
+      const body: Record<string, unknown> = { asset };
+      if (ticket) body.ticket = ticket;
+      if (direction) body.direction = direction;
+      const r = await fetch(`${mt5Url}/close`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(8000),
+      });
+      const d = await r.json() as { ok: boolean; closed: number[]; errors: Array<{ticket:number;error:string}> };
+      if (d.closed?.length > 0) {
+        pushToast(`📡 MT5: cerradas ${d.closed.length} posición(es) en ${asset}`, "success");
+        // Actualizar lista de posiciones MT5
+        setMt5Positions(prev => prev.filter(p => !d.closed.includes(p.ticket)));
+        // Re-sincronizar para capturar el trade cerrado en historial
+        setTimeout(() => syncMT5State(), 1500);
+      }
+      if (d.errors?.length > 0) {
+        d.errors.forEach(e => pushToast(`⚠ MT5 ticket #${e.ticket}: ${e.error}`, "error"));
+      }
+    } catch (e) {
+      pushToast(`MT5 cierre fallido: ${e instanceof Error ? e.message : "error"}`, "error");
+    }
+  }
+
+  // ── MT5: cerrar por ticket (desde panel de posiciones MT5) ────────────────
+  async function closeInMT5ByTicket(ticket: number, asset: Asset) {
+    await closeInMT5(asset, undefined, ticket);
+  }
+
+
+  // ─── fetchRealMarketSnapshot: pide precios + velas 1m al bridge MT5 ────────
+  // Usa /snapshot que devuelve todos los activos activos en una sola llamada.
+  // Para activos no presentes en /snapshot, hace fetch individual de /candles.
+  async function fetchRealMarketSnapshot(
+    prevPrices: Record<string, number>,
+    bridgeUrl: string,
+    _useBridge: boolean,
+  ): Promise<{
+    prices:      Record<string, number>;
+    seriesMap:   Record<string, number[]>;
+    candleMap:   Record<string, Candle[]>;
+    spreadMap:   Record<string, number>;
+    leverageMap: Record<string, number>;
+    shock:       number;
+    sourceNote:  string;
+  }> {
+    // ── 1. Llamar /snapshot — todos los activos en paralelo ──────────────────
+    const resp = await fetch(`${bridgeUrl}/snapshot`, {
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!resp.ok) throw new Error(`Bridge /snapshot HTTP ${resp.status}`);
+
+    const data = await resp.json() as {
+      assets: Record<string, {
+        price?: number; bid?: number; ask?: number;
+        spread?: number; spread_pct?: number;
+        leverage?: number; digits?: number;
+        candles?: Candle[];
+        error?: string;
+      }>;
+    };
+
+    const prices:      Record<string, number>   = { ...prevPrices };
+    const seriesMap:   Record<string, number[]>  = {};
+    const candleMap:   Record<string, Candle[]>  = {};
+    const spreadMap:   Record<string, number>    = {};
+    const leverageMap: Record<string, number>    = {};
+    const failed: string[] = [];
+
+    // ── 2. Procesar respuesta del bridge ─────────────────────────────────────
+    for (const [asset, d] of Object.entries(data.assets ?? {})) {
+      if (d.error || !d.price) { failed.push(asset); continue; }
+      prices[asset]  = d.price;
+      if (d.spread   !== undefined) spreadMap[asset]   = d.spread;
+      if (d.leverage !== undefined) leverageMap[asset] = d.leverage;
+      if (d.candles?.length) {
+        candleMap[asset]  = d.candles;
+        seriesMap[asset]  = d.candles.map(c => c.c);
+      }
+    }
+
+    // ── 3. Para activos del estado que no vinieron en /snapshot,
+    //       intentar fetch individual /candles/{asset}?tf=1m&limit=200 ─────────
+    const missing = assets.filter(a => !prices[a] || !seriesMap[a]);
+    if (missing.length > 0) {
+      await Promise.allSettled(missing.map(async a => {
+        try {
+          const r = await fetch(`${bridgeUrl}/candles/${a}?tf=1m&limit=200`, {
+            signal: AbortSignal.timeout(6000),
+          });
+          if (!r.ok) return;
+          const cd = await r.json() as { candles?: Candle[]; asset?: string };
+          if (cd.candles?.length) {
+            const last = cd.candles[cd.candles.length - 1];
+            prices[a]    = last.c;
+            candleMap[a] = cd.candles;
+            seriesMap[a] = cd.candles.map(c => c.c);
+          }
+        } catch { /* activo no disponible en este broker */ }
+      }));
+    }
+
+    // ── 4. Volatility shock basado en retornos de BTC ────────────────────────
+    const btcSeries = seriesMap["BTCUSD"] ?? seriesMap["BTCUSDT"] ?? [];
+    let shock = 0.28;
+    if (btcSeries.length > 10) {
+      const absRet = btcSeries
+        .slice(1)
+        .map((v, i) => Math.abs((v - btcSeries[i]) / Math.max(btcSeries[i], 1e-9)));
+      const meanRet = absRet.reduce((s, v) => s + v, 0) / absRet.length;
+      shock = Math.max(0.08, Math.min(1.25, meanRet * 220));
+    }
+
+    const ok = Object.keys(prices).filter(a => prices[a] > 0).length;
+    const sourceNote = failed.length > 0
+      ? `MT5 Bridge: ${ok} activos OK · ${failed.length} sin datos`
+      : `MT5 Bridge: ${ok} activos OK`;
+
+    return { prices, seriesMap, candleMap, spreadMap, leverageMap, shock, sourceNote };
+  }
+
+    // ─── fetchMT5Symbols: lee activos disponibles del broker ──────────────────
+  // Llama a /symbols del bridge (nuevo endpoint) y actualiza la lista de activos
+  async function fetchMT5Symbols() {
+    if (mt5Status !== "connected" && mt5StatusRef.current !== "connected") return;
+    try {
+      const r = await fetch(`${mt5Url}/symbols`, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) return;
+
+      // Bridge v4 devuelve: { symbols: [...], resolved_map: { "BTCUSD": "BTCUSDT", ... }, total: N }
+      const data = await r.json() as {
+        symbols: Array<{
+          name: string; description: string;
+          spread: number; bid: number; ask: number;
+          trade_mode: number; filling_mode: number;
+          digits: number; contract_size: number;
+          volume_min: number; volume_step: number;
+          currency_base: string; currency_profit: string;
+          trade_allowed: boolean; visible: boolean;
+        }>;
+        resolved_map?: Record<string, string>; // TraderLab name → broker symbol
+        total: number;
+      };
+
+      if (!data.symbols?.length) return;
+
+      // ── Invertir resolved_map: broker_symbol → TraderLab name ───────────────
+      const brokerToTL: Record<string, string> = {};
+      if (data.resolved_map) {
+        Object.entries(data.resolved_map).forEach(([tl, broker]) => {
+          brokerToTL[broker] = tl;
+        });
+      }
+
+      // ── Filtrar: excluir solo activos con trade_mode=0 (solo conversión/deshabilitado)
+      // trade_mode: 0=disabled, 1=long only, 2=short only, 4=full — aceptar 1,2,4
+      const tradeable = data.symbols.filter(s => s.trade_mode !== 0 && s.bid > 0);
+
+      // ── Mapear: para cada activo tradeable, usar nombre TraderLab si existe ──
+      const mapped = tradeable.map(s => {
+        const tlName = brokerToTL[s.name] ?? s.name;
+        const known  = ASSET_CATALOG[tlName] ?? ASSET_CATALOG[s.name];
+        const cat    = known?.category ?? inferCategoryFromSymbol(s.name, s.description, s.currency_base, s.currency_profit);
+        return {
+          name:         tlName,
+          brokerName:   s.name,
+          category:     cat,
+          spread:       s.spread,
+          contractSize: s.contract_size,
+          digits:       s.digits,
+          volumeMin:    s.volume_min,
+        };
+      });
+
+      setAvailableSymbols(mapped);
+      pushToast(`📡 ${mapped.length} activos disponibles en el broker`, "info");
+
+      // ── Agregar TODOS los activos tradeables al assets state ─────────────────
+      // Estrategia: incluir todo lo que el broker tiene tradeable
+      // Prioridad: base 4 activos + catálogo conocido + todos los del broker
+      const tlNames = mapped.map(m => m.name);
+      const base = ["BTCUSD","ETHUSD","XAGUSD","XAUUSD"];
+
+      setAssets(() => {
+        // Orden: primero los base, luego del catálogo, luego el resto del broker
+        const fromCatalog = tlNames.filter(n => ASSET_CATALOG[n] && !base.includes(n));
+        const fromBroker  = tlNames.filter(n => !ASSET_CATALOG[n] && !base.includes(n));
+        return [...new Set([...base, ...fromCatalog, ...fromBroker])];
+      });
+
+      // ── También actualizar ASSET_CATALOG en runtime para activos nuevos ──────
+      // Esto evita que calcPosSize use parámetros default incorrectos
+      mapped.forEach(m => {
+        if (!ASSET_CATALOG[m.name]) {
+          // Parámetros conservadores para activos desconocidos
+          (ASSET_CATALOG as Record<string, typeof ASSET_CATALOG[string]>)[m.name] = {
+            category:    m.category,
+            digits:      m.digits ?? 5,
+            contractSize: m.contractSize ?? 1,
+            leverage:    50,
+            minAtr:      0.0001,
+            spreadPct:   m.spread > 0 ? m.spread / Math.max(m.spread, 0.0001) * 0.01 : 0.02,
+            sessions:    ["NY","London","Asia","Post-NY"],
+          };
+        }
+      });
+
+    } catch (e) {
+      console.warn("[fetchMT5Symbols] error:", e);
+    }
+  }
+
+  // ── Infiere categoría desde nombre, descripción y monedas base/profit ───────
+  function inferCategoryFromSymbol(
+    name: string, desc: string, currBase: string, currProfit: string
+  ): AssetCategory {
+    const n = name.toUpperCase();
+    const d = (desc ?? "").toLowerCase();
+    // Crypto: moneda base no es divisa fiat conocida
+    const FIATS = new Set(["USD","EUR","GBP","JPY","CHF","AUD","CAD","NZD","HKD","SGD","NOK","SEK"]);
+    const cryptoNames = ["BTC","ETH","XRP","ADA","SOL","DOT","LINK","LTC","BNB","DOGE","AVAX","MATIC","USDT","POL"];
+    if (cryptoNames.some(c => n.startsWith(c) || n.includes(c+"USD") || n.includes(c+"USDT"))) return "crypto";
+    // Metales preciosos
+    if (n.startsWith("XAU") || n.startsWith("XAG") || n.startsWith("XPT") || n.startsWith("XPD")) return "metals";
+    if (d.includes("gold") || d.includes("silver") || d.includes("platinum")) return "metals";
+    // Índices
+    if (d.includes("index") || d.includes("indice") || d.includes("500") || d.includes("nasdaq") || d.includes("dow")) return "indices";
+    if (["US30","US500","USTEC","GER40","UK100","JP225","AUS200","FRA40"].some(x => n.includes(x))) return "indices";
+    // Energía
+    if (d.includes("crude") || d.includes("oil") || d.includes("brent") || d.includes("gas")) return "energy";
+    if (["OIL","WTI","BRENT","USOIL","UKOIL","NATGAS"].some(x => n.includes(x))) return "energy";
+    // Forex: ambas monedas son fiat
+    if (currBase && currProfit && FIATS.has(currBase) && FIATS.has(currProfit)) {
+      // Major: una de las dos es USD
+      if (currBase === "USD" || currProfit === "USD") return "forex_major";
+      return "forex_minor";
+    }
+    if (n.length === 6 && FIATS.has(n.slice(0,3)) && FIATS.has(n.slice(3))) {
+      return (n.includes("USD") ? "forex_major" : "forex_minor");
+    }
+    // Commodities
+    if (d.includes("wheat") || d.includes("corn") || d.includes("cotton") || d.includes("coffee") || d.includes("sugar")) return "commodities";
+    // Acciones
+    if (d.includes("stock") || d.includes("share") || d.includes("corp") || d.includes("inc")) return "stocks";
+    return "other";
+  }
+
+  // Alias para compatibilidad con código existente
+  function inferCategory(path: string, name: string): AssetCategory {
+    return inferCategoryFromSymbol(name, path, "", "");
+  }
+
+  // ─── updateAssetIntelligence: actualiza el aprendizaje tras cerrar un trade ─
+  function updateAssetIntelligence(trade: ClosedTrade) {
+    const symbol = trade.asset;
+    const session = getSessionProfile().name;
+    const hour = new Date().getUTCHours();
+    const isWin = trade.pnl > 0;
+    const rr = (trade as ClosedTrade & {rr?:number}).rr ?? 0;
+
+    setAssetIntelligence(prev => {
+      const existing = prev[symbol] ?? {
+        symbol, category: getAssetCategory(symbol),
+        totalTrades: 0, winRate: 0, avgRR: 0, avgPnl: 0, profitFactor: 1,
+        sessionStats: {}, modeStats: {}, hourlyStats: {},
+        optimalSLMult: 1.0, optimalTPMult: 2.0, avgSpreadPct: getAssetCatalog(symbol).spreadPct,
+        spreadByHour: {}, avgVolatility: 0, trendStrength: 0,
+        bestMode: "scalping", bestSession: "NY", bestHourUTC: 14,
+        correlations: {}, lastUpdated: new Date().toISOString(),
+      } as AssetIntelligence;
+
+      const n = existing.totalTrades;
+      const newTotal = n + 1;
+
+      // Session stats
+      const ss = existing.sessionStats[session] ?? { trades:0, wins:0, pnl:0, avgSpread:0 };
+      const newSS = { trades: ss.trades+1, wins: ss.wins+(isWin?1:0), pnl: ss.pnl+trade.pnl, avgSpread: ss.avgSpread };
+
+      // Mode stats
+      const ms = existing.modeStats[trade.mode] ?? { trades:0, wins:0, pnl:0, avgRR:0 };
+      const newMS = { trades: ms.trades+1, wins: ms.wins+(isWin?1:0), pnl: ms.pnl+trade.pnl, avgRR: (ms.avgRR*ms.trades+rr)/Math.max(ms.trades+1,1) };
+
+      // Hourly stats
+      const hs = existing.hourlyStats[hour] ?? { trades:0, wins:0, pnl:0 };
+      const newHS = { trades: hs.trades+1, wins: hs.wins+(isWin?1:0), pnl: hs.pnl+trade.pnl };
+
+      // Running WR y PnL
+      const allWins  = Object.values({...existing.sessionStats, [session]: newSS}).reduce((s,v)=>s+v.wins,0);
+      const newWR    = allWins / newTotal;
+      const newAvgPnl= (existing.avgPnl * n + trade.pnl) / newTotal;
+      const newAvgRR = (existing.avgRR * n + rr) / newTotal;
+
+      // Best session y best mode
+      const sessEntries = Object.entries({...existing.sessionStats, [session]: newSS});
+      const bestSess = sessEntries.sort((a,b) => (b[1].wins/Math.max(b[1].trades,1)) - (a[1].wins/Math.max(a[1].trades,1)))[0]?.[0] ?? "NY";
+      const modeEntries = Object.entries({...existing.modeStats, [trade.mode]: newMS});
+      const bestMode = modeEntries.sort((a,b) => (b[1].pnl/Math.max(b[1].trades,1)) - (a[1].pnl/Math.max(a[1].trades,1)))[0]?.[0] ?? "scalping";
+
+      // Best hour
+      const hourEntries = Object.entries({...existing.hourlyStats, [hour]: newHS});
+      const bestHour = hourEntries.sort((a,b) => (b[1].pnl/Math.max(b[1].trades,1)) - (a[1].pnl/Math.max(a[1].trades,1)))[0];
+
+      const updated: AssetIntelligence = {
+        ...existing,
+        totalTrades: newTotal,
+        winRate: newWR,
+        avgRR: newAvgRR,
+        avgPnl: newAvgPnl,
+        sessionStats: { ...existing.sessionStats, [session]: newSS },
+        modeStats:    { ...existing.modeStats,    [trade.mode]: newMS },
+        hourlyStats:  { ...existing.hourlyStats,  [hour]: newHS },
+        bestSession: bestSess,
+        bestMode: bestMode,
+        bestHourUTC: bestHour ? Number(bestHour[0]) : 14,
+        lastUpdated: new Date().toISOString(),
+      };
+      const next = { ...prev, [symbol]: updated };
+      assetIntelRef.current = next;
+      return next;
+    });
+  }
+
+  // ─── updateCorrelationMatrix: recalcula Pearson entre todos los activos ────
+  // Se llama cada 5 minutos o cuando llegan velas nuevas
+  function updateCorrelationMatrix(seriesData: Record<string, number[]>) {
+    const symbols = Object.keys(seriesData).filter(s => seriesData[s].length >= 20);
+    if (symbols.length < 2) return;
+
+    const matrix: Record<string, Record<string, number>> = {};
+    for (const a of symbols) {
+      matrix[a] = {};
+      for (const b of symbols) {
+        if (a === b) { matrix[a][b] = 1; continue; }
+        // Calcular solo si no existe o es > 5min viejo
+        const existing = correlationRef.current[a]?.[b];
+        matrix[a][b] = existing !== undefined ? existing : calcPearsonCorrelation(seriesData[a], seriesData[b]);
+      }
+    }
+    correlationRef.current = matrix;
+    setCorrelationMatrix(matrix);
+  }
+
+  async function syncRealData(forceUrl?: string) {
+    setIsSyncing(true);
+    // Usar ref síncrono — no depender de useState que puede ser stale
+    const isConn = mt5StatusRef.current === "connected" || mt5Status === "connected";
+    const usingBridge = mt5Enabled && isConn;
+    const effectiveUrl = forceUrl ?? mt5Url;
+
+    if (!usingBridge) {
+      setFeedStatus(mt5Enabled
+        ? "⚠ Bridge configurado pero no conectado — abrí bridge.py y hacé 'Test conexión'"
+        : "⚠ Bridge MT5 no activado — activalo en ⚙ Config"
+      );
+      setLiveReady(false);
+      setIsSyncing(false);
+      return;
+    }
+    try {
+      const payload = await fetchRealMarketSnapshot(prevPricesRef.current, effectiveUrl, true);
+
+      setPrices(payload.prices);
+      setSeries(prev => {
+        const next = { ...prev };
+        assets.forEach(a => { const s = payload.seriesMap[a]; if (s?.length) next[a] = s; else next[a] = [...(prev[a] ?? []).slice(-159), payload.prices[a]]; });
+        seriesRef.current = next;
+        return next;
+      });
+      setCandles(prev => {
+        const next = { ...prev };
+        assets.forEach(a => { if (payload.candleMap[a]?.length) next[a] = payload.candleMap[a]; });
+        return next;
+      });
+
+      // Spread real del broker (bid-ask directo de MT5/PrimeXBT)
+      if (payload.spreadMap && Object.keys(payload.spreadMap).length > 0)
+        setMt5SpreadMap(payload.spreadMap);
+
+      // Leverage real del broker — si llega, reemplaza los valores hardcodeados
+      if (payload.leverageMap && Object.keys(payload.leverageMap).length > 0)
+        setMt5LeverageMap(payload.leverageMap);
+
+      setVolumeShock(payload.shock);
+
+      // Fetch MTF adicional: 5m/15m para ejecución scalping + 4H/1D para Wyckoff macro
+      if (usingBridge) {
+        try {
+          const mtfFetches = await Promise.allSettled(
+            assets.map(async (a) => {
+              const r = await fetch(
+                `${effectiveUrl}/candles_mtf/${a}?limit_5m=70&limit_15m=55&limit_4h=150&limit_1d=90`,
+                { signal: AbortSignal.timeout(8000) }
+              );
+              if (!r.ok) throw new Error(`HTTP ${r.status}`);
+              const d = await r.json() as {
+                candles_5m: Candle[]; candles_15m: Candle[];
+                candles_4h: Candle[]; candles_1d: Candle[];
+              };
+              return {
+                a,
+                c5m:  d.candles_5m  ?? [],
+                c15m: d.candles_15m ?? [],
+                c4h:  d.candles_4h  ?? [],
+                c1d:  d.candles_1d  ?? [],
+              };
+            })
+          );
+          const new5m:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+          const new15m: Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+          const new4h:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+          const new1d:  Record<Asset, Candle[]> = {} as Record<Asset, Candle[]>;
+          mtfFetches.forEach(r => {
+            if (r.status === "fulfilled") {
+              new5m[r.value.a]  = r.value.c5m;
+              new15m[r.value.a] = r.value.c15m;
+              new4h[r.value.a]  = r.value.c4h;
+              new1d[r.value.a]  = r.value.c1d;
+            }
+          });
+          setCandles5m(prev  => ({ ...prev, ...new5m }));
+          setCandles15m(prev => ({ ...prev, ...new15m }));
+          setCandles4h(prev  => ({ ...prev, ...new4h }));
+          setCandles1d(prev  => ({ ...prev, ...new1d }));
+        } catch (e) {
+          console.warn("[TraderLab] MTF fetch falló:", e);
+          // Sin velas MTF — Wyckoff queda en neutral, scalping usa sintético
+        }
+      }
+
+      // ── Calcular régimen de mercado por activo ──────────────────────────────
+      const newRegimes: Record<string, RegimeAnalysis> = {};
+      assets.forEach(a => {
+        try { newRegimes[a] = calcRegime(a); } catch { /* ignorar */ }
+      });
+      regimeRef.current = newRegimes;
+      setRegimeMap(newRegimes);
+
+      // ── Groq Calibrador — corre en background cada 15 min ────────────────────
+      void runGroqCalibrator();
+
+      const timeStr = new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      setFeedStatus(`📡 ${timeStr} — ${payload.sourceNote}`);
+      setLiveReady(true);
+      updateCorrelationMatrix(seriesRef.current);
+      // Auto-cargar símbolos del broker si aún no se cargaron
+      if (mt5Enabled && mt5Status === "connected") void fetchMT5Symbols();
+    } catch (e) {
+      setFeedStatus("❌ Feed no disponible");
+      setLiveReady(false);
+      pushToast(`Error sync: ${e instanceof Error ? e.message : "red"}`, "error");
+    } finally { setIsSyncing(false); }
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PYRAMIDING — agrega lote a posición existente cuando:
+  // 1. TP1 fue alcanzado (posición en breakeven, sin riesgo extra)
+  // 2. Nueva señal en 15m alineada con la dirección existente
+  // 3. CVD confirma (no divergente vs la posición)
+  // Size del add = 0.5× del original. MAX 2 adds por posición.
+  // ═══════════════════════════════════════════════════════════════════════════
+  async function tryPyramidAdd(pos: Position) {
+    if (!pos.tp1Hit) return;                    // solo si TP1 ya tocado
+    if ((pos.pyramidCount ?? 0) >= 2) return;  // máximo 2 adds
+    if (!liveReady) return;
+    if (circuitOpenRef.current) return;
+
+    // Generar señal en 15m para el mismo activo
+    const signal15m = generateSignal("scalping", pos.signal.asset);
+
+    // Condiciones para agregar
+    if (signal15m.direction !== pos.signal.direction) return;  // debe ser misma dirección
+    if (signal15m.confidence < 55) return;                     // confianza mínima más alta para add
+    if (signal15m.indicators?.cvd?.divergence) return;         // sin divergencia CVD
+
+    // No agregar si hay posición correlacionada en la misma dirección
+    const otherPositions = openPositionsRef.current.filter(p => p.id !== pos.id);
+    if (hasCorrConflict(pos.signal.asset, pos.signal.direction, otherPositions)) return;
+
+    const lrn       = learningRef.current;
+    const realEquity = (mt5Enabled && mt5Equity !== null && mt5Equity > 0) ? mt5Equity : equity;
+    const addSize   = pos.size * 0.5;  // 50% del lote original
+    const addMargin = (addSize * (contractSize[pos.signal.asset] ?? 1) * signal15m.entry) /
+                      getLeverage(pos.signal.asset);
+
+    // Guard de margen para el add
+    const totalMarginUsed = openPositionsRef.current.reduce((a, p) => a + p.marginUsed, 0);
+    if ((totalMarginUsed + addMargin) / realEquity > 0.35) return;  // max 35% margen total
+
+    // Crear señal de pyramid con campos propios
+    const pyramidSignal: Signal = {
+      ...signal15m,
+      isPyramidAdd:   true,
+      isReversalSetup: false,
+      wyckoffSizeMult: 1.0,
+    };
+
+    if (mt5Enabled && mt5Status === "connected") {
+      await sendToMT5(pyramidSignal, addSize, addMargin, (ticket, execPrice) => {
+        const addEntry = execPrice ?? pyramidSignal.entry;
+        // Actualizar el pyramidCount de la posición original
+        setOpenPositions(prev => prev.map(p =>
+          p.id === pos.id
+            ? { ...p, pyramidCount: (p.pyramidCount ?? 0) + 1 }
+            : p
+        ));
+        // Agregar la nueva posición add como posición independiente (con ref a padre)
+        setOpenPositions(prev => [...prev, {
+          id: ticket ?? Date.now(),
+          signal: { ...pyramidSignal, entry: addEntry },
+          size: addSize, marginUsed: addMargin,
+          openedAt: new Date().toISOString(),
+          peak: addEntry, trough: addEntry,
+          parentId: pos.id,  // referencia a la posición original
+        }]);
+        pushToast(
+          `📈 PYRAMID +${addSize.toFixed(3)}L ${pos.signal.asset} ${pos.signal.direction}` +
+          ` @ ${addEntry.toFixed(2)} | add #${(pos.pyramidCount ?? 0) + 1}`,
+          "success"
+        );
+      });
+    }
+  }
+
+  async function runAutoScan() {
+    console.log(`[AUTOSCAN] iniciando | assets=${assets.length} liveReady=${liveReady} mt5=${mt5Status}`);
+    // Sincronizar datos frescos antes de escanear
+    if (mt5Enabled && mt5Status === "connected") await syncRealData();
+    const prof       = getSessionProfile();
+    const sessionName = prof.name.split(" ")[0]; // "NY", "London", "Asia", etc.
+    const hourUTC     = new Date().getUTCHours();
+    const ALL_ASSETS  = assets;
+
+    // ── Filtrar por sesión si es crypto-only ────────────────────────────────
+    const sessionFiltered = prof.isCryptoOnly
+      ? ALL_ASSETS.filter(a => isCryptoAsset(a))
+      : ALL_ASSETS.filter(a => {
+          // Excluir activos no apropiados para la sesión actual según catálogo
+          const cat = getAssetCatalog(a);
+          if (cat.sessions.length === 0) return true; // sin restricción
+          return cat.sessions.some(s => sessionName.includes(s) || s.includes(sessionName));
+        });
+
+    if (sessionFiltered.length === 0) return;
+
+    // ── Calcular opportunityScore y ordenar ─────────────────────────────────
+    const openSymbols = openPositionsRef.current.map(p => p.signal.asset);
+    const scored = sessionFiltered.map(a => ({
+      asset: a,
+      score: calcOpportunityScore(
+        a, assetIntelRef.current[a], sessionName, hourUTC,
+        openSymbols, correlationRef.current
+      )
+    })).sort((a, b) => b.score - a.score);
+
+    // Actualizar correlación cada 5 ciclos (~1-2min con scan cada 15s)
+    if (Math.random() < 0.2) {
+      updateCorrelationMatrix(seriesRef.current);
+    }
+
+    const prevLen = openPositionsRef.current.length;
+
+    // ── Scalping: todos ordenados por score ──────────────────────────────────
+    const scalpLog: string[] = [];
+    for (const { asset: a, score: sc } of scored) {
+      if (!pricesRef.current[a]) { scalpLog.push(`${a}:nodata`); continue; }
+      await createSignalAndExecute("scalping", a, false);
+      scalpLog.push(`${a}(${sc.toFixed(0)})`);
+    }
+    console.log(`[AUTOSCAN] scalp [${prof.name}] → ${scalpLog.join(" | ")} | openPos=${openPositionsRef.current.length}`);
+
+    // ── Intradía: solo en sesiones institucionales (no crypto-only) ─────────
+    if (!prof.isCryptoOnly) {
+      const intradLog: string[] = [];
+      for (const { asset: a, score: sc } of scored) {
+        if (!pricesRef.current[a]) { intradLog.push(`${a}:nodata`); continue; }
+        await createSignalAndExecute("intradia", a, false);
+        intradLog.push(`${a}(${sc.toFixed(0)})`);
+      }
+      console.log(`[AUTOSCAN] intradía → ${intradLog.join(" | ")}`);
+    }
+
+    // ── Pyramiding ───────────────────────────────────────────────────────────
+    const posWithTP1 = openPositionsRef.current.filter(p =>
+      p.tp1Hit && !p.isPyramidAdd && (p.pyramidCount ?? 0) < 2
+    );
+    for (const pos of posWithTP1) await tryPyramidAdd(pos);
+
+    const opened = openPositionsRef.current.length - prevLen;
+    if (opened > 0) pushToast(`🤖 ${prof.emoji} ${prof.name}: ${opened} posición(es) abierta(s)`, "success");
+  }
+
+  // ── WakeLock: evitar que la PC se suspenda mientras el bot está activo ───────
+  // Screen Wake Lock API — soportado en Chrome/Edge, ignorado en Firefox/Safari
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+
+  useEffect(() => {
+    if (!autoScan) {
+      // Liberar WakeLock cuando el bot está detenido
+      void wakeLockRef.current?.release().then(() => { wakeLockRef.current = null; });
+      return;
+    }
+    // Solicitar WakeLock cuando el bot está activo
+    const requestWakeLock = async () => {
+      try {
+        if ("wakeLock" in navigator) {
+          wakeLockRef.current = await (navigator as Navigator & {
+            wakeLock: { request: (type: string) => Promise<WakeLockSentinel> }
+          }).wakeLock.request("screen");
+          wakeLockRef.current.addEventListener("release", () => {
+            // Re-adquirir si fue liberado por el sistema (cambio de pestaña)
+            if (autoScan) void requestWakeLock();
+          });
+          console.log("[TraderLab] WakeLock activo — la PC no se suspenderá");
+        }
+      } catch { /* ignorar si no está soportado */ }
+    };
+    void requestWakeLock();
+    return () => { void wakeLockRef.current?.release(); };
+  }, [autoScan]);
+
+  // Al arrancar: si mt5Enabled estaba guardado, reconectar automáticamente
+  useEffect(() => {
+    if (mt5Enabled) {
+      void (async () => {
+        const ok = await testMT5Bridge();
+        if (ok) {
+          // Pasar URL explícita — evita stale closure de mt5Url en el primer render
+          await syncRealData(mt5Url);
+        }
+        // Si no conectó: el banner en la UI explica qué hacer
+      })();
+    }
+    // Sin bridge activo: no hacer nada — evitar toast molesto al arrancar
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);  // solo al montar
+  // Sync de posiciones MT5 cada 1 segundo si hay posiciones abiertas
+  useEffect(() => {
+    if (!mt5Enabled || mt5Status !== "connected") return;
+    const id = window.setInterval(() => {
+      const hasOpenPositions = mt5PositionsRef.current.length > 0 || openPositionsRef.current.length > 0;
+      if (hasOpenPositions) void syncMT5State();
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [mt5Enabled, mt5Status]);
+
+  // AutoScan: genera señales y sincroniza datos de mercado
+  useEffect(() => {
+    if (!autoScan) return;
+    const ms = Math.max(8, scanEverySec) * 1000;
+    const id = window.setInterval(() => {
+      void (async () => {
+        // CRÍTICO: sync primero, luego scan — sin datos frescos no tiene sentido scanear
+        await syncRealData();
+        await runAutoScan();
+        if (mt5Enabled && mt5Status === "connected") void syncMT5State();
+      })();
+    }, ms);
+    return () => window.clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoScan, scanEverySec, mt5Enabled, mt5Status]);
+
+  function runBacktest() {
+    if (!liveReady) { pushToast("Sincronice primero.", "warning"); return; }
+    const simulated: ClosedTrade[] = [];
+    const returns: number[] = [];
+    let equityBt = 100;
+    const lrn = learningRef.current;
+    for (let i = 0; i < backtestSize; i++) {
+      const sa = assets[i % assets.length];
+      const mode: Mode = i % 2 === 0 ? "scalping" : "intradia";
+      const vals = series[sa];
+      const idx = Math.max(25, vals.length - (backtestSize + 25)) + i;
+      if (idx >= vals.length - 2) break;
+      const hist = vals.slice(0, idx + 1);
+      const entry = vals[idx];
+      const maFast = avg(hist.slice(-5)); const maSlow = avg(hist.slice(-13));
+      const dir: Direction = maFast >= maSlow ? "LONG" : "SHORT";
+      const atr = Math.max(calcAtrFromSeries(hist, 20), entry * 0.0004);
+      const sd = atr * (mode === "scalping" ? 1.05 : 1.65);
+      const td = atr * (mode === "scalping" ? lrn.scalpingTpAtr : lrn.intradayTpAtr);
+      const stop = dir === "LONG" ? entry - sd : entry + sd;
+      const tp = dir === "LONG" ? entry + td : entry - td;
+      const horizon = mode === "scalping" ? 6 : 22;
+      let exit = vals[Math.min(idx + horizon, vals.length - 1)];
+      let result: ExitReason = "REVERSAL";
+      for (let j = idx + 1; j <= Math.min(idx + horizon, vals.length - 1); j++) {
+        const px = vals[j];
+        if (dir === "LONG" ? px >= tp : px <= tp) { exit = px; result = "TP"; break; }
+        if (dir === "LONG" ? px <= stop : px >= stop) { exit = px; result = "SL"; break; }
+      }
+      const riskUsd = Math.max(0.5, equityBt * (riskPct / 100));
+      const size = riskUsd / Math.max(sd, entry * 0.0003);
+      // Costos reales: spread estimado 0.06% + comisión 0.02% ida y vuelta
+      const costPct   = mode === "scalping" ? 0.0010 : 0.0006; // scalping más caro por mayor spread relativo
+      const tradeCost = entry * size * costPct;
+      const rawPnl    = dir === "LONG" ? (exit - entry) * size : (entry - exit) * size;
+      const pnl       = rawPnl - tradeCost;
+      equityBt += pnl;
+      simulated.push({ id: Date.now() + i, asset: sa, mode, direction: dir, entry, exit, pnl, pnlPct: (pnl / Math.max((size * entry) / getLeverage(sa), 0.01)) * 100, result, openedAt: new Date(Date.now() - 60000 * 30).toISOString(), closedAt: new Date().toISOString(), source: "backtest" });
+      returns.push(pnl);
+    }
+    if (!simulated.length) { pushToast("Sin velas suficientes.", "warning"); return; }
+    const wins = simulated.filter(t => t.pnl > 0); const losses = simulated.filter(t => t.pnl <= 0);
+    const gp = wins.reduce((a, t) => a + t.pnl, 0); const gl = Math.abs(losses.reduce((a, t) => a + t.pnl, 0));
+    setLastBacktest({ total: simulated.length, winRate: (wins.length / simulated.length) * 100, expectancy: avg(returns), profitFactor: gl > 0 ? gp / gl : gp, sharpe: std(returns) > 0 ? avg(returns) / std(returns) : 0, maxDrawdown: calcDrawdown(simulated), grossProfit: gp, grossLoss: gl, avgWin: wins.length ? gp / wins.length : 0, avgLoss: losses.length ? gl / losses.length : 0 });
+    setBacktestTrades(simulated);
+    pushToast(`✅ Backtest: ${simulated.length} trades | WR ${((wins.length / simulated.length) * 100).toFixed(1)}%`, "success");
+  }
+
+  // ─── Render ──────────────────────────────────────
+  // Historial de confidence scores por activo — para z-score normalizado
+  const signalScoreHistoryRef = React.useRef<Partial<Record<string, number[]>>>({});
+
+  // Ref para el contenedor del chart — preventDefault nativo (passive events)
+  const chartWrapRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    const el = chartWrapRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => e.preventDefault();
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, []);
+  const NAV = [
+    { id: "trading"  as AppTab, label: "Trading",  icon: "📈" },
+    { id: "quant"    as AppTab, label: "Quant BS",  icon: "📐" },
+    { id: "historial" as AppTab, label: "Historial", icon: "📒" },
+    { id: "aprendizaje" as AppTab, label: "Aprendizaje", icon: "🧠" },
+    { id: "activos" as AppTab, label: "Activos IA", icon: "🌐" },
+    { id: "configuracion" as AppTab, label: "Config", icon: "⚙️" },
+  ];
+
+  return (
+    <div style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--text)", fontFamily: "'DM Sans',system-ui,sans-serif" }}>
+      <ToastList toasts={toasts} onRemove={removeToast} />
+
+      {/* Nav */}
+      <nav style={{ position: "sticky", top: 0, zIndex: 100, background: "rgba(10,11,16,0.96)", backdropFilter: "blur(16px)", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", padding: "0 24px", height: 52, gap: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginRight: 20 }}>
+          <span style={{ fontWeight: 900, fontSize: 14, letterSpacing: "-0.03em",
+            background: "linear-gradient(135deg,#818cf8,#c4b5fd)",
+            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>TraderLab</span>
+          <span style={{ fontSize: 10, color: "var(--muted)", background: "rgba(255,255,255,0.05)",
+            padding: "2px 6px", borderRadius: 4, fontWeight: 700, letterSpacing: "0.04em" }}>v8</span>
+        </div>
+        <div className="nav-tabs" style={{ flex: 1 }}>
+          {NAV.map(t => (
+            <React.Fragment key={t.id}>
+              {t.id === "quant" && (
+                <div style={{ width: 1, height: 20, background: "var(--border-md)",
+                  alignSelf: "center", margin: "0 4px", flexShrink: 0 }} />
+              )}
+              <button onClick={() => setAppTab(t.id)}
+                className={`nav-tab${appTab === t.id ? " active" : ""}${t.id === "quant" ? " quant-tab" : ""}`}
+                style={t.id === "quant" && appTab === t.id ? {
+                  background: "rgba(20,184,166,0.12)",
+                  color: "#5eead4",
+                  borderColor: "rgba(20,184,166,0.28)"
+                } : t.id === "quant" ? { color: "#5eead4" } : {}}>
+                {t.icon} {t.label}
+                {t.id === "trading" && openPositions.length > 0 && (
+                  <span style={{ background: "#10b981", color: "#fff", fontSize: 10,
+                    fontWeight: 800, borderRadius: "50%", width: 14, height: 14,
+                    display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {openPositions.length}
+                  </span>
+                )}
+              </button>
+            </React.Fragment>
+          ))}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <AiBadge status={aiStatus} onTest={testAiConnection} latency={aiLatency} />
+          {usingGroq && (
+            <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 8px", borderRadius: 6,
+              background: groqRateInfo.paused ? "rgba(239,68,68,0.12)" : groqRateInfo.calls >= GROQ_MAX_RPM - 5 ? "rgba(245,158,11,0.12)" : "rgba(16,185,129,0.08)",
+              border: `1px solid ${groqRateInfo.paused ? "rgba(239,68,68,0.3)" : groqRateInfo.calls >= GROQ_MAX_RPM - 5 ? "rgba(245,158,11,0.3)" : "rgba(16,185,129,0.2)"}`,
+              fontSize: 10, fontWeight: 700,
+              color: groqRateInfo.paused ? "#ef4444" : groqRateInfo.calls >= GROQ_MAX_RPM - 5 ? "#f59e0b" : "#10b981",
+              cursor: "pointer", title: "Click para pausar/reanudar Groq manualmente" }}
+              onClick={() => {
+                groqPausedRef.current = !groqPausedRef.current;
+                setGroqRateInfo(p => ({ ...p, paused: groqPausedRef.current, pauseUntil: 0 }));
+                pushToast(groqPausedRef.current ? "⏸ Groq pausado manualmente" : "▶ Groq reanudado", "info");
+              }}>
+              {groqRateInfo.paused ? "⏸" : "⚡"} {groqRateInfo.calls}/{GROQ_MAX_RPM} rpm
+            </div>
+          )}
+          {circuitOpen && (
+            <div style={{ padding: "3px 10px", borderRadius: 6, background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.35)", fontSize: 11, fontWeight: 800, color: "#ef4444",
+              cursor: "pointer" }}
+              title="Click para resetear el circuit breaker manualmente"
+              onClick={() => { circuitOpenRef.current = false; setCircuitOpen(false); pushToast("🟢 Circuit breaker reseteado manualmente", "info"); }}>
+              🔴 CIRCUIT BREAKER — click para resetear
+            </div>
+          )}
+          {autoScan && (
+            <div style={{ padding: "3px 8px", borderRadius: 6,
+              background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.2)",
+              fontSize: 10, fontWeight: 700, color: "#10b981", display: "flex", alignItems: "center", gap: 4 }}
+              title="Bot activo — WakeLock activado si el navegador lo soporta">
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981",
+                animation: "pulse 1.5s infinite", display: "inline-block" }} />
+              BOT ON
+            </div>
+          )}
+          <div style={{ fontSize: 10, color: liveReady ? "#10b981" : "#6b7280", display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ width: 5, height: 5, borderRadius: "50%", background: liveReady ? "#10b981" : "#6b7280", animation: liveReady ? "pulse 2s infinite" : "none", display: "inline-block" }} />
+            {feedStatus}
+          </div>
+          {/* Badge sesión activa */}
+          {(() => { try {
+            const sp = getSessionProfile();
+            const bgMap: Record<string,string> = {
+              "NY":             "rgba(16,185,129,0.15)",
+              "London":         "rgba(59,130,246,0.15)",
+              "Finde — Crypto": "rgba(168,85,247,0.15)",
+              "Asia — Crypto":  "rgba(245,158,11,0.15)",
+              "Post-NY — Crypto":"rgba(99,102,241,0.15)",
+            };
+            const colorMap: Record<string,string> = {
+              "NY":             "#10b981",
+              "London":         "#3b82f6",
+              "Finde — Crypto": "#a855f7",
+              "Asia — Crypto":  "#f59e0b",
+              "Post-NY — Crypto":"#818cf8",
+            };
+            const bg    = bgMap[sp.name]    ?? "rgba(99,102,241,0.12)";
+            const color = colorMap[sp.name] ?? "#a5b4fc";
+            return (
+              <div style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20,
+                background: bg, color, border: `1px solid ${color}40`, whiteSpace: "nowrap" }}
+                title={sp.description}>
+                {sp.emoji} {sp.name}
+                {sp.isCryptoOnly && <span style={{ marginLeft: 5, opacity: 0.8 }}>BTC·ETH</span>}
+              </div>
+            );
+          } catch(e){console.error("[render]",e);return null;}})()}
+        </div>
+      </nav>
+
+      {/* Header metrics + Equity Curve */}
+      <div style={{ background: "rgba(255,255,255,0.02)", borderBottom: "1px solid rgba(255,255,255,0.05)", padding: "12px 20px" }}>
+        <div className="header-metrics" style={{ maxWidth: 1440, margin: "0 auto", display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
+          {[
+            // Cuando MT5 está conectado: mostrar datos reales del broker
+            { label: "Balance",
+              value: mt5Enabled && mt5Balance !== null ? `$${(mt5Balance ?? 0).toFixed(2)}` : money(balance),
+              color: "var(--text)" },
+            { label: "Patrimonio",
+              value: mt5Enabled && mt5Equity !== null ? `$${(mt5Equity ?? 0).toFixed(2)}` : money(equity),
+              color: mt5Enabled && mt5Equity !== null && mt5Balance !== null
+                ? (mt5Equity >= mt5Balance ? "#10b981" : "#ef4444")
+                : (equity >= balance ? "#10b981" : "#ef4444") },
+            { label: "P&L abierto",
+              value: mt5Enabled && mt5Positions.length > 0
+                ? money(mt5Positions.reduce((a, p) => a + p.profit, 0))
+                : money(unrealized),
+              color: (mt5Enabled && mt5Positions.length > 0
+                ? mt5Positions.reduce((a, p) => a + p.profit, 0)
+                : unrealized) >= 0 ? "#10b981" : "#ef4444" },
+            { label: "Win rate", value: `${(stats.winRate ?? 0).toFixed(1)}%`, color: stats.winRate >= 50 ? "#10b981" : "#ef4444" },
+            { label: "Factor ganancia", value: (stats.profitFactor ?? 0).toFixed(2), color: stats.profitFactor >= 1.5 ? "#10b981" : "var(--text)" },
+            { label: "Sharpe", value: (stats.sharpe ?? 0).toFixed(2), color: stats.sharpe >= 1 ? "#10b981" : "var(--text)" },
+            { label: "Trades reales", value: realTrades.length, color: "var(--muted)" },
+            { label: "Activos broker",
+              value: availableSymbols.length > 0 ? `${availableSymbols.length}` : `${assets.length}`,
+              color: availableSymbols.length > 0 ? "#10b981" : "var(--muted)" },
+            { label: mt5Enabled && mt5Margin !== null ? "Margen usado": "Margen usado",
+              value: mt5Enabled && mt5Margin !== null ? `$${(mt5Margin ?? 0).toFixed(2)}` : money(openPositions.reduce((a,p)=>a+p.marginUsed,0)),
+              color: "var(--muted)" },
+            { label: mt5Enabled && mt5FreeMargin !== null ? "Margen libre" : "Posiciones",
+              value: mt5Enabled && mt5FreeMargin !== null
+                ? `$${(mt5FreeMargin ?? 0).toFixed(2)}${mt5MarginLevel !== null ? ` (${(mt5MarginLevel ?? 0).toFixed(0)}%)` : ""}`
+                : String(openPositions.length + (mt5Positions.length > 0 ? ` (+${mt5Positions.length} MT5)` : "")),
+              color: mt5Enabled && mt5MarginLevel !== null
+                ? (mt5MarginLevel > 500 ? "#10b981" : mt5MarginLevel > 200 ? "#f59e0b" : "#ef4444")
+                : (openPositions.length > 0 || mt5Positions.length > 0 ? "#f59e0b" : "var(--muted)") },
+          ].map(({ label, value, color }) => (
+            <div key={label} className="hm-item">
+              <span className="hm-label">{label}</span>
+              <span className="hm-value" style={{ color }}>{value}</span>
+            </div>
+          ))}
+          {/* Curva de equity — visible siempre en el header */}
+          {realTrades.length >= 2 && (
+            <div style={{ flex: "1 1 200px", minWidth: 200, maxWidth: 340, alignSelf: "stretch", display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+              <span style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 3, display: "block" }}>Curva de equity</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <main className="main-wrap" style={{ maxWidth: 1440, margin: "0 auto", padding: "20px 24px" }}>
+
+        {/* ━━━━━━━━━ TRADING ━━━━━━━━━ */}
+        {appTab === "trading" && (
+          <ErrorBoundary key="trading-tab">
+
+          {/* ── Banner bridge desconectado ── */}
+          {!liveReady && (
+            <div className={`bridge-banner ${mt5Enabled && mt5Status === "connected" ? "warn" : mt5Status === "testing" ? "connecting" : "error"}`}>
+              <span style={{ fontSize: 22 }}>
+                {mt5Enabled && mt5Status === "testing" ? "⏳" : mt5Enabled ? "⚠️" : "🔌"}
+              </span>
+              <div style={{ flex: 1 }}>
+                <p style={{ fontWeight: 700, fontSize: 13, marginBottom: 3 }}>
+                  {mt5Status === "testing" ? "Conectando al bridge MT5..." :
+                   mt5Enabled && mt5Status !== "connected" ? "Bridge MT5 configurado pero no conectado" :
+                   !mt5Enabled ? "Bridge MT5 no activado" :
+                   "Sin datos del bridge"}
+                </p>
+                <p style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                  {mt5Status === "testing" ? "Esperá unos segundos..." :
+                   mt5Enabled ? `URL: ${mt5Url} — Asegurate que bridge.py esté corriendo y hacé "Test conexión" en ⚙ Config` :
+                   'Andá a ⚙ Config → activá "Usar Bridge MT5" → ingresá la URL → "Test conexión"'}
+                </p>
+              </div>
+              <button onClick={() => {
+                void testMT5Bridge().then(() => void syncRealData());
+              }} style={{
+                padding: "8px 16px", borderRadius: 8, border: "none", cursor: "pointer",
+                background: "rgba(99,102,241,0.2)", color: "#a5b4fc",
+                fontWeight: 700, fontSize: 12, whiteSpace: "nowrap",
+              }}>
+                🔄 Reconectar
+              </button>
+            </div>
+          )}
+
+          <div className="trading-grid">
+
+            {/* Izq */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div className="card">
+                <p className="label" style={{ marginBottom: 7 }}>Modo</p>
+                <div style={{ display: "flex", gap: 5 }}>
+                  {(["scalping", "intradia"] as Mode[]).map(m => (
+                    <button key={m} className={tab === m ? "tab-active" : "tab"} onClick={() => setTab(m)} style={{ flex: 1 }}>
+                      {m === "scalping" ? "Scalping" : "Intradía MTF"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="card">
+                <p className="label" style={{ marginBottom: 5 }}>Activo</p>
+                <select className="sel" value={asset} onChange={e => setAsset(e.target.value as Asset)} style={{ width: "100%" }}>
+                  {(() => { try {
+                    // Categorías dinámicas — usa availableSymbols si hay datos del broker
+                    // sino usa los assets fijos con grupos hardcodeados
+                    const CAT_LABEL: Record<string, string> = {
+                      crypto: "⬡ Crypto", metals: "◈ Metales",
+                      forex_major: "₣ Forex Major", forex_minor: "₣ Forex Minor",
+                      indices: "▲ Índices", energy: "⛽ Energía",
+                      stocks: "📈 Acciones", commodities: "🌾 Commodities", other: "📦 Otros",
+                    };
+                    // Orden de categorías en el select
+                    const CAT_ORDER = ["crypto","metals","forex_major","forex_minor","indices","energy","stocks","commodities","other"];
+
+                    // Construir mapa nombre → categoría desde availableSymbols
+                    const symCatMap: Record<string, string> = {};
+                    availableSymbols.forEach(s => { symCatMap[s.name] = s.category; });
+                    // Fallback: inferir desde ASSET_CATALOG
+                    assets.forEach(a => {
+                      if (!symCatMap[a]) symCatMap[a] = ASSET_CATALOG[a]?.category ?? "other";
+                    });
+
+                    // Agrupar por categoría
+                    const groups: Record<string, string[]> = {};
+                    assets.forEach(a => {
+                      const cat = symCatMap[a] ?? "other";
+                      if (!groups[cat]) groups[cat] = [];
+                      groups[cat].push(a);
+                    });
+
+                    return CAT_ORDER
+                      .filter(cat => groups[cat]?.length)
+                      .map(cat => (
+                        <optgroup key={cat} label={CAT_LABEL[cat] ?? cat}>
+                          {groups[cat].map(a => (
+                            <option key={a} value={a}>
+                              {getAssetLabel(a)}
+                              {availableSymbols.find(s=>s.name===a)?.brokerName && availableSymbols.find(s=>s.name===a)?.brokerName !== a
+                                ? ` (${availableSymbols.find(s=>s.name===a)?.brokerName})`
+                                : ""}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ));
+                  } catch(e){console.error("[render]",e);return null;}})()}
+                </select>
+                <div style={{ marginTop: 8, fontSize: 11 }}>
+                  {(()=>{ try {
+                    const ss = spreadSnapshot[asset];
+                    const dp = asset === "BTCUSD" || asset === "ETHUSD" ? 2 : asset === "XAUUSD" ? 2 : 4;
+                    return [[
+                      ["Precio", (prices[asset] ?? 0).toFixed(dp)],
+                      ["Bid", ss && ss.bid != null ? (ss.bid).toFixed(dp) : "-"],
+                      ["Ask", ss && ss.ask != null ? (ss.ask).toFixed(dp) : "-"],
+                      ["Spread $", ss && ss.spread != null ? `$${(ss.spread ?? 0).toFixed(dp === 2 ? 2 : 4)}` : "-"],
+                      ["Spread", ss && ss.spreadPct != null ? `${(ss.spreadPct ?? 0).toFixed(3)}% ${mt5SpreadMap[asset] ? "📡 real" : "~ estimado"}` : "-"],
+                      ["Sesión", ss ? ss.sessionLabel : "-"],
+                      ["Vol", ss?.isHighVolume ? "⚠ ALTA" : "Normal"],
+                      ["Leverage", `${getLeverage(asset)}× ${mt5LeverageMap[asset] ? "📡" : "~"}`],
+                    ]];
+                  } catch(e){console.error("[render]",e);return null;}})()[0].map(([k, v]) => (
+                    <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                      <span style={{ color: "var(--muted)" }}>{k}</span>
+                      <span style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="card">
+                <p className="label" style={{ marginBottom: 5 }}>Riesgo base (%)</p>
+                <input className="inp" type="number" min={0.2} max={3} step={0.1} value={riskPct} onChange={e => setRiskPct(Number(e.target.value))} />
+              </div>
+              <div className="card" style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {/* ── Overrides manuales de SL/TP ── */}
+                <div style={{ display:"flex", gap:5 }}>
+                  <div style={{ flex:1 }}>
+                    <p style={{ fontSize:10, color:"var(--muted)", marginBottom:3 }}>SL manual (opcional)</p>
+                    <input className="inp" type="number" step="0.0001" placeholder="ej: 0.7200"
+                      value={manualSl} onChange={e => setManualSl(e.target.value)}
+                      style={{ fontSize:11 }} />
+                  </div>
+                  <div style={{ flex:1 }}>
+                    <p style={{ fontSize:10, color:"var(--muted)", marginBottom:3 }}>TP manual (opcional)</p>
+                    <input className="inp" type="number" step="0.0001" placeholder="ej: 0.6900"
+                      value={manualTp} onChange={e => setManualTp(e.target.value)}
+                      style={{ fontSize:11 }} />
+                  </div>
+                </div>
+                {(manualTp || manualSl) && (
+                  <p style={{ fontSize:10, color:"#a5b4fc", margin:0 }}>
+                    {manualTp && manualSl
+                      ? `RR estimado: ${(Math.abs(Number(manualTp) - prices[asset]) / Math.abs(prices[asset] - Number(manualSl))).toFixed(2)}×`
+                      : manualTp ? `TP → ${manualTp}` : `SL → ${manualSl}`
+                    }
+                    {" "}<span style={{ cursor:"pointer", color:"#ef4444" }} onClick={() => { setManualTp(""); setManualSl(""); }}>✕ limpiar</span>
+                  </p>
+                )}
+                <button className="btn-primary" onClick={() => {
+                  const ov: { tp?: number; sl?: number } = {};
+                  if (manualTp && Number(manualTp) > 0) ov.tp = Number(manualTp);
+                  if (manualSl && Number(manualSl) > 0) ov.sl = Number(manualSl);
+                  void createSignalAndExecute(tab, asset, false, Object.keys(ov).length ? ov : undefined);
+                }}>⚡ Señal</button>
+                <button className="btn-secondary" onClick={() => void runAutoScan()}>🔍 Escanear</button>
+                <button className="btn-secondary" onClick={() => void syncRealData()} disabled={isSyncing}>{isSyncing ? "⟳" : "↻"} Sync</button>
+
+                {/* ── Panel diagnóstico motor ── */}
+                <div style={{ marginTop:8, padding:"8px 10px", borderRadius:8,
+                  background: liveReady ? "rgba(16,185,129,0.05)" : "rgba(245,158,11,0.05)",
+                  border:`1px solid ${liveReady ? "rgba(16,185,129,0.18)" : "rgba(245,158,11,0.18)"}`,
+                  fontSize:11 }}>
+                  <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
+                    <span style={{ fontWeight:700 }}>{liveReady ? "🟢 Listo" : "🟡 Sin datos"}</span>
+                    <span style={{ padding:"1px 7px", borderRadius:99, fontSize:10, fontWeight:700,
+                      background: mt5Enabled && mt5Status === "connected" ? "rgba(239,68,68,0.15)" : "rgba(255,255,255,0.07)",
+                      color: mt5Enabled && mt5Status === "connected" ? "#fca5a5" : "var(--muted)" }}>
+                      {mt5Enabled && mt5Status === "connected" ? "● REAL" : "○ SIM"}
+                    </span>
+                    <span style={{ color:"var(--muted)" }}>piso: {tab === "scalping" ? 48 : 50} | activos: {assets.length}</span>
+                  </div>
+                  {lastGateLog && (
+                    <p style={{ color:"#fbbf24", fontSize:10, marginTop:4, lineHeight:1.4 }}>
+                      ⚡ {lastGateLog}
+                    </p>
+                  )}
+                  {lastSignal && (
+                    <p style={{ color:"var(--muted)", fontSize:10, marginTop:3 }}>
+                      Última: {lastSignal.asset} {lastSignal.direction} conf={lastSignal.confidence?.toFixed(0)}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <div className="card">
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                  <p style={{ fontWeight: 600, fontSize: 12 }}>Auto-scan</p>
+                  <button onClick={() => setAutoScan(p => !p)} style={{ padding: "3px 10px", borderRadius: 20, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 10, background: autoScan ? "#10b981" : "rgba(255,255,255,0.07)", color: autoScan ? "#fff" : "var(--muted)" }}>{autoScan ? "● ON" : "○ OFF"}</button>
+                </div>
+                {autoScan && <input className="inp" type="number" min={8} max={120} step={1} value={scanEverySec} onChange={e => setScanEverySec(Number(e.target.value))} />}
+              </div>
+              {bestHours.length > 0 && (
+                <div className="card">
+                  <p className="label" style={{ marginBottom: 5 }}>Horas edge (real)</p>
+                  {bestHours.map(({ hour, edge }) => (
+                    <div key={hour} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "2px 0", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
+                      <span style={{ color: "var(--muted)" }}>{hour}:00</span>
+                      <span style={{ color: edge >= 0 ? "#10b981" : "#ef4444", fontWeight: 600 }}>{(edge ?? 0) >= 0 ? "+" : ""}{(edge ?? 0).toFixed(2)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="card" style={{ fontSize: 11 }}>
+                <p className="label" style={{ marginBottom: 5 }}>Modelo (solo trades reales)</p>
+                {[["Trailing ATR", (learning.atrTrailMult ?? 0.35).toFixed(2)], ["TP scalp", `${(learning.scalpingTpAtr ?? 2.4).toFixed(2)} ATR`], ["TP intradía", `${(learning.intradayTpAtr ?? 5.0).toFixed(2)} ATR`], ["Piso conf.", `${(learning.confidenceFloor ?? 52).toFixed(0)}%`], ["Escala riesgo", `${(learning.riskScale ?? 1).toFixed(2)}×`]].map(([k, v]) => (
+                  <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
+                    <span style={{ color: "var(--muted)" }}>{k}</span>
+                    <span style={{ fontFamily: "'JetBrains Mono',monospace" }}>{v}</span>
+                  </div>
+                ))}
+                <p style={{ marginTop: 6, fontSize: 12, color: "var(--muted)", fontStyle: "italic" }}>n={realTrades.length} trades reales</p>
+              </div>
+            </div>
+
+            {/* Centro */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div className="card" style={{ padding: "12px 12px 8px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                  <div>
+                    <h2 style={{ fontWeight: 800, fontSize: 15, marginBottom: 1 }}>{asset}</h2>
+                    <p style={{ fontSize: 11, color: "var(--muted)" }}>{tab === "intradia" ? "Intradía / Swing · Wyckoff 4H+1D" : "Scalping · Order Flow 1m"} · MT5 / PrimeXBT</p>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <button onClick={() => setShowIndicators(p => !p)} style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid rgba(255,255,255,0.1)", background: showIndicators ? "rgba(99,102,241,0.15)" : "transparent", color: showIndicators ? "#a5b4fc" : "var(--muted)", cursor: "pointer", fontWeight: 600 }}>
+                      {showIndicators ? "● Indicadores" : "○ Indicadores"}
+                    </button>
+                    {lastSignal && lastSignal.asset === asset && lastSignal.mtf && (
+                      <div style={{ display: "flex", gap: 6, fontSize: 10, color: "var(--muted)" }}>
+                        {([["HTF", lastSignal.mtf.htf ?? 0], ["LTF", lastSignal.mtf.ltf ?? 0], ["Exec", lastSignal.mtf.exec ?? 0]] as [string,number][]).map(([k, v]) => (
+                          <span key={k as string}>{k}: <strong style={{ color: (v as number) >= 0 ? "#10b981" : "#ef4444" }}>{(v as number).toFixed(2)}</strong></span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div ref={chartWrapRef} style={{ borderRadius: 8, overflow: "hidden", background: "rgba(0,0,0,0.25)", padding: "6px 3px 3px" }}>
+                  <CandlestickChart
+                    candles={visibleCandles}
+                    indicators={showIndicators ? currentIndicators : null}
+                    wyckoff={currentWyckoff}
+                    showIndicators={showIndicators}
+                    lastSignal={lastSignal?.asset === asset ? lastSignal : null}
+                  />
+                </div>
+                {/* Legend mejorada */}
+                <div style={{ display:"flex", gap:10, marginTop:5, fontSize:10.5, flexWrap:"wrap", alignItems:"center" }}>
+                  <span style={{ color:"rgba(99,102,241,0.9)", fontWeight:700 }}>━ EMA8</span>
+                  <span style={{ color:"rgba(251,191,36,0.8)", fontWeight:700 }}>━ EMA21</span>
+                  {showIndicators && <>
+                    <span style={{ color:"#f59e0b" }}>━ VWAP</span>
+                    <span style={{ color:"rgba(99,102,241,0.6)" }}>┄ BB(20,2)</span>
+                  </>}
+                  <span style={{ color:"rgba(16,185,129,0.7)" }}>░ S Wyckoff</span>
+                  <span style={{ color:"rgba(239,68,68,0.7)" }}>░ R Wyckoff</span>
+                  {lastSignal?.asset === asset && <>
+                    <span style={{ color:"#10b981", fontWeight:700 }}>┄ TP</span>
+                    <span style={{ color:"#ef4444", fontWeight:700 }}>┄ SL</span>
+                    <span style={{ color:"#f59e0b" }}>┄ Entry</span>
+                  </>}
+                </div>
+              </div>
+
+              {/* Indicators */}
+              {currentIndicators && showIndicators && (
+                <div className="card" style={{ padding: "10px 12px" }}>
+                  <p className="label" style={{ marginBottom: 8 }}>Indicadores técnicos</p>
+                  {tab === "scalping" && currentOF && (
+                  <OrderFlowPanel of={currentOF} price={prices[asset]} />
+                )}
+                <IndicatorPanel ind={currentIndicators} mode={tab} />
+                </div>
+              )}
+
+              {/* Wyckoff — solo intradía, contexto macro 4H+1D */}
+              {tab === "intradia" && currentWyckoff && (
+                <div className="card" style={{ padding: "10px 12px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <p className="label" style={{ margin: 0 }}>
+                      <TechTip term="Wyckoff">Wyckoff</TechTip> — Contexto macro
+                    </p>
+                    <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, background: "rgba(99,102,241,0.15)", color: "#a5b4fc", fontWeight: 700 }}>4H + 1D</span>
+                    {(currentWyckoff as WyckoffAnalysis & { tf4h?: unknown; tf1d?: unknown }).tf4h === null &&
+                     (currentWyckoff as WyckoffAnalysis & { tf4h?: unknown; tf1d?: unknown }).tf1d === null && (
+                      <span style={{ fontSize: 10, color: "#f59e0b" }}>⚠ Sin datos bridge</span>
+                    )}
+                  </div>
+                  <WyckoffPanel wyckoff={currentWyckoff} />
+                </div>
+              )}
+              {tab === "scalping" && (
+                <div className="card" style={{ padding: "10px 12px", opacity: 0.55 }}>
+                  <p style={{ fontSize: 11, color: "var(--muted)", textAlign: "center" }}>
+                    🔍 Wyckoff no aplica en scalping — el Order Flow es la autoridad en 1m
+                  </p>
+                </div>
+              )}
+
+              {/* Last signal — panel visual mejorado */}
+              {lastSignal && (() => { try {
+                const lrn      = learningRef.current;
+                const isLong   = lastSignal.direction === "LONG";
+                const dirColor = isLong ? "#10b981" : "#ef4444";
+                const dirEmoji = isLong ? "🐂" : "🐻";
+                const hasWyk   = lastSignal.mode === "intradia" &&
+                  (wyckoffMap[lastSignal.asset]?.bias === "distribution" ||
+                   wyckoffMap[lastSignal.asset]?.bias === "accumulation");
+                // Floor y minRR sincronizados con createSignalAndExecute
+                const calib    = assetCalib[lastSignal.asset];
+                const floor    = lastSignal.mode === "scalping"
+                  ? Math.max(44, 48 + (calib?.floorAdj ?? 0))
+                  : Math.max(44, 50 + (calib?.floorAdj ?? 0));
+                const rr       = Math.abs(lastSignal.tp2 - lastSignal.entry) /
+                                 Math.max(Math.abs(lastSignal.entry - lastSignal.stopLoss), 1e-9);
+                const minRR    = 1.0;   // igual que createSignalAndExecute
+                const confOk   = lastSignal.confidence >= floor;
+                const rrOk     = rr >= minRR;
+                const canTrade = confOk && rrOk;
+                const digits   = lastSignal.entry >= 100 ? 2 : lastSignal.entry >= 1 ? 4 : 5;
+                const fmt      = (n: number) => n.toFixed(digits);
+                return (
+                  <div className="card" style={{
+                    borderLeft: `4px solid ${dirColor}`,
+                    background: `linear-gradient(135deg, rgba(${isLong?"16,185,129":"239,68,68"},0.06) 0%, transparent 60%)`,
+                    padding:"12px 14px",
+                  }}>
+                    {/* Header señal */}
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                        <span style={{ fontSize:28 }}>{dirEmoji}</span>
+                        <div>
+                          <div style={{ fontSize:15, fontWeight:900, color:dirColor, letterSpacing:"0.04em" }}>
+                            {isLong ? "◀ LARGO" : "▶ CORTO"} · {lastSignal.asset}
+                          </div>
+                          <div style={{ fontSize:10.5, color:"var(--muted)", marginTop:1 }}>
+                            {lastSignal.mode === "scalping" ? "⚡ Scalping" : "📊 Intradía"} · {lastSignal.wyckoffSizeMult > 1 ? `Wyckoff ×${lastSignal.wyckoffSizeMult.toFixed(2)}` : ""}
+                          </div>
+                        </div>
+                      </div>
+                      {/* Semáforo go/no-go */}
+                      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:3 }}>
+                        <div style={{
+                          width:36, height:36, borderRadius:"50%",
+                          background: canTrade ? "#10b981" : "#ef4444",
+                          display:"flex", alignItems:"center", justifyContent:"center",
+                          fontSize:18, boxShadow:`0 0 12px ${canTrade?"#10b981":"#ef4444"}60`,
+                        }}>
+                          {canTrade ? "✅" : "🛑"}
+                        </div>
+                        <span style={{ fontSize:9, color:"var(--muted)", fontWeight:700 }}>
+                          {canTrade ? "TRADE OK" : "BLOQUEADO"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Badges confianza + RR */}
+                    <div style={{ display:"flex", gap:6, marginBottom:10, flexWrap:"wrap" }}>
+                      <span style={{ padding:"3px 10px", borderRadius:20, fontWeight:800, fontSize:11,
+                        background: confOk ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
+                        color: confOk ? "#10b981" : "#ef4444",
+                        border: `1px solid ${confOk?"rgba(16,185,129,0.3)":"rgba(239,68,68,0.3)"}` }}>
+                        🎯 Conf {(lastSignal.confidence ?? 0).toFixed(0)}%
+                        {confOk ? ` ✓` : ` ✗ (piso ${floor})`}
+                      </span>
+                      <span style={{ padding:"3px 10px", borderRadius:20, fontWeight:800, fontSize:11,
+                        background: rrOk ? "rgba(99,102,241,0.15)" : "rgba(239,68,68,0.15)",
+                        color: rrOk ? "#818cf8" : "#ef4444",
+                        border: `1px solid ${rrOk?"rgba(99,102,241,0.3)":"rgba(239,68,68,0.3)"}` }}>
+                        ⚖ RR {(rr??0).toFixed(2)}×
+                        {rrOk ? ` ✓` : ` ✗ (<${minRR})`}
+                      </span>
+                      {lastSignal.isReversalSetup && (
+                        <span style={{ padding:"3px 10px", borderRadius:20, fontWeight:800, fontSize:11,
+                          background:"rgba(245,158,11,0.15)", color:"#f59e0b",
+                          border:"1px solid rgba(245,158,11,0.3)" }}>
+                          🔄 Reversal ×{lastSignal.reversalScore}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Grid Entry / SL / RR + TPs */}
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:5, marginBottom:8 }}>
+                      {[
+                        { label:"Entry", value:fmt(lastSignal.entry), color:"#f59e0b", icon:"📍" },
+                        { label:"Stop Loss", value:fmt(lastSignal.stopLoss), color:"#ef4444", icon:"🛑" },
+                        { label:"TP1", value:fmt(lastSignal.tp1 ?? lastSignal.tp2), color:"#34d399", icon:"🎯" },
+                        { label:"TP2", value:fmt(lastSignal.tp2), color:"#10b981", icon:"🏆" },
+                      ].map(({ label, value, color, icon }) => (
+                        <div key={label} style={{ background:"rgba(255,255,255,0.04)", borderRadius:7,
+                          padding:"6px 8px", textAlign:"center", border:"1px solid rgba(255,255,255,0.06)" }}>
+                          <p style={{ fontSize:9.5, color:"var(--muted)", marginBottom:2 }}>{icon} {label}</p>
+                          <p style={{ fontWeight:800, fontFamily:"'JetBrains Mono',monospace",
+                            fontSize:11, color }}>{value}</p>
+                        </div>
+                      ))}
+                    </div>
+                    {lastSignal.tp3 && (
+                      <div style={{ background:"rgba(4,120,87,0.1)", borderRadius:6, padding:"4px 10px",
+                        fontSize:11, color:"#047857", fontWeight:700, marginBottom:6, display:"flex",
+                        justifyContent:"space-between", border:"1px solid rgba(4,120,87,0.2)" }}>
+                        <span>🚀 TP3 Extensión</span>
+                        <span style={{ fontFamily:"'JetBrains Mono',monospace" }}>{fmt(lastSignal.tp3)}</span>
+                      </div>
+                    )}
+
+                    {/* Rationale */}
+                    <p style={{ fontSize:10.5, color:"rgba(148,163,184,0.8)", marginBottom: lastSignal.aiRationale ? 5 : 0,
+                      lineHeight:"1.4", background:"rgba(255,255,255,0.02)", padding:"5px 8px", borderRadius:5 }}>
+                      📋 {lastSignal.rationale}
+                    </p>
+                    {lastSignal.aiRationale && (
+                      <p style={{ fontSize:10.5, color:"#a5b4fc", background:"rgba(99,102,241,0.07)",
+                        padding:"5px 8px", borderRadius:6, marginTop:4, lineHeight:"1.4",
+                        border:"1px solid rgba(99,102,241,0.15)" }}>
+                        🤖 IA: {lastSignal.aiRationale}
+                        {lastSignal.aiRiskNotes && (
+                          <span style={{ color:"#f59e0b" }}> · ⚠️ {lastSignal.aiRiskNotes}</span>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                );
+              } catch(e) { console.error("[render signal panel]", e); return null; }})()}
+
+              {/* Posiciones abiertas */}
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <h3 style={{ fontWeight: 700, fontSize: 13 }}>Posiciones abiertas</h3>
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>evaluación cada 1s</span>
+                  {openPositions.length > 0 && <span style={{ background: "#f59e0b", color: "#fff", fontSize: 11, fontWeight: 800, padding: "1px 6px", borderRadius: 10 }}>{openPositions.length}</span>}
+                </div>
+                {/* ── Posiciones REALES de MT5 ── */}
+                {mt5Enabled && mt5Status === "connected" && mt5Positions.length > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#10b981", marginBottom: 6, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                      📡 Posiciones MT5 Reales ({mt5Positions.length})
+                    </div>
+                    {mt5Positions.map(p => {
+                      const pnlColor = p.profit >= 0 ? "#10b981" : "#ef4444";
+                      const isLong = p.type === "LONG";
+                      return (
+                        <div key={p.ticket} className="live-card" style={{ borderLeft: `3px solid ${isLong ? "#10b981" : "#ef4444"}`, marginBottom: 6 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              <span style={{ width: 7, height: 7, borderRadius: "50%", background: isLong ? "#10b981" : "#ef4444", animation: "pulse 1.5s infinite", display: "inline-block" }} />
+                              <span style={{ fontWeight: 700, fontSize: 14 }}>{p.symbol}</span>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 6,
+                                background: isLong ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
+                                color: isLong ? "#10b981" : "#ef4444" }}>{p.type}</span>
+                              <span style={{ fontSize: 10, color: "#6366f1", background: "rgba(99,102,241,0.1)", padding: "2px 6px", borderRadius: 4 }}>#{p.ticket}</span>
+                            </div>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              <span style={{ fontWeight: 700, fontSize: 15, color: pnlColor }}>
+                                {(p.profit ?? 0) >= 0 ? "+" : ""}{(p.profit ?? 0).toFixed(2)} USD
+                              </span>
+                              <button
+                                onClick={() => closeInMT5ByTicket(p.ticket, p.asset)}
+                                style={{ fontSize: 11, padding: "3px 10px", borderRadius: 6, border: "1px solid rgba(239,68,68,0.4)",
+                                  background: "rgba(239,68,68,0.12)", color: "#ef4444", cursor: "pointer", fontWeight: 700 }}>
+                                Cerrar
+                              </button>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 14, fontSize: 11, color: "var(--muted)", flexWrap: "wrap" }}>
+                            <span>Entrada: <strong style={{ color: "var(--ink)" }}>{(p.open_price ?? 0).toFixed((p.open_price ?? 0) > 100 ? 2 : 4)}</strong></span>
+                            <span>Actual: <strong style={{ color: pnlColor }}>{(p.current ?? 0).toFixed((p.current ?? 0) > 100 ? 2 : 4)}</strong></span>
+                            {(p.sl ?? 0) > 0 && <span>SL: <strong style={{ color: "#ef4444" }}>{(p.sl ?? 0).toFixed((p.sl ?? 0) > 100 ? 2 : 4)}</strong></span>}
+                            {(p.tp ?? 0) > 0 && <span>TP: <strong style={{ color: "#10b981" }}>{(p.tp ?? 0).toFixed((p.tp ?? 0) > 100 ? 2 : 4)}</strong></span>}
+                            <span>Vol: <strong>{p.volume}</strong></span>
+                            <span style={{ marginLeft: "auto", color: "#6366f1" }}>
+                              {new Date(p.time).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <button
+                      onClick={syncMT5State}
+                      style={{ fontSize: 11, padding: "5px 12px", borderRadius: 7, border: "1px solid rgba(99,102,241,0.3)",
+                        background: "rgba(99,102,241,0.08)", color: "#a5b4fc", cursor: "pointer", width: "100%", marginTop: 4 }}>
+                      ↻ Actualizar posiciones MT5
+                    </button>
+                  </div>
+                )}
+
+                {mt5Enabled && mt5Status === "connected" && mt5Positions.length === 0 && (
+                  <div style={{ fontSize: 11, color: "var(--muted)", padding: "8px 0", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>📡 Sin posiciones abiertas en MT5</span>
+                    <button onClick={syncMT5State} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 5, border: "1px solid rgba(255,255,255,0.1)", background: "transparent", color: "var(--muted)", cursor: "pointer" }}>↻</button>
+                  </div>
+                )}
+
+                {/* ── Posiciones simuladas del motor ── */}
+                {openPositions.length === 0
+                  ? <div className="card" style={{ textAlign: "center", padding: "22px", color: "var(--muted)", fontSize: 12 }}>Sin posiciones abiertas</div>
+                  : <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {openPositions.map(p => <LivePositionCard key={p.id} position={p} prices={prices} spreadByAsset={spreadByAsset} now={now} onClose={pos => void closePosition(pos, prices[pos.signal.asset], "REVERSAL")} />)}
+                    </div>
+                }
+              </div>
+
+              {/* Equity curve movida al header global */}
+            </div>
+
+            {/* Der */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+
+              {/* ── Panel Motor Cuant ── */}
+              {(() => { try {
+                const calibNow = groqCalib && (Date.now() - groqCalib.timestamp < 30*60*1000) ? groqCalib : null;
+                return (
+                  <div className="card" style={{ padding: "12px 14px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                      <p style={{ fontWeight: 800, fontSize: 12, margin: 0 }}>⚡ Motor Cuant</p>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        {calibNow && <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 8,
+                          background: "rgba(99,102,241,0.12)", color: "#a5b4fc", fontWeight: 700 }}>
+                          🤖 Groq: {new Date(calibNow.timestamp).toLocaleTimeString("es",{hour:"2-digit",minute:"2-digit"})}
+                        </span>}
+                        <span style={{ fontSize: 9, color: "var(--muted)" }}>Calibra cada 15min</span>
+                      </div>
+                    </div>
+                    {(calibNow?.macroNote || calibNow?.corrNote) && (
+                      <div style={{ marginBottom: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+                        {calibNow?.macroNote && <p style={{ fontSize: 11, color: "#a5b4fc", padding: "5px 8px",
+                          background: "rgba(99,102,241,0.08)", borderRadius: 6, borderLeft: "2px solid #6366f1", margin: 0 }}>
+                          🌐 {calibNow.macroNote}
+                        </p>}
+                        {calibNow?.corrNote && <p style={{ fontSize: 11, color: "#fbbf24", padding: "5px 8px",
+                          background: "rgba(251,191,36,0.06)", borderRadius: 6, borderLeft: "2px solid #f59e0b", margin: 0 }}>
+                          🔗 {calibNow.corrNote}
+                        </p>}
+                      </div>
+                    )}
+                    {portfolioRisk && portfolioRisk.currentRiskScore > 0 && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+                        padding: "6px 10px", borderRadius: 7,
+                        background: portfolioRisk.currentRiskScore > 0.6 ? "rgba(239,68,68,0.08)" : "rgba(255,255,255,0.03)",
+                        border: `1px solid ${portfolioRisk.currentRiskScore > 0.6 ? "rgba(239,68,68,0.2)" : "var(--border)"}` }}>
+                        <span style={{ fontSize: 11 }}>
+                          {portfolioRisk.currentRiskScore > 0.6 ? "🔴" : portfolioRisk.currentRiskScore > 0.3 ? "🟡" : "🟢"}
+                        </span>
+                        <span style={{ fontSize: 11, color: "var(--text-2)" }}>
+                          Riesgo corr: <strong style={{ color: portfolioRisk.currentRiskScore > 0.6 ? "#ef4444" : "var(--text)" }}>
+                            {(portfolioRisk.currentRiskScore*100).toFixed(0)}%
+                          </strong>
+                          {portfolioRisk.worstCombo.length > 0 && ` · ⚠ ${portfolioRisk.worstCombo.map(a=>a.replace("USD","")).join("+")} correlacionados`}
+                        </span>
+                      </div>
+                    )}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                      {assets.slice(0,4).map(a => {
+                        const r   = regimeMap[a];
+                        const c   = assetCalib[a];
+                        const gf  = calibNow?.floorOverrides?.[a];
+                        const gs  = calibNow?.sizeOverrides?.[a];
+                        const regColor = !r ? "var(--muted)"
+                          : r.regime === "trending_up"   ? "#10b981"
+                          : r.regime === "trending_down" ? "#ef4444"
+                          : r.regime === "expanding"     ? "#f59e0b"
+                          : r.regime === "ranging"       ? "#6366f1"
+                          : "var(--muted)";
+                        const regIcon = !r ? "?" 
+                          : r.regime === "trending_up"   ? "↗"
+                          : r.regime === "trending_down" ? "↘"
+                          : r.regime === "expanding"     ? "⚡"
+                          : r.regime === "ranging"       ? "↔"
+                          : "·";
+                        return (
+                          <div key={a} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8,
+                            padding: "8px 10px", border: `1px solid rgba(255,255,255,0.06)` }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                              <span style={{ fontWeight: 800, fontSize: 11 }}>{a.replace("USD","")}</span>
+                              <span style={{ fontSize: 12, color: regColor, fontWeight: 700 }}>{regIcon}</span>
+                            </div>
+                            <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 3 }}>
+                              {r ? r.regime.replace("_"," ") : "—"}
+                            </div>
+                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                              {c && c.n > 0 && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4,
+                                background: c.wr > 0.55 ? "rgba(16,185,129,0.12)" : c.wr < 0.40 ? "rgba(239,68,68,0.1)" : "rgba(255,255,255,0.06)",
+                                color: c.wr > 0.55 ? "#10b981" : c.wr < 0.40 ? "#ef4444" : "var(--text-2)", fontWeight: 700 }}>
+                                WR {(c.wr*100).toFixed(0)}% ({c.n})
+                              </span>}
+                              {c && c.n > 0 && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4,
+                                background: "rgba(255,255,255,0.06)", color: "var(--text-2)", fontWeight: 600 }}>
+                                K {(c.kellyF*100).toFixed(0)}%
+                              </span>}
+                              {gf && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4,
+                                background: "rgba(99,102,241,0.12)", color: "#a5b4fc", fontWeight: 700 }}>
+                                🤖 piso {gf}
+                              </span>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              } catch(e) { return null; }})()}
+
+              <AiChatPanel
+                apiKey={apiKey} usingGroq={usingGroq} groqModel={groqModel}
+                onGroqCall={trackGroqCall} canGroqCall={canCallGroq}
+                openPositions={openPositions} realTrades={realTrades}
+                lastSignal={lastSignal} prices={prices} stats={stats}
+                correlationMatrix={correlationMatrix}
+                assetIntelligence={assetIntelligence}
+              />
+              <div className="card">
+                <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 13 }}>Estadísticas — trades reales</p>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
+                  {[["Trades", stats.total], ["Win rate", `${(stats.winRate ?? 0).toFixed(1)}%`], ["Expectativa", money(stats.expectancy)], ["Factor gan.", (stats.profitFactor ?? 0).toFixed(2)], ["Sharpe", (stats.sharpe ?? 0).toFixed(2)], ["Max DD", `${(stats.maxDrawdown ?? 0).toFixed(1)}%`], ["P&L total", money(stats.pnl)], ["Posiciones", openPositions.length], ["Kelly %", riskMetrics.kellyFraction > 0 ? `${(riskMetrics.kellyFraction*100).toFixed(1)}%` : "N/D"], ["Ruina", riskMetrics.ruinProb !== undefined ? `${(riskMetrics.ruinProb ?? 0).toFixed(0)}%` : "N/D"]].map(([l, v]) => (
+                    <div key={l} className="metric"><span className="label" style={{ fontSize: 11, fontWeight: 600 }}>{l}</span><strong style={{ fontSize: 13 }}>{v}</strong></div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Wyckoff macro — todos los activos (solo intradía) */}
+              <div className="card">
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <p style={{ fontWeight: 700, fontSize: 13, margin: 0 }}>
+                    <TechTip term="Wyckoff">Wyckoff</TechTip> macro
+                  </p>
+                  <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 8, background: "rgba(99,102,241,0.15)", color: "#a5b4fc", fontWeight: 600 }}>4H · 1D</span>
+                </div>
+                {assets.map(a => {
+                  const w = wyckoffMap[a] as (WyckoffAnalysis & { tf4h?: WyckoffAnalysis | null; tf1d?: WyckoffAnalysis | null }) | undefined;
+                  if (!w) return <div key={a} style={{ fontSize: 10, color: "var(--muted)", padding: "3px 0" }}>{a}: sin datos</div>;
+                  const col = w.bias === "accumulation" ? "#10b981" : w.bias === "distribution" ? "#ef4444" : "#6b7280";
+                  const has4h = w.tf4h && w.tf4h.phase !== "unknown";
+                  const has1d = w.tf1d && w.tf1d.phase !== "unknown";
+                  return (
+                    <div key={a} style={{ padding: "6px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, minWidth: 56, color: "var(--text)" }}>{a}</span>
+                        <span style={{ fontSize: 10, color: col, fontWeight: 700 }}>
+                          {w.bias === "neutral" ? "Neutral" : w.bias === "accumulation" ? "Acum." : "Dist."}
+                        </span>
+                        {w.phase !== "unknown" && (
+                          <span style={{ fontSize: 11, padding: "1px 5px", borderRadius: 4, background: `${col}20`, color: col, fontWeight: 700 }}>F{w.phase}</span>
+                        )}
+                        <span style={{ fontSize: 10, color: "var(--muted)", marginLeft: "auto" }}>
+                          {w.events.slice(-1)[0]?.label ?? "–"}
+                        </span>
+                      </div>
+                      {/* Sub-row: 4H y 1D */}
+                      <div style={{ display: "flex", gap: 10, marginTop: 3, fontSize: 9.5, color: "var(--muted)" }}>
+                        <span style={{ color: has4h ? col : "var(--muted)" }}>
+                          4H: {has4h ? `${w.tf4h!.bias === "accumulation" ? "Acum" : w.tf4h!.bias === "distribution" ? "Dist" : "Neu"} F${w.tf4h!.phase}` : "sin datos"}
+                        </span>
+                        <span style={{ color: has1d ? col : "var(--muted)" }}>
+                          1D: {has1d ? `${w.tf1d!.bias === "accumulation" ? "Acum" : w.tf1d!.bias === "distribution" ? "Dist" : "Neu"} F${w.tf1d!.phase}` : "sin datos"}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="card" style={{ flex: 1 }}>
+                <p style={{ fontWeight: 700, marginBottom: 8, fontSize: 13 }}>Historial real</p>
+                <TradeHistory trades={realTrades} />
+              </div>
+              <div className="card" style={{ fontSize: 10.5, color: "var(--muted)", lineHeight: 1.8 }}>
+                <p style={{ fontWeight: 700, color: "var(--text)", marginBottom: 3 }}>Fuentes</p>
+                <p>Fuente: MT5 Bridge / PrimeXBT</p>
+                <p>Velas 1m/5m/15m/4H/1D en tiempo real</p>
+                <p>Wyckoff: velas 4H + 1D (contexto macro)</p>
+                <p>Trail: {(learning.atrTrailMult ?? 0.35).toFixed(2)} ATR</p>
+              </div>
+            </div>
+          </div>
+          </ErrorBoundary>
+        )}
+
+        {/* ━━━━━━━━━ BACKTEST ━━━━━━━━━ */}
+        {appTab === "historial" && (() => { try {
+          const totalPnl  = realTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
+          const wins      = realTrades.filter(t => t.pnl > 0);
+          const losses    = realTrades.filter(t => t.pnl <= 0);
+          const winRate   = realTrades.length > 0 ? wins.length / realTrades.length * 100 : 0;
+          const avgWin    = wins.length > 0 ? wins.reduce((s,t)=>s+(t.pnl??0),0) / wins.length : 0;
+          const avgLoss   = losses.length > 0 ? Math.abs(losses.reduce((s,t)=>s+(t.pnl??0),0) / losses.length) : 0;
+          const pf        = avgLoss > 0 ? (avgWin * wins.length) / (avgLoss * losses.length) : 0;
+          const digits    = (n:number, asset?:string) => {
+            const p = prices[asset ?? ""] ?? n;
+            return p >= 100 ? 2 : p >= 1 ? 4 : 5;
+          };
+          return (
+            <div style={{ maxWidth: 1000, display: "flex", flexDirection: "column", gap: 14 }}>
+
+              {/* ── Métricas resumen ── */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px,1fr))", gap: 10 }}>
+                {[
+                  { label: "Total trades", value: realTrades.length, color: "var(--text)", icon: "📊" },
+                  { label: "Win Rate", value: `${winRate.toFixed(1)}%`, color: winRate >= 50 ? "#10b981" : "#ef4444", icon: "🎯" },
+                  { label: "P&L neto", value: `${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`, color: totalPnl >= 0 ? "#10b981" : "#ef4444", icon: "💰" },
+                  { label: "Avg ganancia", value: `$${avgWin.toFixed(2)}`, color: "#10b981", icon: "📈" },
+                  { label: "Avg pérdida", value: `-$${avgLoss.toFixed(2)}`, color: "#ef4444", icon: "📉" },
+                  { label: "Profit factor", value: pf.toFixed(2), color: pf >= 1.5 ? "#10b981" : pf >= 1 ? "#f59e0b" : "#ef4444", icon: "⚖" },
+                ].map(({ label, value, color, icon }) => (
+                  <div key={label} className="card" style={{ textAlign: "center", padding: "12px 10px" }}>
+                    <div style={{ fontSize: 18, marginBottom: 4 }}>{icon}</div>
+                    <p style={{ fontSize: 10, color: "var(--muted)", marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.07em" }}>{label}</p>
+                    <p style={{ fontWeight: 800, fontSize: 18, color, fontFamily: "'JetBrains Mono',monospace" }}>{value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* ── Tabla de trades ── */}
+              <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>
+                  <h3 style={{ fontWeight: 800, fontSize: 14, margin: 0 }}>📒 Historial de trades</h3>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <span style={{ fontSize: 11, color: "var(--muted)" }}>{realTrades.length} operaciones</span>
+                    {realTrades.length > 0 && (
+                      <button onClick={() => {
+                        if (window.confirm("¿Borrar TODO el historial? Esta acción no se puede deshacer.")) {
+                          setRealTrades([]);
+                          pushToast("🗑 Historial borrado", "info");
+                        }
+                      }} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 5,
+                        border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.08)",
+                        color: "#ef4444", cursor: "pointer", fontWeight: 700 }}>
+                        🗑 Limpiar
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {realTrades.length === 0 ? (
+                  <div style={{ textAlign: "center", padding: "40px 20px", color: "var(--muted)" }}>
+                    <div style={{ fontSize: 32, marginBottom: 10 }}>📭</div>
+                    <p style={{ fontSize: 13 }}>Sin trades registrados aún.</p>
+                    <p style={{ fontSize: 11 }}>Los trades ejecutados vía MT5 aparecerán aquí automáticamente.</p>
+                  </div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: "rgba(255,255,255,0.03)" }}>
+                          {["#", "Activo", "Dir", "Modo", "Entry", "Exit", "P&L", "P&L%", "Resultado", "Fecha"].map(h => (
+                            <th key={h} style={{ padding: "9px 12px", textAlign: "left", fontSize: 10,
+                              textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--muted)",
+                              borderBottom: "1px solid var(--border)", whiteSpace: "nowrap" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[...realTrades].reverse().map((t, i) => {
+                          const isWin = t.pnl > 0;
+                          const pnlColor = isWin ? "#10b981" : "#ef4444";
+                          const dp = t.entry >= 100 ? 2 : t.entry >= 1 ? 4 : 5;
+                          return (
+                            <tr key={t.id ?? i} style={{ borderBottom: "1px solid rgba(255,255,255,0.03)",
+                              background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.01)" }}>
+                              <td style={{ padding: "8px 12px", color: "var(--muted)", fontSize: 11 }}>{realTrades.length - i}</td>
+                              <td style={{ padding: "8px 12px", fontWeight: 700 }}>{t.asset}</td>
+                              <td style={{ padding: "8px 12px" }}>
+                                <span style={{ fontSize: 12, fontWeight: 800,
+                                  color: t.direction === "LONG" ? "#10b981" : "#ef4444" }}>
+                                  {t.direction === "LONG" ? "🐂 L" : "🐻 S"}
+                                </span>
+                              </td>
+                              <td style={{ padding: "8px 12px", fontSize: 10, color: "var(--muted)",
+                                background: t.mode === "scalping" ? "rgba(99,102,241,0.06)" : "transparent" }}>
+                                {t.mode === "scalping" ? "⚡ Scalp" : "📊 Intradía"}
+                              </td>
+                              <td style={{ padding: "8px 12px", fontFamily: "'JetBrains Mono',monospace", fontSize: 11 }}>
+                                {(t.entry ?? 0).toFixed(dp)}
+                              </td>
+                              <td style={{ padding: "8px 12px", fontFamily: "'JetBrains Mono',monospace", fontSize: 11 }}>
+                                {(t.exit ?? 0).toFixed(dp)}
+                              </td>
+                              <td style={{ padding: "8px 12px", fontWeight: 800, color: pnlColor,
+                                fontFamily: "'JetBrains Mono',monospace" }}>
+                                {(t.pnl ?? 0) >= 0 ? "+" : ""}${(t.pnl ?? 0).toFixed(2)}
+                              </td>
+                              <td style={{ padding: "8px 12px", fontWeight: 700, color: pnlColor }}>
+                                {(t.pnlPct ?? 0) >= 0 ? "+" : ""}{(t.pnlPct ?? 0).toFixed(2)}%
+                              </td>
+                              <td style={{ padding: "8px 12px" }}>
+                                <span style={{ padding: "2px 8px", borderRadius: 10, fontSize: 10, fontWeight: 800,
+                                  background: isWin ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
+                                  color: pnlColor }}>
+                                  {isWin ? "✅ WIN" : "❌ LOSS"}
+                                </span>
+                              </td>
+                              <td style={{ padding: "8px 12px", fontSize: 10, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                                {t.closedAt ? new Date(t.closedAt).toLocaleDateString("es", { day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit" }) : "–"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Panel Correlaciones de Trades ── */}
+              {Object.keys(tradeCorrelations).length > 0 && (() => { try {
+                const corrList = Object.values(tradeCorrelations).sort((a,b) => b.riskScore - a.riskScore);
+                return (
+                  <div className="card">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                      <h3 style={{ fontWeight: 800, fontSize: 13, margin: 0 }}>🔗 Correlación de Trades</h3>
+                      {portfolioRisk && (
+                        <span style={{ fontSize: 11, padding: "3px 10px", borderRadius: 8, fontWeight: 700,
+                          background: portfolioRisk.currentRiskScore > 0.6 ? "rgba(239,68,68,0.12)"
+                                    : portfolioRisk.currentRiskScore > 0.3 ? "rgba(245,158,11,0.1)"
+                                    : "rgba(16,185,129,0.1)",
+                          color: portfolioRisk.currentRiskScore > 0.6 ? "#ef4444"
+                               : portfolioRisk.currentRiskScore > 0.3 ? "#f59e0b" : "#10b981" }}>
+                          Riesgo portfolio: {(portfolioRisk.currentRiskScore * 100).toFixed(0)}%
+                        </span>
+                      )}
+                    </div>
+
+                    {portfolioRisk?.groqInsights && (
+                      <p style={{ fontSize: 11, color: "#a5b4fc", marginBottom: 12, padding: "7px 10px",
+                        background: "rgba(99,102,241,0.08)", borderRadius: 8, borderLeft: "2px solid #6366f1" }}>
+                        🤖 {portfolioRisk.groqInsights}
+                      </p>
+                    )}
+
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                        <thead>
+                          <tr style={{ background: "rgba(255,255,255,0.03)" }}>
+                            {["Par", "Precio ρ", "P&L ρ", "Ambos ✅", "Ambos ❌", "Divergen", "Riesgo", "Acción"].map(h => (
+                              <th key={h} style={{ padding: "8px 12px", textAlign: "left", fontSize: 10,
+                                textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--muted)",
+                                borderBottom: "1px solid var(--border)", whiteSpace: "nowrap" }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {corrList.map(c => {
+                            const [a, b] = c.pairKey.split("_");
+                            const isBlacklisted = groqCalib?.corrBlacklist?.includes(c.pairKey) ||
+                                                  groqCalib?.corrBlacklist?.includes(`${b}_${a}`);
+                            const riskColor = c.riskScore > 0.6 ? "#ef4444"
+                                            : c.riskScore > 0.3 ? "#f59e0b" : "#10b981";
+                            return (
+                              <tr key={c.pairKey} style={{ borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
+                                <td style={{ padding: "8px 12px", fontWeight: 800 }}>
+                                  {a.replace("USD","")}↔{b.replace("USD","")}
+                                  {isBlacklisted && <span style={{ marginLeft: 5, fontSize: 9, padding: "1px 5px",
+                                    borderRadius: 4, background: "rgba(239,68,68,0.15)", color: "#ef4444", fontWeight: 700 }}>
+                                    🚫 Groq
+                                  </span>}
+                                </td>
+                                <td style={{ padding: "8px 12px", fontFamily: "'JetBrains Mono',monospace",
+                                  color: Math.abs(c.pricePearson) > 0.7 ? "#f59e0b" : "var(--text)" }}>
+                                  {c.pricePearson.toFixed(2)}
+                                </td>
+                                <td style={{ padding: "8px 12px", fontFamily: "'JetBrains Mono',monospace",
+                                  color: c.pnlPearson > 0.5 ? "#f59e0b" : c.pnlPearson < -0.3 ? "#10b981" : "var(--text)" }}>
+                                  {c.pnlPearson.toFixed(2)}
+                                </td>
+                                <td style={{ padding: "8px 12px", color: "#10b981", fontWeight: 700 }}>
+                                  {(c.bothWin * 100).toFixed(0)}%
+                                </td>
+                                <td style={{ padding: "8px 12px", color: c.bothLose > 0.3 ? "#ef4444" : "var(--text)", fontWeight: c.bothLose > 0.3 ? 800 : 400 }}>
+                                  {(c.bothLose * 100).toFixed(0)}%
+                                </td>
+                                <td style={{ padding: "8px 12px", color: c.diverge > 0.5 ? "#10b981" : "var(--text)", fontWeight: c.diverge > 0.5 ? 700 : 400 }}>
+                                  {(c.diverge * 100).toFixed(0)}%
+                                </td>
+                                <td style={{ padding: "8px 12px" }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                    <div style={{ width: 50, height: 5, borderRadius: 3, background: "rgba(255,255,255,0.06)", overflow: "hidden" }}>
+                                      <div style={{ width: `${c.riskScore * 100}%`, height: "100%",
+                                        background: `linear-gradient(90deg, #10b981, ${riskColor})`, borderRadius: 3 }} />
+                                    </div>
+                                    <span style={{ color: riskColor, fontWeight: 700, fontSize: 11 }}>
+                                      {(c.riskScore * 100).toFixed(0)}
+                                    </span>
+                                  </div>
+                                </td>
+                                <td style={{ padding: "8px 12px" }}>
+                                  {c.bothLose > 0.35
+                                    ? <span style={{ fontSize: 10, color: "#ef4444", fontWeight: 700 }}>⚠ Reducir size</span>
+                                    : c.diverge > 0.5
+                                      ? <span style={{ fontSize: 10, color: "#10b981", fontWeight: 700 }}>✅ Buena combo</span>
+                                      : <span style={{ fontSize: 10, color: "var(--muted)" }}>Normal</span>
+                                  }
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {portfolioRisk && (portfolioRisk.bestCombo.length > 0 || portfolioRisk.worstCombo.length > 0) && (
+                      <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+                        {portfolioRisk.bestCombo.length > 0 && (
+                          <div style={{ flex: 1, padding: "8px 12px", borderRadius: 8,
+                            background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.2)" }}>
+                            <p style={{ fontSize: 10, color: "var(--muted)", marginBottom: 3 }}>✅ MEJOR COMBO (más descorrelacionados)</p>
+                            <p style={{ fontWeight: 800, fontSize: 13, color: "#10b981" }}>
+                              {portfolioRisk.bestCombo.map(a => a.replace("USD","")).join(" + ")}
+                            </p>
+                          </div>
+                        )}
+                        {portfolioRisk.worstCombo.length > 0 && (
+                          <div style={{ flex: 1, padding: "8px 12px", borderRadius: 8,
+                            background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                            <p style={{ fontSize: 10, color: "var(--muted)", marginBottom: 3 }}>⚠ MAYOR RIESGO (más correlacionados)</p>
+                            <p style={{ fontWeight: 800, fontSize: 13, color: "#ef4444" }}>
+                              {portfolioRisk.worstCombo.map(a => a.replace("USD","")).join(" + ")}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              } catch(e) { return null; }})()}
+
+              {/* ── Curva de equity ── */}
+              {realTrades.length >= 2 && (() => {
+                const equityCurve = realTrades.reduce((acc: number[], t) => {
+                  acc.push((acc[acc.length-1] ?? balance) + (t.pnl ?? 0));
+                  return acc;
+                }, [balance]);
+                const minEq = Math.min(...equityCurve);
+                const maxEq = Math.max(...equityCurve);
+                const rangeEq = maxEq - minEq || 1;
+                const W = 900, H = 120, PL = 55, PR = 10, PT = 10, PB = 22;
+                const pxEq = (i: number) => PL + (i / (equityCurve.length - 1)) * (W - PL - PR);
+                const pyEq = (v: number) => PT + ((maxEq - v) / rangeEq) * (H - PT - PB);
+                const pathD = equityCurve.map((v,i) => `${i===0?"M":"L"} ${pxEq(i)} ${pyEq(v)}`).join(" ");
+                const lastEq = equityCurve[equityCurve.length - 1];
+                const isUp   = lastEq >= balance;
+                return (
+                  <div className="card">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <h3 style={{ fontWeight: 800, fontSize: 13, margin: 0 }}>📈 Curva de equity</h3>
+                      <span style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 800,
+                        color: isUp ? "#10b981" : "#ef4444", fontSize: 14 }}>
+                        ${lastEq.toFixed(2)}
+                      </span>
+                    </div>
+                    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:"100%", height: H }}>
+                      <rect width={W} height={H} fill="transparent" />
+                      {[0,1,2,3].map(i => {
+                        const v = minEq + (rangeEq/3)*i;
+                        return <g key={i}>
+                          <line x1={PL} x2={W-PR} y1={pyEq(v)} y2={pyEq(v)} stroke="rgba(255,255,255,0.05)" strokeWidth={1} />
+                          <text x={PL-4} y={pyEq(v)+3} textAnchor="end" fontSize={9} fill="rgba(148,163,184,0.5)" fontFamily="monospace">${v.toFixed(0)}</text>
+                        </g>;
+                      })}
+                      {/* Línea base (capital inicial) */}
+                      <line x1={PL} x2={W-PR} y1={pyEq(balance)} y2={pyEq(balance)}
+                        stroke="rgba(255,255,255,0.12)" strokeWidth={1} strokeDasharray="4,3" />
+                      {/* Área bajo curva */}
+                      <path d={`${pathD} L ${pxEq(equityCurve.length-1)} ${pyEq(minEq)} L ${pxEq(0)} ${pyEq(minEq)} Z`}
+                        fill={`rgba(${isUp?"16,185,129":"239,68,68"},0.08)`} />
+                      {/* Línea de equity */}
+                      <path d={pathD} fill="none"
+                        stroke={isUp ? "#10b981" : "#ef4444"} strokeWidth={2} strokeLinejoin="round" />
+                      {/* Punto actual */}
+                      <circle cx={pxEq(equityCurve.length-1)} cy={pyEq(lastEq)} r={4}
+                        fill={isUp ? "#10b981" : "#ef4444"} />
+                    </svg>
+                  </div>
+                );
+              })()}
+            </div>
+          );
+        } catch(e) { console.error("[render historial]", e); return null; }})()}
+
+        {/* ━━━━━━━━━ APRENDIZAJE ━━━━━━━━━ */}
+        {appTab === "aprendizaje" && (
+          <div style={{ maxWidth: 860, display: "flex", flexDirection: "column", gap: 14 }}>
+
+            {/* ── Parámetros adaptativos editables ── */}
+            <div className="card">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                <p style={{ fontWeight: 700, fontSize: 14, margin: 0 }}>🧠 Parámetros adaptativos</p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>
+                    Se ajustan automáticamente con cada trade. Podés editarlos manualmente.
+                  </span>
+                  <button onClick={() => { setLearning(initialLearning); learningRef.current = initialLearning; pushToast("🧠 Aprendizaje reseteado", "info"); }}
+                    style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.08)", color: "#ef4444", fontSize: 11, cursor: "pointer", fontWeight: 700 }}>
+                    Reset
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                {/* riskScale */}
+                {[
+                  { key: "riskScale",       label: "Escala de riesgo",     min: 0.3,  max: 2.5,  step: 0.05, desc: "Multiplica el riesgo por operación. >1 = más agresivo, <1 = defensivo." },
+                  { key: "confidenceFloor", label: "Piso de confianza (%)", min: 40,   max: 80,   step: 1,    desc: "Confianza mínima para abrir una operación. Más alto = menos trades." },
+                  { key: "scalpingTpAtr",   label: "TP Scalping (×ATR)",   min: 0.8,  max: 3.5,  step: 0.05, desc: "Distancia del take profit en scalping medida en ATR." },
+                  { key: "intradayTpAtr",   label: "TP Intradía (×ATR)",   min: 1.5,  max: 8.0,  step: 0.1,  desc: "Distancia del take profit en intradía medida en ATR." },
+                  { key: "atrTrailMult",    label: "Buffer trailing (×ATR)", min: 0.1, max: 1.2,  step: 0.05, desc: "Buffer debajo del swing para el trailing stop. Más chico = stop más ajustado." },
+                ].map(({ key, label, min, max, step, desc }) => {
+                  const val = learning[key as keyof LearningModel] as number;
+                  const pct = ((val - min) / (max - min)) * 100;
+                  return (
+                    <div key={key} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.07)" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                        <span style={{ fontWeight: 700, fontSize: 12 }}>{label}</span>
+                        <span style={{ fontWeight: 800, fontSize: 15, color: "#6366f1" }}>{(val ?? 0).toFixed(2)}</span>
+                      </div>
+                      <input type="range" min={min} max={max} step={step} value={val}
+                        onChange={e => {
+                          const next = { ...learning, [key]: Number(e.target.value) };
+                          setLearning(next); learningRef.current = next;
+                        }}
+                        style={{ width: "100%", accentColor: "#6366f1", margin: "6px 0" }}
+                      />
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", marginBottom: 6 }}>
+                        <span>{min}</span><span>{max}</span>
+                      </div>
+                      <p style={{ fontSize: 10, color: "var(--muted)", margin: 0, lineHeight: 1.4 }}>{desc}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* ── Cómo aprende el bot ── */}
+            <div className="card">
+              <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>📐 Lógica de aprendizaje automático</p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 12 }}>
+                {[
+                  { param: "Escala de riesgo (Kelly)", formula: `Half-Kelly: f* = (p×b−q)/b`, range: "0.7 – 1.5", effect: "Calibrado con WR y RR reales de los últimos 20 trades. Con 0 trades: 0.5×." },
+                  { param: "Piso confianza",   formula: `52 + (0.5−WR₂₀)×20 + RR_adj`, range: "46 – 60",  effect: "Rolling 20 trades. WR 60% → floor 46. WR 40% → floor 54. Groq Coach ajusta fino." },
+                  { param: "TP Scalping",      formula: `1.8 + RR_avg×0.3`,         range: "1.8 – 3.5", effect: "Basado en RR realizado de últimos 20 trades. Se amplía cuando el mercado entrega más." },
+                  { param: "TP Intradía",      formula: `3.5 + RR_avg×0.8`,         range: "3.5 – 8.0", effect: "Con RR promedio 2.0: TP=5.1×ATR. Expansión de volatilidad amplía targets." },
+                  { param: "Trailing (Chandelier)", formula: `peak − ATR × mult(progreso)`, range: "0.2 – 0.6", effect: "ATR dinámico: se ajusta cuando la posición progresa. >75% del TP → mult 0.6×." },
+                  { param: "Regime Filter",    formula: "ATR(14)/ATR(50)",           range: ">1.3 / <0.7", effect: "Expansión (>1.3): solo momentum. Rango (<0.7): mean reversion. Normal: ambas." },
+                  { param: "Multi-factor Vote", formula: "EMA + ROC + vol ATR + OBV", range: "0–4 votos", effect: "3/4 votos para abrir en tendencia. 2/4 en régimen desconocido. Evita señales falsas." },
+                  { param: "Groq Coach",       formula: "post-trade async calibration", range: "±1.5 floor", effect: "Analiza el trade cerrado y ajusta confidenceFloor/riskScale/TP automáticamente." },
+                ].map(({ param, formula, range, effect }) => (
+                  <div key={param} style={{ background: "rgba(255,255,255,0.02)", borderRadius: 8, padding: "10px 12px", border: "1px solid rgba(255,255,255,0.06)" }}>
+                    <div style={{ fontWeight: 700, color: "#a5b4fc", fontSize: 12, marginBottom: 4 }}>{param}</div>
+                    <div style={{ fontFamily: "monospace", fontSize: 11, color: "#6366f1", marginBottom: 4 }}>{formula}</div>
+                    <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 3 }}>Rango: {range}</div>
+                    <div style={{ fontSize: 11, color: "var(--text)" }}>{effect}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Hour Edge ── */}
+            {Object.keys(learning.hourEdge).length > 0 && (
+              <div className="card">
+                <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>🕐 Rendimiento por hora (Hour Edge)</p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {Array.from({ length: 24 }, (_, h) => {
+                    const edge = learning.hourEdge[h];
+                    if (edge === undefined) return (
+                      <div key={h} style={{ width: 44, textAlign: "center", padding: "6px 4px", borderRadius: 6, background: "rgba(255,255,255,0.03)", fontSize: 10, color: "var(--muted)" }}>
+                        <div style={{ fontWeight: 700 }}>{h}h</div>
+                        <div>—</div>
+                      </div>
+                    );
+                    return (
+                      <div key={h} style={{ width: 44, textAlign: "center", padding: "6px 4px", borderRadius: 6,
+                        background: edge > 0 ? "rgba(16,185,129,0.12)" : "rgba(239,68,68,0.1)",
+                        border: `1px solid ${edge > 0 ? "rgba(16,185,129,0.25)" : "rgba(239,68,68,0.2)"}`,
+                        fontSize: 10 }}>
+                        <div style={{ fontWeight: 700, color: "var(--muted)" }}>{h}h</div>
+                        <div style={{ fontWeight: 800, color: edge > 0 ? "#10b981" : "#ef4444" }}>{edge > 0 ? "+" : ""}{(edge ?? 0).toFixed(1)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 10, margin: "10px 0 0" }}>
+                  P&L promedio por hora de cierre. Verde = hora rentable históricamente. El bot no bloquea horas malas, solo te informa.
+                </p>
+              </div>
+            )}
+
+            {/* ── Rendimiento por activo + modo ── */}
+            {Object.keys(learning.assetEdge ?? {}).length > 0 && (
+              <div className="card">
+                <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>📊 Performance por activo y modo</p>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr>
+                        {["Activo", "Modo", "Trades", "Win %", "P&L", "Mejor hora", "Confianza adj."].map(h => (
+                          <th key={h} style={{ textAlign: "left", padding: "6px 10px", fontSize: 10, textTransform: "uppercase",
+                            letterSpacing: "0.08em", color: "var(--muted)", borderBottom: "1px solid var(--border)" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(learning.assetEdge ?? {}).sort((a, b) => (b[1]?.pnl ?? 0) - (a[1]?.pnl ?? 0)).map(([key, ae]) => {
+                        if (!ae) return null;
+                        const [asset, mode] = key.split("_");
+                        const wr = ae.total > 0 ? (ae.wins / ae.total * 100) : 0;
+                        const bestH = Object.entries(ae.byHour).sort((a, b) => b[1] - a[1])[0];
+                        const aeBonus = ae.total >= 5 ? clamp((wr / 100 - 0.5) * 20, -8, 8) : 0;
+                        return (
+                          <tr key={key}>
+                            <td style={{ padding: "7px 10px", fontWeight: 700 }}>{asset}</td>
+                            <td style={{ padding: "7px 10px", color: mode === "scalping" ? "#818cf8" : "#f59e0b" }}>{mode}</td>
+                            <td style={{ padding: "7px 10px" }}>{ae.total}</td>
+                            <td style={{ padding: "7px 10px", color: wr >= 50 ? "#10b981" : "#ef4444", fontWeight: 700 }}>{(wr ?? 0).toFixed(1)}%</td>
+                            <td style={{ padding: "7px 10px", color: ae.pnl >= 0 ? "#10b981" : "#ef4444", fontWeight: 700 }}>
+                              {ae.pnl >= 0 ? "+" : ""}{(ae.pnl ?? 0).toFixed(2)}
+                            </td>
+                            <td style={{ padding: "7px 10px", color: "var(--muted)" }}>
+                              {bestH ? `${bestH[0]}h (+${bestH[1].toFixed(2)})` : "—"}
+                            </td>
+                            <td style={{ padding: "7px 10px", color: aeBonus > 0 ? "#10b981" : aeBonus < 0 ? "#ef4444" : "var(--muted)", fontWeight: 700 }}>
+                              {ae.total >= 5 ? `${aeBonus >= 0 ? "+" : ""}${(aeBonus ?? 0).toFixed(1)} pts` : "< 5 trades"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
+                  Con ≥5 trades por activo+modo, el bot ajusta la confianza de señales futuras (±8 puntos).
+                </p>
+              </div>
+            )}
+
+            {/* ── Diagnóstico de por qué no abre trades ── */}
+            <div className="card">
+              <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>🔍 Diagnóstico en tiempo real</p>
+
+              {/* Señal en vivo para debug */}
+              {(() => { try {
+                const dbgAsset = asset;
+                const dbgSeries = series[dbgAsset] ?? [];
+                const dbgCandles = candles[dbgAsset] ?? [];
+                const dbgC5m = candles5m[dbgAsset] ?? [];
+                const dbgC15m = candles15m[dbgAsset] ?? [];
+                const dbgPrice = prices[dbgAsset] ?? 0;
+                const lrn = learningRef.current ?? { confidenceFloor: 52, atrTrailMult: 0.35, scalpingTpAtr: 2.4, intradayTpAtr: 5.0, riskScale: 1, hourEdge: {}, assetEdge: {} };
+                const floor = tab === "scalping"
+                  ? Math.max(46, lrn.confidenceFloor - 4)
+                  : Math.max(50, lrn.confidenceFloor);
+                return (
+                  <div style={{ marginBottom: 12, padding: "10px 12px", borderRadius: 8,
+                    background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)",
+                    fontSize: 11, fontFamily: "'JetBrains Mono',monospace" }}>
+                    <div style={{ fontWeight: 700, color: "#a5b4fc", marginBottom: 6, fontFamily: "inherit", display: "flex", justifyContent: "space-between" }}>
+                      <span>📡 Datos bridge — {dbgAsset}</span>
+                      {lastSignal && lastSignal.asset === dbgAsset && lastSignal.reversalScore >= 3 && (
+                        <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 700,
+                          background: lastSignal.reversalScore >= 7 ? "rgba(16,185,129,0.2)" : lastSignal.reversalScore >= 5 ? "rgba(245,158,11,0.2)" : "rgba(99,102,241,0.15)",
+                          color: lastSignal.reversalScore >= 7 ? "#10b981" : lastSignal.reversalScore >= 5 ? "#f59e0b" : "#a5b4fc" }}>
+                          🔄 Giro {lastSignal.reversalScore}/9
+                        </span>
+                      )}
+                    </div>
+                    {[
+                      ["Precio",       dbgPrice > 0 ? `${(dbgPrice ?? 0).toFixed(2)} ✓` : "⚠ SIN PRECIO",  dbgPrice > 0],
+                      ["Series 1m",    `${dbgSeries.length} velas ${dbgSeries.length >= 20 ? "✓" : "⚠ pocas (<20)"}`, dbgSeries.length >= 20],
+                      ["Candles 1m",   `${dbgCandles.length} velas ${dbgCandles.length >= 5 ? "✓" : "⚠ pocas"}`, dbgCandles.length >= 5],
+                      ["Candles 5m",   `${dbgC5m.length} velas ${dbgC5m.length >= 13 ? "✓" : "⚠ /candles_mtf falla?"}`, dbgC5m.length >= 13],
+                      ["Candles 15m",  `${dbgC15m.length} velas ${dbgC15m.length >= 21 ? "✓" : "⚠ /candles_mtf falla?"}`, dbgC15m.length >= 21],
+                      ["liveReady",    liveReady ? "true ✓" : "false ⚠ — sincronizá bridge", liveReady],
+                      ["Sesión",       (() => { const p = getSessionProfile(); return `${p.emoji} ${p.name} | SL×${p.slMult} TP2×${p.tp2Mult}`; })(), true],
+                      ["Piso conf",    `${floor}%`, true],
+                      ["Spread",       `${getSpreadPct(dbgAsset, volumeShock).toFixed(3)}%`, true],
+                    ].map(([k, v, ok]) => (
+                      <div key={k as string} style={{ display: "flex", justifyContent: "space-between",
+                        padding: "3px 0", borderBottom: "1px solid rgba(255,255,255,0.05)",
+                        color: ok ? "var(--text-2)" : "#f59e0b" }}>
+                        <span style={{ color: "var(--muted)" }}>{k as string}</span>
+                        <span style={{ fontWeight: ok ? 500 : 700 }}>{v as string}</span>
+                      </div>
+                    ))}
+                    {lastSignal && lastSignal.asset === dbgAsset && (() => {
+                      const rr = Math.abs(lastSignal.tp2 - lastSignal.entry) /
+                                 Math.max(Math.abs(lastSignal.entry - lastSignal.stopLoss), 1e-9);
+                      return (
+                        <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+                          <div style={{ color: "#a5b4fc", fontWeight: 700, marginBottom: 4 }}>Última señal generada:</div>
+                          {[
+                            ["Confianza", `${(lastSignal.confidence ?? 0).toFixed(1)}% (piso ${floor}%)`, (lastSignal.confidence ?? 0) >= floor],
+                            ["RR",        `${(rr ?? 0).toFixed(2)} (mín 1.5)`, rr >= 1.5],
+                            ["Dirección", lastSignal.direction, true],
+                            ["ATR",       (lastSignal.atr ?? 0).toFixed(4), (lastSignal.atr ?? 0) > 0],
+                          ].map(([k, v, ok]) => (
+                            <div key={k as string} style={{ display: "flex", justifyContent: "space-between",
+                              padding: "2px 0", color: ok ? "#10b981" : "#ef4444", fontWeight: 700 }}>
+                              <span style={{ color: "var(--muted)", fontWeight: 400 }}>{k as string}</span>
+                              <span>{v as string}</span>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    
+              })()}
+                  </div>
+                );
+              } catch(e) { return <span style={{color:"#ef4444",fontSize:10}}>⚠ error render diag: {String(e)}</span>; } })()}
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 12 }}>
+                {[
+                  { label: "Win rate actual",      value: `${(stats.winRate ?? 0).toFixed(1)}%`,                                      ok: stats.winRate >= 40 },
+                  { label: "Trades reales",         value: String(realTrades.filter(t => t.source === "real").length),          ok: realTrades.length >= 5 },
+                  { label: "Piso confianza actual", value: `${(learning.confidenceFloor ?? 52).toFixed(0)}%`,                          ok: learning.confidenceFloor <= 58 },
+                  { label: "Escala riesgo",         value: `${(learning.riskScale ?? 1).toFixed(2)}×`,                               ok: learning.riskScale >= 0.8 },
+                  { label: "Equity usado",          value: mt5Equity !== null ? `$${(mt5Equity ?? 0).toFixed(2)} (MT5 real)` : `$${(equity ?? 0).toFixed(2)} (simulado)`, ok: mt5Equity !== null },
+                  { label: "Margen libre",          value: mt5FreeMargin !== null ? `$${(mt5FreeMargin ?? 0).toFixed(2)}` : "N/D",    ok: mt5FreeMargin === null || mt5FreeMargin > 0 },
+                  { label: "Bridge conectado",      value: mt5Status === "connected" ? "✅ Sí" : "❌ No",                     ok: mt5Status === "connected" },
+                  { label: "IA Groq",               value: aiStatus === "ok" ? `✅ ${groqModel}` : aiStatus,                  ok: aiStatus === "ok" },
+                  { label: "Groq rpm (último min)", value: `${groqRateInfo.calls}/${GROQ_MAX_RPM}${groqRateInfo.paused ? " ⏸ PAUSADO" : ""}`, ok: !groqRateInfo.paused && groqRateInfo.calls < GROQ_MAX_RPM - 5 },
+                  { label: "Circuit breaker",      value: circuitOpen ? `🔴 ACTIVO — P&L diario: $${(dailyPnlRef.current.pnl ?? 0).toFixed(2)}` : `✅ OK — P&L hoy: $${(dailyPnlRef.current.pnl ?? 0).toFixed(2)}`, ok: !circuitOpen },
+                ].map(({ label, value, ok }) => (
+                  <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "7px 10px", borderRadius: 7,
+                    background: ok ? "rgba(16,185,129,0.06)" : "rgba(239,68,68,0.06)",
+                    border: `1px solid ${ok ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)"}` }}>
+                    <span style={{ color: "var(--muted)" }}>{label}</span>
+                    <span style={{ fontWeight: 700, color: ok ? "#10b981" : "#ef4444" }}>{value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+          </div>
+        )}
+
+
+        {/* ━━━━━━━━━ ACTIVOS IA ━━━━━━━━━ */}
+        {appTab === "activos" && (() => {
+          const sessionName = getSessionProfile().name.split(" ")[0];
+          const hourUTC = new Date().getUTCHours();
+          const openSymbols = openPositions.map(p => p.signal.asset);
+
+          // Agrupar activos por categoría
+          const CAT_LABELS: Record<AssetCategory, string> = {
+            crypto:"⬡ Crypto", metals:"◈ Metales", forex_major:"₣ Forex Majors",
+            forex_minor:"₣ Forex Minors", indices:"▲ Índices", energy:"⛽ Energía",
+            stocks:"📈 Acciones", commodities:"🌾 Commodities", other:"Otros",
+          };
+          const CAT_ORDER: AssetCategory[] = ["crypto","metals","forex_major","forex_minor","indices","energy","stocks","commodities","other"];
+
+          const grouped: Record<string, Asset[]> = {};
+          assets.forEach(a => {
+            const cat = getAssetCategory(a);
+            if (!grouped[cat]) grouped[cat] = [];
+            grouped[cat].push(a);
+          });
+
+          // Ordenar dentro de cada grupo por opportunityScore
+          Object.keys(grouped).forEach(cat => {
+            grouped[cat].sort((a,b) =>
+              calcOpportunityScore(b, assetIntelligence[b], sessionName, hourUTC, openSymbols, correlationMatrix)
+              - calcOpportunityScore(a, assetIntelligence[a], sessionName, hourUTC, openSymbols, correlationMatrix)
+            );
+          });
+
+          // Matriz de correlación — top activos con datos
+          const assetsWithData = assets.filter(a => assetIntelligence[a] || correlationMatrix[a]);
+          const corrAssets = assetsWithData.slice(0, 12); // max 12 para la tabla
+
+          return (
+            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+
+              {/* ── Header info ── */}
+              <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                <div className="card" style={{ flex:"1 1 200px", minWidth:180, padding:"10px 14px" }}>
+                  <p style={{ fontSize:11, color:"var(--muted)", marginBottom:4 }}>Activos monitoreados</p>
+                  <p style={{ fontSize:22, fontWeight:800, color:"#6366f1" }}>{assets.length}</p>
+                  <p style={{ fontSize:10, color:"var(--muted)" }}>en {Object.keys(grouped).length} categorías</p>
+                </div>
+                <div className="card" style={{ flex:"1 1 200px", minWidth:180, padding:"10px 14px" }}>
+                  <p style={{ fontSize:11, color:"var(--muted)", marginBottom:4 }}>Con inteligencia aprendida</p>
+                  <p style={{ fontSize:22, fontWeight:800, color:"#10b981" }}>{Object.keys(assetIntelligence).length}</p>
+                  <p style={{ fontSize:10, color:"var(--muted)" }}>de {assets.length} activos totales</p>
+                </div>
+                <div className="card" style={{ flex:"1 1 200px", minWidth:180, padding:"10px 14px" }}>
+                  <p style={{ fontSize:11, color:"var(--muted)", marginBottom:4 }}>Correlaciones calculadas</p>
+                  <p style={{ fontSize:22, fontWeight:800, color:"#f59e0b" }}>{Object.keys(correlationMatrix).length}</p>
+                  <p style={{ fontSize:10, color:"var(--muted)" }}>pares analizados (200 velas 1m)</p>
+                </div>
+                <div className="card" style={{ flex:"1 1 200px", minWidth:180, padding:"10px 14px" }}>
+                  <p style={{ fontSize:11, color:"var(--muted)", marginBottom:4 }}>Sesión activa</p>
+                  <p style={{ fontSize:18, fontWeight:800, color:"#a5b4fc" }}>{getSessionProfile().emoji} {sessionName}</p>
+                  <p style={{ fontSize:10, color:"var(--muted)" }}>hora UTC: {hourUTC}:00</p>
+                </div>
+              </div>
+
+              {/* ── Activos por categoría con score ── */}
+              {CAT_ORDER.filter(cat => grouped[cat]?.length > 0).map(cat => (
+                <div key={cat} className="card">
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+                    <h3 style={{ fontWeight:800, fontSize:13, margin:0 }}>{CAT_LABELS[cat]}</h3>
+                    <span style={{ fontSize:10, color:"var(--muted)", background:"rgba(255,255,255,0.05)", padding:"1px 6px", borderRadius:8 }}>
+                      {grouped[cat].length} activos
+                    </span>
+                  </div>
+                  <div style={{ overflowX:"auto" }}>
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11.5 }}>
+                      <thead>
+                        <tr>
+                          {["Activo","Score","Trades","WR%","P&L","Mejor sesión","Mejor modo","Mejor hora","Precio","Spread"].map(h => (
+                            <th key={h} style={{ textAlign:"left", padding:"4px 8px", fontSize:10, textTransform:"uppercase",
+                              letterSpacing:"0.07em", color:"var(--muted)", borderBottom:"1px solid var(--border)", whiteSpace:"nowrap" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {grouped[cat].map(a => {
+                          const intel = assetIntelligence[a];
+                          const score = calcOpportunityScore(a, intel, sessionName, hourUTC, openSymbols, correlationMatrix);
+                          const scoreColor = score >= 70 ? "#10b981" : score >= 50 ? "#f59e0b" : "#ef4444";
+                          const scoreBg    = score >= 70 ? "rgba(16,185,129,0.12)" : score >= 50 ? "rgba(245,158,11,0.10)" : "rgba(239,68,68,0.08)";
+                          const price = prices[a] ?? 0;
+                          const cat2 = getAssetCatalog(a);
+                          const dp = cat2.digits > 3 ? 4 : 2;
+                          return (
+                            <tr key={a} style={{ borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
+                              <td style={{ padding:"6px 8px" }}>
+                                <div style={{ fontWeight:700 }}>{a}</div>
+                                <div style={{ fontSize:10, color:"var(--muted)" }}>{getAssetLabel(a).replace(a+" ","").replace(a,"")}</div>
+                              </td>
+                              <td style={{ padding:"6px 8px" }}>
+                                <span style={{ fontWeight:800, fontSize:13, padding:"2px 8px", borderRadius:8, background:scoreBg, color:scoreColor }}>
+                                  {(score ?? 0).toFixed(0)}
+                                </span>
+                              </td>
+                              <td style={{ padding:"6px 8px", color: intel ? "var(--text)" : "var(--muted)" }}>
+                                {intel ? intel.totalTrades : "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", fontWeight:700, color: intel ? (intel.winRate >= 0.5 ? "#10b981" : intel.winRate >= 0.4 ? "#f59e0b" : "#ef4444") : "var(--muted)" }}>
+                                {intel ? (intel.winRate*100).toFixed(1)+"%" : "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", fontWeight:700, color: intel ? (intel.avgPnl >= 0 ? "#10b981" : "#ef4444") : "var(--muted)" }}>
+                                {intel ? (intel.avgPnl >= 0 ? "+" : "") + (intel.avgPnl ?? 0).toFixed(2) : "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", color:"#a5b4fc" }}>
+                                {intel?.bestSession ?? "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", color: intel?.bestMode === "scalping" ? "#818cf8" : "#f59e0b" }}>
+                                {intel?.bestMode ?? "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", color:"var(--muted)" }}>
+                                {intel ? `${intel.bestHourUTC}:00 UTC` : "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", fontFamily:"'JetBrains Mono',monospace", fontSize:11 }}>
+                                {price > 0 ? (price ?? 0).toFixed(dp) : "–"}
+                              </td>
+                              <td style={{ padding:"6px 8px", fontSize:10, color:"var(--muted)" }}>
+                                {(cat2.spreadPct*100).toFixed(2)}%
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
+
+              {/* ── Matriz de correlación ── */}
+              {corrAssets.length >= 2 && (
+                <div className="card">
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+                    <h3 style={{ fontWeight:800, fontSize:13, margin:0 }}>🔗 Matriz de correlación dinámica</h3>
+                    <span style={{ fontSize:10, color:"var(--muted)" }}>Pearson · últimas 200 velas 1m</span>
+                  </div>
+                  <p style={{ fontSize:11, color:"var(--muted)", marginBottom:10 }}>
+                    Verde = descorrelacionado (diversifica cartera) · Rojo = correlacionado (riesgo concentrado) · El bot bloquea posiciones con r ≥ 0.75 en misma dirección.
+                  </p>
+                  <div style={{ overflowX:"auto" }}>
+                    <table style={{ borderCollapse:"collapse", fontSize:10 }}>
+                      <thead>
+                        <tr>
+                          <th style={{ padding:"4px 8px", textAlign:"left", fontSize:10, color:"var(--muted)", borderBottom:"1px solid var(--border)" }}>–</th>
+                          {corrAssets.map(a => (
+                            <th key={a} style={{ padding:"4px 6px", fontSize:9.5, fontWeight:700, color:"var(--muted)", borderBottom:"1px solid var(--border)", whiteSpace:"nowrap" }}>{a}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {corrAssets.map(rowA => (
+                          <tr key={rowA}>
+                            <td style={{ padding:"4px 8px", fontWeight:700, fontSize:10, color:"var(--text)", whiteSpace:"nowrap", borderRight:"1px solid var(--border)" }}>{rowA}</td>
+                            {corrAssets.map(colA => {
+                              const corr = rowA === colA ? 1 : (correlationMatrix[rowA]?.[colA] ?? null);
+                              if (corr === null) return (
+                                <td key={colA} style={{ padding:"4px 6px", textAlign:"center", color:"var(--muted)", fontSize:9 }}>–</td>
+                              );
+                              const abs = Math.abs(corr);
+                              const isDiag = rowA === colA;
+                              // Color: verde=descorrelacionado, rojo=muy correlacionado
+                              const r = isDiag ? 40 : Math.round(abs * 200);
+                              const g = isDiag ? 150 : Math.round((1 - abs) * 150);
+                              const bg = isDiag ? "rgba(99,102,241,0.2)" : `rgba(${r},${g},60,${abs*0.4+0.08})`;
+                              const textColor = isDiag ? "#a5b4fc" : abs >= 0.75 ? "#ef4444" : abs >= 0.5 ? "#f59e0b" : "#10b981";
+                              return (
+                                <td key={colA} style={{ padding:"4px 6px", textAlign:"center", background:bg, fontWeight: abs >= 0.6 ? 800 : 500, color: textColor, fontSize:10, borderRadius:3 }}>
+                                  {isDiag ? "◆" : (corr ?? 0).toFixed(2)}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {corrAssets.length === 0 && (
+                    <p style={{ fontSize:11, color:"var(--muted)", textAlign:"center", padding:20 }}>
+                      La correlación se calcula automáticamente con las velas 1m del bridge. Sincronicé primero.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* ── Intelligence por activo (detalle expandido) ── */}
+              {Object.keys(assetIntelligence).length > 0 && (
+                <div className="card">
+                  <h3 style={{ fontWeight:800, fontSize:13, marginBottom:12 }}>🧠 Inteligencia aprendida por activo</h3>
+                  {Object.entries(assetIntelligence).sort((a,b) => (b[1].profitFactor - a[1].profitFactor)).map(([sym, intel]) => (
+                    <div key={sym} style={{ marginBottom:14, padding:"10px 12px", borderRadius:10,
+                      background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.07)" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
+                        <span style={{ fontWeight:800, fontSize:14 }}>{sym}</span>
+                        <span style={{ fontSize:10, padding:"2px 7px", borderRadius:8, fontWeight:700,
+                          background:"rgba(99,102,241,0.15)", color:"#a5b4fc" }}>
+                          {CAT_LABELS[intel.category] ?? intel.category}
+                        </span>
+                        <span style={{ fontSize:10, color:"var(--muted)", marginLeft:"auto" }}>
+                          {intel.totalTrades} trades · actualizado {new Date(intel.lastUpdated).toLocaleTimeString("es",{hour:"2-digit",minute:"2-digit"})}
+                        </span>
+                      </div>
+                      {/* Métricas clave */}
+                      <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:6, marginBottom:8 }}>
+                        {[
+                          { label:"Win Rate", value:(intel.winRate*100).toFixed(1)+"%", color: intel.winRate >= 0.5 ? "#10b981" : "#ef4444" },
+                          { label:"PF",       value:(intel.profitFactor ?? 0).toFixed(2), color: intel.profitFactor >= 1.5 ? "#10b981" : "#f59e0b" },
+                          { label:"Avg PnL",  value:(intel.avgPnl >= 0 ? "+" : "")+(intel.avgPnl ?? 0).toFixed(2), color: intel.avgPnl >= 0 ? "#10b981" : "#ef4444" },
+                          { label:"Mejor sesión", value:intel.bestSession, color:"#a5b4fc" },
+                          { label:"Mejor hora", value:`${intel.bestHourUTC}:00 UTC`, color:"var(--muted)" },
+                        ].map(({label,value,color}) => (
+                          <div key={label} style={{ textAlign:"center", padding:"5px", background:"rgba(255,255,255,0.03)", borderRadius:6 }}>
+                            <div style={{ fontSize:9, color:"var(--muted)", textTransform:"uppercase", marginBottom:2 }}>{label}</div>
+                            <div style={{ fontWeight:800, fontSize:12, color }}>{value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {/* Stats por sesión */}
+                      {Object.keys(intel.sessionStats).length > 0 && (
+                        <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:6 }}>
+                          {Object.entries(intel.sessionStats).map(([sess, st]) => (
+                            <div key={sess} style={{ fontSize:10, padding:"3px 8px", borderRadius:6,
+                              background: (st.wins/Math.max(st.trades,1)) >= 0.5 ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.08)",
+                              border: "1px solid rgba(255,255,255,0.07)" }}>
+                              <span style={{ color:"var(--muted)" }}>{sess}: </span>
+                              <span style={{ fontWeight:700, color: (st.wins/Math.max(st.trades,1)) >= 0.5 ? "#10b981" : "#ef4444" }}>
+                                {st.trades}t · {((st.wins/Math.max(st.trades,1))*100).toFixed(0)}%WR · {st.pnl >= 0 ? "+" : ""}{(st.pnl ?? 0).toFixed(1)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {/* Correlaciones más fuertes */}
+                      {Object.keys(intel.correlations).length > 0 && (
+                        <div style={{ fontSize:10, color:"var(--muted)" }}>
+                          <span style={{ fontWeight:700 }}>Correlaciones: </span>
+                          {Object.entries(intel.correlations)
+                            .sort((a,b) => Math.abs(b[1]) - Math.abs(a[1]))
+                            .slice(0, 5)
+                            .map(([sym2, corr]) => (
+                              <span key={sym2} style={{ marginLeft:8,
+                                color: Math.abs(corr) >= 0.75 ? "#ef4444" : Math.abs(corr) >= 0.5 ? "#f59e0b" : "#10b981",
+                                fontWeight: Math.abs(corr) >= 0.75 ? 800 : 500 }}>
+                                {sym2}: {corr >= 0 ? "+" : ""}{co(rr ?? 0).toFixed(2)}
+                              </span>
+                            ))
+                          }
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* ── Estado: sin datos aún ── */}
+              {Object.keys(assetIntelligence).length === 0 && (
+                <div className="card" style={{ textAlign:"center", padding:40, color:"var(--muted)" }}>
+                  <p style={{ fontSize:24, marginBottom:12 }}>🧠</p>
+                  <p style={{ fontWeight:700, fontSize:15, color:"var(--text)", marginBottom:8 }}>Sin inteligencia aprendida aún</p>
+                  <p style={{ fontSize:12 }}>
+                    El sistema aprende automáticamente con cada trade real cerrado.<br/>
+                    Los scores de oportunidad se activan desde el primer trade.
+                  </p>
+                </div>
+              )}
+
+            </div>
+          );
+        })()}
+        {/* ━━━━━━━━━ CONFIGURACION ━━━━━━━━━ */}
+        {appTab === "configuracion" && (
+          <div style={{ maxWidth: 580, display: "flex", flexDirection: "column", gap: 14 }}>
+            <div className="card">
+              <p style={{ fontWeight: 700, marginBottom: 12, fontSize: 14 }}>🤖 IA Groq — Trader experto</p>
+              <div style={{ padding: "8px 12px", borderRadius: 8, background: "rgba(99,102,241,0.07)", border: "1px solid rgba(99,102,241,0.18)", fontSize: 11, color: "#a5b4fc", marginBottom: 12, lineHeight: 1.7 }}>
+                La IA actúa como trader institucional con MSc en Estadística. Evalúa Wyckoff, divergencias RSI, Vol Delta, Bollinger Squeeze y confluencia MTF antes de aprobar cada señal.
+              </div>
+              <p className="label" style={{ marginBottom: 5 }}>API Key Groq</p>
+              <input className="inp" type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="gsk_..." />
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                <button className={usingGroq ? "btn-primary" : "btn-secondary"} onClick={() => setUsingGroq(p => !p)} style={{ flex: 1 }}>{usingGroq ? "✅ Groq activo" : "○ Motor local"}</button>
+                <button className="btn-secondary" onClick={testAiConnection} disabled={!apiKey.trim() || !usingGroq}>Probar</button>
+              </div>
+              <div style={{ marginTop: 10 }}><AiBadge status={aiStatus} onTest={testAiConnection} latency={aiLatency} /></div>
+            </div>
+            <div className="card">
+              <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>📡 Fuentes de datos</p>
+              <div style={{ fontSize: 12, lineHeight: 2.1 }}>
+              <p><strong>Todos los activos</strong> → MT5 Bridge / PrimeXBT (spread real, sin API externas)</p>
+              <p>BTCUSDT · ETHUSDT · XAUTUSDT (oro) · PAXGUSDT (plata)</p>
+              <p style={{fontSize:10,color:"var(--muted)"}}>Sin API key requerida · Promise.all paralelo · reverse() aplicado</p>
+                <p><strong>Estado:</strong> <span style={{ color: liveReady ? "#10b981" : "#ef4444" }}>{feedStatus}</span></p>
+              </div>
+              <button className="btn-secondary" style={{ marginTop: 10 }} onClick={() => void syncRealData()} disabled={isSyncing}>{isSyncing ? "⟳ Sincronizando..." : "↻ Sync ahora"}</button>
+            </div>
+            <div className="card">
+              <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>🧠 Modelo adaptativo</p>
+              <div style={{ padding: "8px 12px", borderRadius: 8, background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.18)", fontSize: 11, color: "#6ee7b7", marginBottom: 10 }}>
+                El modelo solo aprende de trades reales. Backtest completamente aislado.
+              </div>
+              <p style={{ fontSize: 11, color: "var(--muted)" }}>Trades reales: <strong style={{ color: "var(--text)" }}>{realTrades.length}</strong> · Backtest (aislado): <strong style={{ color: "#a5b4fc" }}>{backtestTrades.length}</strong></p>
+            </div>
+            <div className="card">
+              <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>🔄 Auto-scan</p>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10 }}>
+                <button onClick={() => setAutoScan(p => !p)} style={{ padding: "5px 14px", borderRadius: 18, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 11, background: autoScan ? "#10b981" : "rgba(255,255,255,0.07)", color: autoScan ? "#fff" : "var(--muted)" }}>{autoScan ? "● ON" : "○ OFF"}</button>
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>{autoScan ? `cada ${scanEverySec}s` : "inactivo"}</span>
+              </div>
+              <input className="inp" type="number" min={8} max={300} value={scanEverySec} onChange={e => setScanEverySec(Number(e.target.value))} style={{ width: 110 }} />
+              <div style={{ marginTop: 14, padding: "10px 12px", borderRadius: 8,
+                background: sessionOverride ? "rgba(245,158,11,0.08)" : "rgba(255,255,255,0.03)",
+                border: `1px solid ${sessionOverride ? "rgba(245,158,11,0.3)" : "rgba(255,255,255,0.07)"}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 12, color: sessionOverride ? "#f59e0b" : "var(--text)" }}>
+                      🗽 Override sesión NY
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                      {sessionOverride
+                        ? "⚠ Scalping habilitado en cualquier horario — spread puede ser alto"
+                        : "Scalping solo en sesión NY (13:00–20:59 UTC) — menor spread"}
+                    </div>
+                  </div>
+                  <button onClick={() => setSessionOverride(p => !p)}
+                    style={{ padding: "5px 12px", borderRadius: 16, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 11,
+                      background: sessionOverride ? "#f59e0b" : "rgba(255,255,255,0.07)",
+                      color: sessionOverride ? "#fff" : "var(--muted)" }}>
+                    {sessionOverride ? "● ON" : "○ OFF"}
+                  </button>
+                </div>
+              </div>
+            </div>
+            {/* ── Panel MT5 Bridge ─────────────────────────────────────────────── */}
+            <div className="card" style={{ border: mt5Status === "connected" ? "1px solid rgba(16,185,129,0.35)" : "1px solid var(--border)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <p style={{ fontWeight: 700, fontSize: 14 }}>📡 MT5 Bridge — PrimeXBT</p>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 10, fontWeight: 700,
+                    background: mt5Status === "connected" ? "rgba(16,185,129,0.15)" : mt5Status === "error" ? "rgba(239,68,68,0.15)" : mt5Status === "testing" ? "rgba(245,158,11,0.15)" : "rgba(107,114,128,0.1)",
+                    color: mt5Status === "connected" ? "#10b981" : mt5Status === "error" ? "#ef4444" : mt5Status === "testing" ? "#f59e0b" : "#6b7280" }}>
+                    {mt5Status === "connected" ? "● CONECTADO" : mt5Status === "error" ? "● ERROR" : mt5Status === "testing" ? "● PROBANDO…" : "○ DESCONECTADO"}
+                  </span>
+                </div>
+              </div>
+
+              {/* Info de cuenta si está conectado */}
+              {mt5Status === "connected" && mt5Account && (
+                <div style={{ padding: "8px 12px", borderRadius: 8, background: "rgba(16,185,129,0.07)", border: "1px solid rgba(16,185,129,0.2)", marginBottom: 12, fontSize: 12 }}>
+                  <span style={{ color: "var(--muted)" }}>Cuenta: </span><strong style={{ color: "#10b981" }}>{mt5Account}</strong>
+                  {mt5Balance !== null && <><span style={{ color: "var(--muted)", marginLeft: 12 }}>Balance: </span><strong>${(mt5Balance ?? 0).toFixed(2)}</strong></>}
+                  <span style={{ marginLeft: 12, fontSize: 11, color: "#10b981" }}>DEMO ✓</span>
+                </div>
+              )}
+
+              <p className="label" style={{ marginBottom: 5 }}>URL del bridge (local)</p>
+              <input className="inp" type="text" value={mt5Url} onChange={e => setMt5Url(e.target.value)}
+                placeholder="http://localhost:8000" style={{ marginBottom: 10 }} />
+
+              <div style={{ padding: "8px 12px", borderRadius: 8, background: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.18)", fontSize: 11, color: "#fcd34d", marginBottom: 12, lineHeight: 1.7 }}>
+                <strong>⚠ Requisitos:</strong> MT5 instalado · PrimeXBT demo logueado · bridge.py corriendo en tu PC
+              </div>
+
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button className="btn-secondary" onClick={testMT5Bridge} disabled={mt5Status === "testing"} style={{ flex: 1 }}>
+                  {mt5Status === "testing" ? "⟳ Probando…" : "🔌 Probar conexión"}
+                </button>
+                <button
+                  className="btn-secondary"
+                  onClick={syncMT5State}
+                  disabled={mt5Status !== "connected"}
+                  style={{ flex: 1 }}>
+                  ↻ Sync posiciones
+                </button>
+                <button
+                  onClick={() => setMt5Enabled(p => !p)}
+                  disabled={mt5Status !== "connected"}
+                  style={{ flex: 1, padding: "9px 15px", borderRadius: 10, border: "none", cursor: mt5Status === "connected" ? "pointer" : "not-allowed",
+                    fontWeight: 700, fontSize: 13, opacity: mt5Status === "connected" ? 1 : 0.4,
+                    background: mt5Enabled ? "linear-gradient(135deg,#10b981,#059669)" : "rgba(255,255,255,0.06)",
+                    color: mt5Enabled ? "#fff" : "var(--muted)" }}>
+                  {mt5Enabled ? "🟢 Ejecución MT5 activa" : "○ Ejecución MT5 inactiva"}
+                </button>
+              </div>
+
+              {mt5Enabled && (
+                <div style={{ marginTop: 10, padding: "8px 12px", borderRadius: 8, background: "rgba(16,185,129,0.08)", fontSize: 11, color: "#6ee7b7", lineHeight: 1.8 }}>
+                  ✅ Cada señal aprobada por la IA se enviará automáticamente a MT5 PrimeXBT.<br/>
+                  Los cierres (TP/SL/manual) también se ejecutarán en MT5.
+                </div>
+              )}
+            </div>
+
+            <div className="card">
+              <p style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>🔁 Reiniciar</p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+
+                {/* ── Reiniciar aprendizaje ── */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderRadius: 8, background: "rgba(245,158,11,0.07)", border: "1px solid rgba(245,158,11,0.2)" }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: "#f59e0b" }}>🧠 Reiniciar aprendizaje</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                      Resetea riskScale, confidenceFloor, TP/SL dinámicos y hourEdge.<br/>
+                      <span style={{ color: "#6366f1" }}>No toca trades ni balance.</span>
+                    </div>
+                  </div>
+                  <button onClick={() => {
+                    if (!confirm("¿Reiniciar el modelo de aprendizaje? Se resetean los parámetros adaptativos (riskScale, TP/SL, confidenceFloor). Los trades y el balance no se tocan.")) return;
+                    setLearning(initialLearning);
+                    learningRef.current = initialLearning;
+                    pushToast("🧠 Aprendizaje reiniciado — parámetros adaptativos reseteados.", "info");
+                  }} style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(245,158,11,0.4)", background: "rgba(245,158,11,0.12)", color: "#f59e0b", fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}>
+                    Reiniciar
+                  </button>
+                </div>
+
+                {/* ── Cerrar posiciones abiertas (solo internas) ── */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderRadius: 8, background: "rgba(99,102,241,0.07)", border: "1px solid rgba(99,102,241,0.2)" }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: "#a5b4fc" }}>📋 Limpiar estado interno</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                      Cierra las posiciones del motor interno y limpia historial.<br/>
+                      <span style={{ color: "#f59e0b" }}>No afecta posiciones reales en MT5.</span>
+                    </div>
+                  </div>
+                  <button onClick={() => {
+                    if (!confirm("¿Limpiar el estado interno? Se borran posiciones del motor y el historial de trades. Las posiciones reales en MT5 NO se tocan.")) return;
+                    setOpenPositions([]);
+                    setRealTrades([]);
+                    setBacktestTrades([]);
+                    setLastBacktest(null);
+                    setLastSignal(null);
+                    pushToast("📋 Estado interno limpiado — posiciones MT5 intactas.", "info");
+                  }} style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(99,102,241,0.3)", background: "rgba(99,102,241,0.1)", color: "#a5b4fc", fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}>
+                    Limpiar
+                  </button>
+                </div>
+
+                {/* ── Backtest ── */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderRadius: 8, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)" }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: "var(--muted)" }}>📊 Limpiar backtest</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>Borra los resultados del último backtest.</div>
+                  </div>
+                  <button onClick={() => {
+                    setBacktestTrades([]);
+                    setLastBacktest(null);
+                    pushToast("Backtest borrado.", "info");
+                  }} style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)", color: "var(--muted)", fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}>
+                    Limpiar
+                  </button>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ━━━━━━━━━ QUANT — Motor Black-Scholes × Wyckoff ━━━━━━━━━ */}
+        {appTab === "quant" && (
+          <ErrorBoundary key="quant-tab">
+            <QuantEngine
+              prices={prices}
+              candles={candles}
+              candles5m={candles5m}
+              candles15m={candles15m}
+              candles4h={candles4h}
+              candles1d={candles1d}
+              liveReady={liveReady}
+              mt5Enabled={mt5Enabled}
+              mt5Status={mt5Status}
+              mt5Url={mt5Url}
+              balance={balance}
+              equity={equity}
+              riskPct={riskPct}
+              assets={assets}
+              onOpenMT5={async (asset, dir, sl, tp, size) => {
+                if (!mt5Enabled || mt5Status !== "connected") return false;
+                try {
+                  const r = await fetch(`${mt5Url}/open`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      asset, direction: dir,
+                      sl, tp, size,
+                      mode: "quant_bs",
+                      magic: 20250001,
+                    }),
+                    signal: AbortSignal.timeout(8000),
+                  });
+                  const d = await r.json() as { ok: boolean; ticket?: number; error?: string };
+                  if (!d.ok) { pushToast(`⚠ MT5 no abrió ${asset}: ${d.error ?? ""}`, "error"); return false; }
+                  return true;
+                } catch (e) { pushToast(`⚠ MT5 timeout ${asset}`, "error"); return false; }
+              }}
+              onCloseMT5={async (asset, dir) => {
+                if (!mt5Enabled || mt5Status !== "connected") return true;  // cerrar local igual
+                try {
+                  const r = await fetch(`${mt5Url}/close`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ asset, direction: dir }),
+                    signal: AbortSignal.timeout(8000),
+                  });
+                  const d = await r.json() as { ok: boolean };
+                  return d.ok;
+                } catch { return false; }
+              }}
+              pushToast={pushToast}
+              onGreeksUpdate={setQeGreeksMap}
+            />
+          </ErrorBoundary>
+        )}
+
+      </main>
+    </div>
+  );
+}
+
+function AppWithBoundary() {
+  const [k, setK] = React.useState(0);
+  return (
+    <ErrorBoundary key={k} onReset={() => setK(n => n+1)}>
+      <App />
+    </ErrorBoundary>
+  );
+}
+// Named export para compatibilidad con main.tsx
+export { App };
+export default AppWithBoundary;
